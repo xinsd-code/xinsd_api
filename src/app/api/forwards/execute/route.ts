@@ -1,8 +1,7 @@
 import { NextResponse } from 'next/server';
 import { ApiForwardConfig, MockAPI, ApiClientConfig, KeyValuePair } from '@/lib/types';
-import { getApiForwardById } from '@/lib/db';
-import { getMockById } from '@/lib/db';
-import { getApiClientById } from '@/lib/db';
+import { applyOrchestration } from '@/lib/orchestration-engine';
+import { getMockById, getApiClientById } from '@/lib/db';
 import { resolveVariables } from '@/lib/utils';
 import { getGroupVariables } from '@/lib/db';
 
@@ -121,16 +120,37 @@ export async function POST(request: Request) {
       responseData = await response.text();
     }
 
-    // 8. Return result back to our platform UI
+    // 8. Apply orchestration if configured
+    let finalData = responseData;
+    if (forwardConfig.orchestration && forwardConfig.orchestration.nodes && forwardConfig.orchestration.nodes.length > 0) {
+      try {
+        finalData = applyOrchestration(responseData, forwardConfig.orchestration, runParams);
+      } catch (orchError: any) {
+        return NextResponse.json({
+          _meta: {
+            forwardMethod: targetMethod,
+            forwardUrl: urlObj.toString(),
+            forwardHeaders: Object.fromEntries(headers.entries()),
+          },
+          status: responseStatus,
+          headers: responseHeaders,
+          data: responseData,
+          _orchestrationError: orchError.message,
+        });
+      }
+    }
+
+    // 9. Return result back to our platform UI
     return NextResponse.json({
       _meta: {
         forwardMethod: targetMethod,
         forwardUrl: urlObj.toString(),
         forwardHeaders: Object.fromEntries(headers.entries()),
+        orchestrationApplied: !!(forwardConfig.orchestration?.nodes?.length),
       },
       status: responseStatus,
       headers: responseHeaders,
-      data: responseData
+      data: finalData
     });
 
   } catch (error: any) {

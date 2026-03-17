@@ -1,8 +1,9 @@
 'use client';
 
 import { useState, useEffect, useMemo } from 'react';
-import { ApiForwardConfig, CustomParamDef, ParamBinding, MockAPI, ApiClientConfig, KeyValuePair } from '@/lib/types';
+import { ApiForwardConfig, CustomParamDef, ParamBinding, MockAPI, ApiClientConfig, KeyValuePair, OrchestrationConfig } from '@/lib/types';
 import JsonEditor from '@/components/JsonEditor';
+import OrchestrationEditor from '@/components/OrchestrationEditor';
 import styles from './page.module.css';
 
 function CustomParamEditor({
@@ -35,11 +36,7 @@ function CustomParamEditor({
         </button>
       </div>
       
-      {params.length === 0 ? (
-        <div className="emptyCenter" style={{ minHeight: '120px', border: '1px dashed var(--color-border)', borderRadius: 'var(--radius-md)' }}>
-          <div>暂无自定义参数，点击右上角添加</div>
-        </div>
-      ) : (
+      {params.length > 0 && (
         <div>
           {params.map((p, i) => (
             <div key={i} style={{ display: 'flex', gap: '12px', marginBottom: '12px', alignItems: 'center' }}>
@@ -112,11 +109,7 @@ function ParamBindingEditor({
   };
 
   if (targetParams.length === 0) {
-    return (
-      <div className="emptyCenter" style={{ minHeight: '100px', border: '1px dashed var(--color-border)', borderRadius: 'var(--radius-md)', marginTop: '20px' }}>
-        <div>选中的底层接口暂无入参需要映射</div>
-      </div>
-    );
+    return null;
   }
 
   return (
@@ -199,6 +192,7 @@ export default function ApiForwardPage() {
   const [targetType, setTargetType] = useState<'mock' | 'api-client'>('api-client');
   const [targetId, setTargetId] = useState<string>('');
   const [paramBindings, setParamBindings] = useState<ParamBinding[]>([]);
+  const [orchestration, setOrchestration] = useState<OrchestrationConfig>({ nodes: [] });
 
   const [viewMode, setViewMode] = useState<'design' | 'run'>('design');
   const [runParams, setRunParams] = useState<Record<string, string>>({});
@@ -252,6 +246,7 @@ export default function ApiForwardPage() {
       setTargetType(activeForward.targetType);
       setTargetId(activeForward.targetId);
       setParamBindings(activeForward.paramBindings || []);
+      setOrchestration(activeForward.orchestration || { nodes: [] });
       setViewMode('design');
       setRunResult(null);
       setRunStatus(null);
@@ -275,13 +270,14 @@ export default function ApiForwardPage() {
     setTargetType('api-client');
     setTargetId('');
     setParamBindings([]);
+    setOrchestration({ nodes: [] });
     setViewMode('design');
     setRunResult(null);
   };
 
   const handleSave = async () => {
     const payload = {
-      name, apiGroup, description, method, path, customParams, targetType, targetId, paramBindings
+      name, apiGroup, description, method, path, customParams, targetType, targetId, paramBindings, orchestration
     };
 
     try {
@@ -345,6 +341,7 @@ export default function ApiForwardPage() {
       targetType,
       targetId,
       paramBindings,
+      orchestration,
       createdAt: '',
       updatedAt: ''
     };
@@ -466,6 +463,23 @@ export default function ApiForwardPage() {
               />
             )}
           </div>
+
+          {/* Advanced Orchestration */}
+          <OrchestrationEditor
+            config={orchestration}
+            onChange={setOrchestration}
+            onSave={handleSave}
+            forwardConfig={{
+              method,
+              path,
+              targetType,
+              targetId,
+              paramBindings,
+              customParams,
+            }}
+            customParams={customParams}
+            runParams={runParams}
+          />
         </div>
       </div>
     );

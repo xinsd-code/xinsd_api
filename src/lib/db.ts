@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import path from 'path';
-import { MockAPI, CreateMockAPI, UpdateMockAPI, ApiClientConfig, CreateApiClientConfig, UpdateApiClientConfig, KeyValuePair, ApiForwardConfig, CreateApiForwardConfig, UpdateApiForwardConfig } from './types';
+import { MockAPI, CreateMockAPI, UpdateMockAPI, ApiClientConfig, CreateApiClientConfig, UpdateApiClientConfig, KeyValuePair, ApiForwardConfig, CreateApiForwardConfig, UpdateApiForwardConfig, OrchestrationConfig } from './types';
 import { nanoid } from 'nanoid';
 
 const DB_PATH = path.join(process.cwd(), 'mock-data.db');
@@ -95,10 +95,20 @@ function initializeDb(database: Database.Database) {
       target_type TEXT NOT NULL,
       target_id TEXT NOT NULL,
       param_bindings TEXT DEFAULT '[]',
+      orchestration TEXT DEFAULT '{}',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
   `);
+
+  // Migration for api_forwards orchestration column
+  try {
+    database.exec(`ALTER TABLE api_forwards ADD COLUMN orchestration TEXT DEFAULT '{}';`);
+  } catch (err: any) {
+    if (!err.message.includes('duplicate column name')) {
+      console.error('Migration error api_forwards:', err);
+    }
+  }
 }
 
 function rowToMockAPI(row: Record<string, unknown>): MockAPI {
@@ -329,6 +339,14 @@ export function saveGroupVariables(name: string, variables: KeyValuePair[]): voi
 // API Forwards
 
 function rowToApiForwardConfig(row: Record<string, unknown>): ApiForwardConfig {
+  let orchestration: OrchestrationConfig | undefined;
+  try {
+    const parsed = JSON.parse((row.orchestration as string) || '{}');
+    if (parsed && parsed.nodes && Array.isArray(parsed.nodes) && parsed.nodes.length > 0) {
+      orchestration = parsed;
+    }
+  } catch { /* ignore parse errors */ }
+
   return {
     id: row.id as string,
     name: row.name as string,
@@ -340,6 +358,7 @@ function rowToApiForwardConfig(row: Record<string, unknown>): ApiForwardConfig {
     targetType: row.target_type as 'mock' | 'api-client',
     targetId: row.target_id as string,
     paramBindings: JSON.parse(row.param_bindings as string),
+    orchestration,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
   };
@@ -364,8 +383,8 @@ export function createApiForward(data: CreateApiForwardConfig): ApiForwardConfig
 
   db.prepare(`
     INSERT INTO api_forwards (id, name, api_group, description, method, path,
-      custom_params, target_type, target_id, param_bindings, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      custom_params, target_type, target_id, param_bindings, orchestration, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     data.name,
@@ -377,6 +396,7 @@ export function createApiForward(data: CreateApiForwardConfig): ApiForwardConfig
     data.targetType,
     data.targetId,
     JSON.stringify(data.paramBindings || []),
+    JSON.stringify(data.orchestration || {}),
     now,
     now,
   );
@@ -402,6 +422,7 @@ export function updateApiForward(id: string, data: UpdateApiForwardConfig): ApiF
   if (data.targetType !== undefined) { updates.push('target_type = ?'); values.push(data.targetType); }
   if (data.targetId !== undefined) { updates.push('target_id = ?'); values.push(data.targetId); }
   if (data.paramBindings !== undefined) { updates.push('param_bindings = ?'); values.push(JSON.stringify(data.paramBindings)); }
+  if (data.orchestration !== undefined) { updates.push('orchestration = ?'); values.push(JSON.stringify(data.orchestration)); }
 
   updates.push('updated_at = ?');
   values.push(now);

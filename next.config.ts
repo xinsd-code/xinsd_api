@@ -1,6 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  outputFileTracingRoot: process.cwd(),
   // better-sqlite3 is a native module, exclude from webpack bundling
   serverExternalPackages: ['better-sqlite3'],
 };

@@ -77,9 +77,51 @@ export interface ApiForwardConfig {
   
   paramBindings: ParamBinding[];  // Map how customParams/static values bind to target endpoint params
 
+  orchestration?: OrchestrationConfig;  // Advanced response orchestration
+
   createdAt: string;
   updatedAt: string;
 }
 
 export type CreateApiForwardConfig = Omit<ApiForwardConfig, 'id' | 'createdAt' | 'updatedAt'>;
 export type UpdateApiForwardConfig = Partial<CreateApiForwardConfig>;
+
+// --- Orchestration Types ---
+
+export interface FilterNodeConfig {
+  mode: 'include' | 'exclude';
+  fields: string[];
+}
+
+export interface MapNodeConfig {
+  mappings: { from: string; to: string }[];
+}
+
+export interface ComputeNodeConfig {
+  computations: {
+    field: string;           // New field name
+    expression: string;      // Expression like "fieldA + fieldB", "fieldA * 2", or a static value
+    sourceField?: string;    // Optional: copy from existing field
+  }[];
+}
+
+export interface SortNodeConfig {
+  arrayPath: string;         // JSONPath to the array, e.g. "data.items" or "" for root
+  sortField: string;         // Field to sort by
+  order: 'asc' | 'desc';
+  limit?: number;            // Optional limit on the number of results
+}
+
+export type OrchestrationNodeType = 'filter' | 'map' | 'compute' | 'sort';
+
+export interface OrchestrationNode {
+  id: string;
+  type: OrchestrationNodeType;
+  label?: string;            // Optional custom label
+  config: FilterNodeConfig | MapNodeConfig | ComputeNodeConfig | SortNodeConfig;
+  order: number;
+}
+
+export interface OrchestrationConfig {
+  nodes: OrchestrationNode[];
+}
