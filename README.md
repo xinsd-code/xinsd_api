@@ -96,6 +96,24 @@ Mock 接口定义 -> API 接入调试 -> API 转发绑定 -> 高级编排处理 
 - API Forward 的参数映射面板
 - 高级编排工作流画布与底部输出预览区
 
+## 📸 截图素材清单
+
+如果你准备把项目作为作品集或 GitHub 展示页，建议优先补这几张图：
+
+| 截图名称 | 建议页面 | 建议展示内容 |
+| --- | --- | --- |
+| `mock-dashboard.png` | Mock 首页 | 统计卡片、搜索筛选、接口列表标签 |
+| `mock-editor.png` | Mock 编辑弹窗 | 基本信息 + 请求配置 + 响应配置 |
+| `api-client-runner.png` | API Client | 左侧收藏夹、顶部请求栏、右侧响应结果 |
+| `api-forward-binding.png` | API Forward | 自定义入参、目标接口绑定、参数映射 |
+| `orchestration-workspace.png` | 高级编排工作区 | 节点画布、右侧节点配置、底部数据预览 |
+| `orchestration-output.png` | 编排调试结果 | 输入数据 / 配置 JSON / 输出结果的联动展示 |
+
+建议截图规范：
+- 统一使用浅色主题与相同浏览器窗口尺寸。
+- 截图时尽量保留完整 Header 和 Sidebar，强化“工作台”感。
+- 示例数据尽量使用真实字段名，例如 `userId`、`price`、`status`、`data[].age`。
+
 ## 🛠 技术栈
 
 ### Frontend
@@ -141,6 +159,78 @@ npm start
 - `/src/components`: 可复用的 UI 组件（编辑器、弹窗等）
 - `/src/lib`: 核心逻辑（数据库操作、变量解析、匹配引擎）
 - `/.agents/skills`: 本地设计/开发辅助技能配置
+
+## 🧪 编排示例
+
+下面是一段适合放在 README 或演示文档里的高级编排示例配置：
+
+```json
+{
+  "nodes": [
+    {
+      "id": "filter_1",
+      "type": "filter",
+      "label": "保留核心字段",
+      "order": 0,
+      "config": {
+        "mode": "include",
+        "fields": [
+          "code",
+          "message",
+          "data[].id",
+          "data[].name",
+          "data[].age",
+          "data[].price"
+        ]
+      }
+    },
+    {
+      "id": "map_1",
+      "type": "map",
+      "label": "字段重命名",
+      "order": 1,
+      "config": {
+        "mappings": [
+          { "from": "data[].age", "to": "userAge" },
+          { "from": "data[].price", "to": "amount" }
+        ]
+      }
+    },
+    {
+      "id": "compute_1",
+      "type": "compute",
+      "label": "新增折后价",
+      "order": 2,
+      "config": {
+        "computations": [
+          {
+            "field": "data[].discountPrice",
+            "expression": "{{amount}} * 0.9"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sort_1",
+      "type": "sort",
+      "label": "按年龄排序并限制数量",
+      "order": 3,
+      "config": {
+        "arrayPath": "data",
+        "sortField": "userAge",
+        "order": "desc",
+        "limit": 10
+      }
+    }
+  ]
+}
+```
+
+这个示例展示了完整链路：
+- 先保留需要的字段
+- 再重命名数组对象属性
+- 然后用表达式生成计算字段
+- 最后对结果集排序并限制输出条数
 
 ## 📝 许可证
 MIT License
