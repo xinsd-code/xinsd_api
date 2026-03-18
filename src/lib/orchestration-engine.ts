@@ -6,6 +6,10 @@ interface PathSegment {
   wildcard: boolean;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function parsePath(path: string): PathSegment[] {
   return path
     .split('.')
@@ -28,9 +32,9 @@ function parsePath(path: string): PathSegment[] {
     });
 }
 
-function cloneContainer(value: any): any {
+function cloneContainer(value: unknown): Record<string, unknown> | unknown[] {
   if (Array.isArray(value)) return [...value];
-  if (typeof value === 'object' && value !== null) return { ...value };
+  if (isRecord(value)) return { ...value };
   return {};
 }
 
@@ -38,7 +42,7 @@ function normalizeArrayPath(path: string): string {
   return path.replace(/\[\]/g, '').trim().replace(/\.$/, '');
 }
 
-function resolveRefValue(ref: string, data: Record<string, any>, context?: Record<string, any>): any {
+function resolveRefValue(ref: string, data: Record<string, unknown>, context?: Record<string, unknown>): unknown {
   if (ref.startsWith('$param.') && context) {
     const paramKey = ref.slice(7);
     return context[paramKey];
@@ -54,18 +58,18 @@ function resolveRefValue(ref: string, data: Record<string, any>, context?: Recor
  * Get a value from a nested object using a dot-separated path.
  * e.g. getByPath({ a: { b: 1 } }, 'a.b') => 1
  */
-function getByPath(obj: any, path: string): any {
+function getByPath(obj: unknown, path: string): unknown {
   if (!path) return obj;
   const segments = parsePath(path);
-  let values: any[] = [obj];
+  let values: unknown[] = [obj];
   let hasWildcard = false;
 
   for (const segment of segments) {
-    const nextValues: any[] = [];
+    const nextValues: unknown[] = [];
 
     for (const value of values) {
-      if (value === null || value === undefined) continue;
-      const next = (value as Record<string, any>)[segment.key];
+      if (!isRecord(value)) continue;
+      const next = value[segment.key];
 
       if (segment.wildcard) {
         hasWildcard = true;
@@ -92,7 +96,7 @@ function getByPath(obj: any, path: string): any {
 /**
  * Set a value on a nested object using a dot-separated path.
  */
-function setByPath(obj: any, path: string, value: any): any {
+function setByPath(obj: unknown, path: string, value: unknown): unknown {
   if (!path) return value;
   const segments = parsePath(path);
 
@@ -101,21 +105,22 @@ function setByPath(obj: any, path: string, value: any): any {
   }
 
   const result = cloneContainer(obj);
-  let current = result as Record<string, any>;
+  let current = result as Record<string, unknown>;
 
   for (let i = 0; i < segments.length; i++) {
     const segment = segments[i];
     const isLast = i === segments.length - 1;
 
     if (segment.index !== null) {
-      const currentArray = Array.isArray(current[segment.key]) ? [...current[segment.key]] : [];
+      const existingValue = current[segment.key];
+      const currentArray = Array.isArray(existingValue) ? [...existingValue] : [];
       if (isLast) {
         currentArray[segment.index] = value;
         current[segment.key] = currentArray;
       } else {
         currentArray[segment.index] = cloneContainer(currentArray[segment.index]);
         current[segment.key] = currentArray;
-        current = currentArray[segment.index];
+        current = currentArray[segment.index] as Record<string, unknown>;
       }
       continue;
     }
@@ -124,7 +129,7 @@ function setByPath(obj: any, path: string, value: any): any {
       current[segment.key] = value;
     } else {
       current[segment.key] = cloneContainer(current[segment.key]);
-      current = current[segment.key];
+      current = current[segment.key] as Record<string, unknown>;
     }
   }
 
@@ -143,12 +148,12 @@ function createSelectionNode(): SelectionNode {
   };
 }
 
-function deepClone(value: any): any {
+function deepClone(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map(item => deepClone(item));
   }
-  if (typeof value === 'object' && value !== null) {
-    const result: Record<string, any> = {};
+  if (isRecord(value)) {
+    const result: Record<string, unknown> = {};
     for (const [key, child] of Object.entries(value)) {
       result[key] = deepClone(child);
     }
@@ -197,7 +202,7 @@ function buildSelectionTree(paths: string[]): SelectionNode {
   return root;
 }
 
-function includeBySelection(value: any, node: SelectionNode): any {
+function includeBySelection(value: unknown, node: SelectionNode): unknown {
   if (value === undefined) return undefined;
   if (node.terminal) return deepClone(value);
 
@@ -212,7 +217,7 @@ function includeBySelection(value: any, node: SelectionNode): any {
 
     const indexedChildren = Array.from(node.children.entries()).filter(([key]) => key.startsWith('['));
     if (indexedChildren.length > 0) {
-      const result: any[] = [];
+      const result: unknown[] = [];
       for (const [indexKey, childNode] of indexedChildren) {
         const index = Number.parseInt(indexKey.slice(1, -1), 10);
         if (!Number.isInteger(index)) continue;
@@ -234,14 +239,14 @@ function includeBySelection(value: any, node: SelectionNode): any {
     return undefined;
   }
 
-  if (typeof value !== 'object' || value === null) {
+  if (!isRecord(value)) {
     return undefined;
   }
 
-  const result: Record<string, any> = {};
+  const result: Record<string, unknown> = {};
   for (const [key, childNode] of node.children) {
     if (key === '__ALL__' || key.startsWith('[')) continue;
-    const included = includeBySelection((value as Record<string, any>)[key], childNode);
+    const included = includeBySelection(value[key], childNode);
     if (included !== undefined) {
       result[key] = included;
     }
@@ -250,7 +255,7 @@ function includeBySelection(value: any, node: SelectionNode): any {
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
-function removeBySegments(current: any, segments: PathSegment[], index: number): any {
+function removeBySegments(current: unknown, segments: PathSegment[], index: number): unknown {
   if (current === null || current === undefined) return current;
   if (index >= segments.length) return current;
   const segment = segments[index];
@@ -276,24 +281,26 @@ function removeBySegments(current: any, segments: PathSegment[], index: number):
     return current.map(item => removeBySegments(item, segments, index));
   }
 
-  if (typeof current !== 'object') return current;
+  if (!isRecord(current)) return current;
 
-  const result: Record<string, any> = { ...current };
+  const result: Record<string, unknown> = { ...current };
   if (!(segment.key in result)) return result;
 
   if (segment.wildcard) {
-    if (!Array.isArray(result[segment.key])) return result;
+    const currentValue = result[segment.key];
+    if (!Array.isArray(currentValue)) return result;
     if (isLast) {
       delete result[segment.key];
       return result;
     }
-    result[segment.key] = result[segment.key].map((item: any) => removeBySegments(item, segments, index + 1));
+    result[segment.key] = currentValue.map((item: unknown) => removeBySegments(item, segments, index + 1));
     return result;
   }
 
   if (segment.index !== null) {
     if (!Array.isArray(result[segment.key])) return result;
-    const next = [...result[segment.key]];
+    const currentValue = result[segment.key];
+    const next = Array.isArray(currentValue) ? [...currentValue] : [];
     if (segment.index < 0 || segment.index >= next.length) {
       result[segment.key] = next;
       return result;
@@ -316,13 +323,13 @@ function removeBySegments(current: any, segments: PathSegment[], index: number):
   return result;
 }
 
-function removeByPath(data: any, path: string): any {
+function removeByPath(data: unknown, path: string): unknown {
   const segments = parsePath(path);
   if (segments.length === 0) return data;
   return removeBySegments(data, segments, 0);
 }
 
-function applyArrayItemMapping(data: any, fromPath: string, toPath: string): any {
+function applyArrayItemMapping(data: unknown, fromPath: string, toPath: string): unknown {
   const marker = '[].';
   const markerIndex = fromPath.indexOf(marker);
   if (markerIndex === -1) return data;
@@ -344,7 +351,7 @@ function applyArrayItemMapping(data: any, fromPath: string, toPath: string): any
     })();
 
   const mappedArray = sourceArray.map((item) => {
-    if (item === null || item === undefined || typeof item !== 'object') return item;
+    if (!isRecord(item)) return item;
     const sourceValue = getByPath(item, itemSourcePath);
     if (sourceValue === undefined) return item;
 
@@ -364,8 +371,8 @@ function applyArrayItemMapping(data: any, fromPath: string, toPath: string): any
 /**
  * Apply a filter node: include or exclude specified fields.
  */
-function applyFilter(data: any, config: FilterNodeConfig): any {
-  if (typeof data !== 'object' || data === null) return data;
+function applyFilter(data: unknown, config: FilterNodeConfig): unknown {
+  if (!isRecord(data) && !Array.isArray(data)) return data;
 
   if (!config.fields || config.fields.length === 0) {
     return config.mode === 'include' ? (Array.isArray(data) ? [] : {}) : data;
@@ -388,24 +395,24 @@ function applyFilter(data: any, config: FilterNodeConfig): any {
 /**
  * Apply a map node: rename fields.
  */
-function applyMap(data: any, config: MapNodeConfig): any {
-  if (typeof data !== 'object' || data === null) return data;
+function applyMap(data: unknown, config: MapNodeConfig): unknown {
+  if (!isRecord(data) && !Array.isArray(data)) return data;
 
   if (Array.isArray(data)) {
     return data.map(item => applyMap(item, config));
   }
 
-  let result: any = { ...data };
+  let result: Record<string, unknown> = { ...data };
   for (const mapping of config.mappings) {
     if (mapping.from.includes('[].')) {
-      result = applyArrayItemMapping(result, mapping.from, mapping.to);
+      result = applyArrayItemMapping(result, mapping.from, mapping.to) as Record<string, unknown>;
       continue;
     }
 
     const val = getByPath(result, mapping.from);
     if (val !== undefined) {
       const nextResult = setByPath(result, mapping.to, val);
-      result = nextResult;
+      result = nextResult as Record<string, unknown>;
       if (mapping.from !== mapping.to && !mapping.from.includes('.') && !mapping.from.includes('[')) {
         delete result[mapping.from];
       }
@@ -419,18 +426,18 @@ function applyMap(data: any, config: MapNodeConfig): any {
  * Supports {{field}} syntax in expressions for referencing data fields.
  * Supports {{$param.key}} for referencing custom params.
  */
-function applyCompute(data: any, config: ComputeNodeConfig, context?: Record<string, any>): any {
-  if (typeof data !== 'object' || data === null) return data;
+function applyCompute(data: unknown, config: ComputeNodeConfig, context?: Record<string, unknown>): unknown {
+  if (!isRecord(data) && !Array.isArray(data)) return data;
 
   if (Array.isArray(data)) {
     return data.map(item => applyCompute(item, config, context));
   }
 
-  let result: Record<string, any> = { ...data };
+  let result: Record<string, unknown> = { ...data };
   for (const comp of config.computations) {
     if (!comp.field) continue;
     
-    let computedValue: any = undefined;
+    let computedValue: unknown = undefined;
     if (comp.sourceField) {
       // Copy from existing field or param
       computedValue = resolveRefValue(comp.sourceField, result, context);
@@ -442,7 +449,7 @@ function applyCompute(data: any, config: ComputeNodeConfig, context?: Record<str
       }
     }
 
-    result = setByPath(result, comp.field, computedValue);
+    result = setByPath(result, comp.field, computedValue) as Record<string, unknown>;
   }
   return result;
 }
@@ -452,7 +459,7 @@ function applyCompute(data: any, config: ComputeNodeConfig, context?: Record<str
  * Supports: {{fieldName}}, {{$param.key}}, basic arithmetic (+, -, *, /)
  * Example: "{{price}} * 0.1" or "{{$param.taxRate}} * {{total}}"
  */
-function safeEvaluate(expression: string, data: Record<string, any>, context?: Record<string, any>): any {
+function safeEvaluate(expression: string, data: Record<string, unknown>, context?: Record<string, unknown>): unknown {
   // Replace {{...}} references with actual values
   const templatePattern = /\{\{([^}]+)\}\}/g;
   const hasTemplates = templatePattern.test(expression);
@@ -460,12 +467,12 @@ function safeEvaluate(expression: string, data: Record<string, any>, context?: R
   
   if (hasTemplates) {
     let processedExpr = expression;
-    const replacements: Array<{ placeholder: string; value: any }> = [];
+    const replacements: Array<{ placeholder: string; value: unknown }> = [];
     
     let match;
     while ((match = templatePattern.exec(expression)) !== null) {
       const ref = match[1].trim();
-      let value: any = undefined;
+      let value: unknown = undefined;
       
       value = resolveRefValue(ref, data, context);
       
@@ -535,7 +542,7 @@ function safeEvaluate(expression: string, data: Record<string, any>, context?: R
 /**
  * Apply a sort node: sort an array field and optionally limit results.
  */
-function applySort(data: any, config: SortNodeConfig): any {
+function applySort(data: unknown, config: SortNodeConfig): unknown {
   if (!config.sortField) return data;
 
   const normalizedArrayPath = normalizeArrayPath(config.arrayPath || '');
@@ -549,7 +556,7 @@ function applySort(data: any, config: SortNodeConfig): any {
   }
   let effectiveArrayPath = normalizedArrayPath;
 
-  let targetArray: any;
+  let targetArray: unknown;
   if (effectiveArrayPath) {
     targetArray = getByPath(data, effectiveArrayPath);
   } else {
@@ -557,7 +564,7 @@ function applySort(data: any, config: SortNodeConfig): any {
   }
   
   if (!Array.isArray(targetArray)) {
-    if (!effectiveArrayPath && typeof data === 'object' && data !== null) {
+    if (!effectiveArrayPath && isRecord(data)) {
       const topLevelField = normalizedSortField.split('.')[0];
       if (topLevelField && Array.isArray(data[topLevelField])) {
         targetArray = data[topLevelField];
@@ -567,14 +574,14 @@ function applySort(data: any, config: SortNodeConfig): any {
     }
 
     // Try to find array in root-level values if no explicit path
-    if (!Array.isArray(targetArray) && !effectiveArrayPath && typeof data === 'object' && data !== null) {
+    if (!Array.isArray(targetArray) && !effectiveArrayPath && isRecord(data)) {
       for (const key of Object.keys(data)) {
         if (Array.isArray(data[key])) {
           targetArray = data[key];
           const implicitSortField = normalizedSortField.startsWith(`${key}.`)
             ? normalizedSortField.slice(key.length + 1)
             : normalizedSortField;
-          const sorted = sortArray(targetArray, { ...config, arrayPath: key, sortField: implicitSortField });
+          const sorted = sortArray(targetArray as unknown[], { ...config, arrayPath: key, sortField: implicitSortField });
           return { ...data, [key]: sorted };
         }
       }
@@ -589,7 +596,7 @@ function applySort(data: any, config: SortNodeConfig): any {
     arrayPath: effectiveArrayPath,
     sortField: itemSortField,
   };
-  const sorted = sortArray(targetArray, sortConfig);
+  const sorted = sortArray(targetArray as unknown[], sortConfig);
 
   if (effectiveArrayPath) {
     return setByPath(data, effectiveArrayPath, sorted);
@@ -597,7 +604,7 @@ function applySort(data: any, config: SortNodeConfig): any {
   return sorted;
 }
 
-function sortArray(arr: any[], config: SortNodeConfig): any[] {
+function sortArray(arr: unknown[], config: SortNodeConfig): unknown[] {
   const sorted = [...arr].sort((a, b) => {
     const aVal = getByPath(a, config.sortField);
     const bVal = getByPath(b, config.sortField);
@@ -617,7 +624,7 @@ function sortArray(arr: any[], config: SortNodeConfig): any[] {
 /**
  * Apply a single orchestration node.
  */
-export function applyNode(data: any, node: OrchestrationNode, context?: Record<string, any>): any {
+export function applyNode(data: unknown, node: OrchestrationNode, context?: Record<string, unknown>): unknown {
   switch (node.type) {
     case 'filter':
       return applyFilter(data, node.config as FilterNodeConfig);
@@ -635,7 +642,7 @@ export function applyNode(data: any, node: OrchestrationNode, context?: Record<s
 /**
  * Apply the full orchestration pipeline: execute nodes in order.
  */
-export function applyOrchestration(data: any, config: OrchestrationConfig, context?: Record<string, any>): any {
+export function applyOrchestration(data: unknown, config: OrchestrationConfig, context?: Record<string, unknown>): unknown {
   if (!config || !config.nodes || config.nodes.length === 0) return data;
 
   const sortedNodes = [...config.nodes].sort((a, b) => a.order - b.order);
@@ -650,13 +657,18 @@ export function applyOrchestration(data: any, config: OrchestrationConfig, conte
 /**
  * Apply orchestration up to a specific node (for debugging).
  */
-export function applyOrchestrationUpTo(data: any, config: OrchestrationConfig, nodeId: string, context?: Record<string, any>): { result: any; nodeResults: Record<string, any> } {
+export function applyOrchestrationUpTo(
+  data: unknown,
+  config: OrchestrationConfig,
+  nodeId: string,
+  context?: Record<string, unknown>
+): { result: unknown; nodeResults: Record<string, unknown> } {
   if (!config || !config.nodes || config.nodes.length === 0) {
     return { result: data, nodeResults: {} };
   }
 
   const sortedNodes = [...config.nodes].sort((a, b) => a.order - b.order);
-  const nodeResults: Record<string, any> = {};
+  const nodeResults: Record<string, unknown> = {};
   
   let result = data;
   for (const node of sortedNodes) {

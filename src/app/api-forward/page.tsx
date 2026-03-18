@@ -205,7 +205,7 @@ export default function ApiForwardPage() {
 
   const [viewMode, setViewMode] = useState<'design' | 'run'>('design');
   const [runParams, setRunParams] = useState<Record<string, string>>({});
-  const [runResult, setRunResult] = useState<any>(null);
+  const [runResult, setRunResult] = useState<unknown>(null);
   const [runStatus, setRunStatus] = useState<number | null>(null);
   const [runTime, setRunTime] = useState<number>(0);
   const [isLoading, setIsLoading] = useState(false);
@@ -389,8 +389,8 @@ export default function ApiForwardPage() {
       } catch {
         setRunResult(text);
       }
-    } catch (error: any) {
-      setRunResult({ error: error.message });
+    } catch (error) {
+      setRunResult({ error: error instanceof Error ? error.message : '执行失败' });
       setRunStatus(0);
     } finally {
       setIsLoading(false);
@@ -719,7 +719,7 @@ export default function ApiForwardPage() {
                   {viewMode === 'design' ? renderDesignMode() : renderRunMode()}
                 </div>
                 
-                {runResult && (
+                {runResult !== null && (
                   <div style={{ flex: 1, background: 'var(--color-bg-subtle)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
                     <div style={{ padding: '16px 24px', borderBottom: '1px solid var(--color-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'white' }}>
                       <div style={{ display: 'flex', gap: 16 }}>

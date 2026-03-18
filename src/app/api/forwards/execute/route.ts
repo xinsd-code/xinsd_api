@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { ApiForwardConfig, MockAPI, ApiClientConfig, KeyValuePair } from '@/lib/types';
+import { ApiForwardConfig, KeyValuePair } from '@/lib/types';
 import { applyOrchestration } from '@/lib/orchestration-engine';
 import { getMockById, getApiClientById } from '@/lib/db';
 import { resolveVariables } from '@/lib/utils';
@@ -106,7 +106,7 @@ export async function POST(request: Request) {
     const responseHeaders = Object.fromEntries(response.headers.entries());
     
     // Attempt to parse response as JSON
-    let responseData;
+    let responseData: unknown;
     const contentType = response.headers.get('content-type') || '';
     
     if (contentType.includes('application/json')) {
@@ -125,7 +125,7 @@ export async function POST(request: Request) {
     if (forwardConfig.orchestration && forwardConfig.orchestration.nodes && forwardConfig.orchestration.nodes.length > 0) {
       try {
         finalData = applyOrchestration(responseData, forwardConfig.orchestration, runParams);
-      } catch (orchError: any) {
+      } catch (orchError) {
         return NextResponse.json({
           _meta: {
             forwardMethod: targetMethod,
@@ -135,7 +135,7 @@ export async function POST(request: Request) {
           status: responseStatus,
           headers: responseHeaders,
           data: responseData,
-          _orchestrationError: orchError.message,
+          _orchestrationError: orchError instanceof Error ? orchError.message : 'Orchestration failed',
         });
       }
     }
@@ -153,7 +153,10 @@ export async function POST(request: Request) {
       data: finalData
     });
 
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Execution failed' },
+      { status: 500 }
+    );
   }
 }

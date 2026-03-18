@@ -49,7 +49,7 @@ export default function ApiClientPage() {
     statusText: string;
     time: number;
     headers: Record<string, string>;
-    data: any;
+    data: unknown;
     error?: string;
   } | null>(null);
 
@@ -196,7 +196,7 @@ export default function ApiClientPage() {
       const gRes = await fetch(`/api/groups/${encodeURIComponent(groupName)}/variables`);
       const data = await gRes.json();
       if (Array.isArray(data)) vars = data;
-    } catch(e) {}
+    } catch {}
 
     // 解析 URL 和查询参数
     let finalUrl = resolveVariables(url, vars);
@@ -210,7 +210,7 @@ export default function ApiClientPage() {
           urlObj.searchParams.append(p.key, resolvedVal);
         });
         finalUrl = urlObj.toString();
-      } catch (e) {
+      } catch {
         const query = validParams.map(p => {
           const val = viewMode === 'run' ? (runParams[p.key] ?? p.value) : p.value;
           const resolvedVal = resolveVariables(val || '', vars);
@@ -245,14 +245,14 @@ export default function ApiClientPage() {
       
       const data = await res.json();
       setResponse(data);
-    } catch (error: any) {
+    } catch (error) {
       setResponse({
         status: 0,
         statusText: '网络错误',
         time: 0,
         headers: {},
         data: null,
-        error: error.message
+        error: error instanceof Error ? error.message : '请求执行失败'
       });
     } finally {
       setIsSending(false);

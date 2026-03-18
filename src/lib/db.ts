@@ -44,8 +44,8 @@ function initializeDb(database: Database.Database) {
   // Migration for mock_apis api_group
   try {
     database.exec(`ALTER TABLE mock_apis ADD COLUMN api_group TEXT DEFAULT '未分组';`);
-  } catch (err: any) {
-    if (!err.message.includes('duplicate column name')) {
+  } catch (err) {
+    if (err instanceof Error && !err.message.includes('duplicate column name')) {
       console.error('Migration error mock_apis:', err);
     }
   }
@@ -69,8 +69,8 @@ function initializeDb(database: Database.Database) {
   // Migration for api_clients api_group
   try {
     database.exec(`ALTER TABLE api_clients ADD COLUMN api_group TEXT DEFAULT '未分组';`);
-  } catch (err: any) {
-    if (!err.message.includes('duplicate column name')) {
+  } catch (err) {
+    if (err instanceof Error && !err.message.includes('duplicate column name')) {
       console.error('Migration error api_clients:', err);
     }
   }
@@ -104,8 +104,8 @@ function initializeDb(database: Database.Database) {
   // Migration for api_forwards orchestration column
   try {
     database.exec(`ALTER TABLE api_forwards ADD COLUMN orchestration TEXT DEFAULT '{}';`);
-  } catch (err: any) {
-    if (!err.message.includes('duplicate column name')) {
+  } catch (err) {
+    if (err instanceof Error && !err.message.includes('duplicate column name')) {
       console.error('Migration error api_forwards:', err);
     }
   }

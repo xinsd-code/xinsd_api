@@ -6,11 +6,11 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
     const { sampleData, orchestration, mode, nodeId, context } = body as {
-      sampleData: any;
+      sampleData: unknown;
       orchestration: OrchestrationConfig;
       mode: 'single' | 'full' | 'upto';
       nodeId?: string;
-      context?: Record<string, any>;
+      context?: Record<string, unknown>;
     };
 
     if (!orchestration || !orchestration.nodes || orchestration.nodes.length === 0) {
@@ -40,7 +40,10 @@ export async function POST(request: Request) {
     const result = applyOrchestration(sampleData, orchestration, context);
     return NextResponse.json({ result });
 
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Orchestration failed' },
+      { status: 500 }
+    );
   }
 }

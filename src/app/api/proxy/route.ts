@@ -30,12 +30,12 @@ export async function POST(request: Request) {
     });
 
     // Try to parse JSON response if possible, otherwise text
-    let data;
+    let data: unknown;
     const contentType = response.headers.get('content-type') || '';
     if (contentType.includes('application/json')) {
       try {
         data = await response.json();
-      } catch (e) {
+      } catch {
         data = await response.text();
       }
     } else {
@@ -51,12 +51,12 @@ export async function POST(request: Request) {
       data,
       time: t1 - t0,
     });
-  } catch (error: any) {
+  } catch (error) {
     const t1 = Date.now();
     console.error('Proxy Error:', error);
     return NextResponse.json(
       { 
-        error: error.message || 'Failed to proxy request',
+        error: error instanceof Error ? error.message : 'Failed to proxy request',
         status: 500,
         time: t1 - t0
       },

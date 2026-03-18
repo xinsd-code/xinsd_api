@@ -94,7 +94,7 @@ function normalizeFilterFieldsForConfig(fields: string[], availableFields: strin
   return Array.from(normalized).sort((a, b) => a.localeCompare(b));
 }
 
-function isObjectLike(value: any): value is Record<string, any> {
+function isObjectLike(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
@@ -137,7 +137,7 @@ function buildFieldTree(paths: string[]): FieldTreeNode[] {
 }
 
 /** 递归提取JSON对象的所有key路径，支持array中对象属性展开 */
-function extractFieldPaths(obj: any, prefix = ''): string[] {
+function extractFieldPaths(obj: unknown, prefix = ''): string[] {
   if (obj === null || obj === undefined) return [];
   if (Array.isArray(obj)) {
     const objectItems = obj.filter(item => isObjectLike(item) && !Array.isArray(item));
@@ -175,10 +175,10 @@ function extractFieldPaths(obj: any, prefix = ''): string[] {
 }
 
 /** 提取数组对象路径 + 可排序字段 */
-function extractArrayFieldOptions(obj: any): ArrayFieldOption[] {
+function extractArrayFieldOptions(obj: unknown): ArrayFieldOption[] {
   const optionsMap = new Map<string, Set<string>>();
 
-  const collectArrayFields = (arr: any[], arrayPath: string) => {
+  const collectArrayFields = (arr: unknown[], arrayPath: string) => {
     const objectItems = arr.filter(item => isObjectLike(item) && !Array.isArray(item));
     if (objectItems.length === 0) return;
 
@@ -191,7 +191,7 @@ function extractArrayFieldOptions(obj: any): ArrayFieldOption[] {
     optionsMap.set(arrayPath, current);
   };
 
-  const visit = (value: any, currentPath: string) => {
+  const visit = (value: unknown, currentPath: string) => {
     if (Array.isArray(value)) {
       collectArrayFields(value, currentPath);
       return;
@@ -683,12 +683,12 @@ function OrchestrationWorkspace({
   runParams: Record<string, string>;
 }) {
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
-  const [inputData, setInputData] = useState<any>(null);
+  const [inputData, setInputData] = useState<unknown>(null);
   const [inputLoading, setInputLoading] = useState(false);
   const [previewParams, setPreviewParams] = useState<Record<string, string>>(
     () => buildPreviewParams(customParams, runParams)
   );
-  const [debugResult, setDebugResult] = useState<any>(null);
+  const [debugResult, setDebugResult] = useState<unknown>(null);
   const [debugLoading, setDebugLoading] = useState(false);
   const [saveLoading, setSaveLoading] = useState(false);
   const [dragNodeId, setDragNodeId] = useState<string | null>(null);
@@ -697,6 +697,7 @@ function OrchestrationWorkspace({
   const nodes = config?.nodes || [];
   const sortedNodes = [...nodes].sort((a, b) => a.order - b.order);
   const editingNode = editingNodeId ? nodes.find(n => n.id === editingNodeId) : null;
+  const debugHasError = isObjectLike(debugResult) && 'error' in debugResult;
   const configJsonPreview = useMemo(() => JSON.stringify({ nodes: sortedNodes }, null, 2), [sortedNodes]);
   const originalInputFields = useMemo(
     () => (inputData ? extractFieldPaths(inputData) : []),
@@ -747,7 +748,7 @@ function OrchestrationWorkspace({
     setPreviewParams(buildPreviewParams(customParams, runParams));
   }, [customParams, runParams]);
 
-  const getNodeInputData = useCallback((nodeId: string): any => {
+  const getNodeInputData = useCallback((nodeId: string): unknown => {
     const idx = sortedNodes.findIndex(n => n.id === nodeId);
     if (idx <= 0) return inputData;
     
@@ -793,7 +794,7 @@ function OrchestrationWorkspace({
     if (editingNodeId === id) setEditingNodeId(null);
   };
 
-  const updateNodeConfig = (id: string, newConfig: any) => {
+  const updateNodeConfig = (id: string, newConfig: OrchestrationNode['config']) => {
     updateNodes(nodes.map(n => n.id === id ? { ...n, config: newConfig } : n));
   };
 
@@ -819,8 +820,8 @@ function OrchestrationWorkspace({
       });
       const data = await res.json();
       setDebugResult(data);
-    } catch (err: any) {
-      setDebugResult({ error: err.message });
+    } catch (err) {
+      setDebugResult({ error: err instanceof Error ? err.message : '节点调试失败' });
     } finally {
       setDebugLoading(false);
     }
@@ -844,8 +845,8 @@ function OrchestrationWorkspace({
       });
       const data = await res.json();
       setDebugResult(data);
-    } catch (err: any) {
-      setDebugResult({ error: err.message });
+    } catch (err) {
+      setDebugResult({ error: err instanceof Error ? err.message : '编排执行失败' });
     } finally {
       setDebugLoading(false);
     }
@@ -987,7 +988,7 @@ function OrchestrationWorkspace({
                 <div className={`${styles.dataPreviewTab} ${activeTab === 'config' ? styles.active : ''}`} onClick={() => setActiveTab('config')}>
                   <Icons.Code size={14} style={{ marginRight: 6 }} /> 配置 JSON
                 </div>
-                {debugResult && (
+                {debugResult !== null && (
                   <div className={`${styles.dataPreviewTab} ${activeTab === 'output' ? styles.active : ''}`} onClick={() => setActiveTab('output')}>
                     <Icons.Activity size={14} style={{ marginRight: 6 }} /> 编排输出
                   </div>
@@ -1042,8 +1043,8 @@ function OrchestrationWorkspace({
                     <pre className={styles.dataPreviewPre}>{configJsonPreview}</pre>
                   </div>
                 )}
-                {activeTab === 'output' && debugResult && (
-                  <div className={styles.dataPreviewPane} style={{ borderColor: debugResult.error ? '#ef4444' : undefined }}>
+                {activeTab === 'output' && debugResult !== null && (
+                  <div className={styles.dataPreviewPane} style={{ borderColor: debugHasError ? '#ef4444' : undefined }}>
                     <pre className={styles.dataPreviewPre}>
                       {JSON.stringify(debugResult, null, 2)}
                     </pre>
@@ -1171,5 +1172,3 @@ export default function OrchestrationEditor({
     </>
   );
 }
-
-
