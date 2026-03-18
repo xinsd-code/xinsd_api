@@ -3,8 +3,8 @@ import "./globals.css";
 import Sidebar from "@/components/Sidebar";
 
 export const metadata: Metadata = {
-  title: "API Forge - API 接口管理平台",
-  description: "可配置的 API接口管理平台，支持 RESTful、流式响应、自定义请求头和参数",
+  title: "API Forge - Refined API Management",
+  description: "A professional studio-grade platform for API mocking, orchestration, and testing.",
 };
 
 export default function RootLayout({
@@ -17,11 +17,29 @@ export default function RootLayout({
       <body>
         <div className="app-layout">
           <header className="app-header">
-            <div className="app-header-left">
-              <div className="app-logo">M</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+              <div className="app-logo">F</div>
               <div>
-                <div className="app-title">API Forge</div>
-                <div className="app-subtitle">API 开发辅助平台</div>
+                <div className="app-title">Forge</div>
+                <div className="app-subtitle">API STUDIO</div>
+              </div>
+            </div>
+            
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <div style={{ 
+                height: '32px', 
+                padding: '0 12px', 
+                background: 'var(--color-bg-subtle)', 
+                border: '1px solid var(--color-border)',
+                borderRadius: 'var(--radius-full)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                fontSize: '12px',
+                fontWeight: 600
+              }}>
+                <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--color-accent)' }}></span>
+                PROD-ENV
               </div>
             </div>
           </header>

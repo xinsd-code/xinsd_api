@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   OrchestrationConfig,
   OrchestrationNode,
@@ -13,13 +13,14 @@ import {
   ParamBinding,
 } from '@/lib/types';
 import { applyNode } from '@/lib/orchestration-engine';
+import { Icons } from './Icons';
 import styles from './orchestration.module.css';
 
-const NODE_TYPE_META: Record<OrchestrationNodeType, { icon: string; label: string; color: string }> = {
-  filter: { icon: '🔍', label: '数据筛选', color: 'filter' },
-  map: { icon: '🔄', label: '字段映射', color: 'map' },
-  compute: { icon: '⚡', label: '字段新增', color: 'compute' },
-  sort: { icon: '📊', label: '排序限制', color: 'sort' },
+const NODE_TYPE_META: Record<OrchestrationNodeType, { icon: React.ReactNode; label: string; color: string }> = {
+  filter: { icon: <Icons.Search size={14} />, label: '数据筛选', color: 'filter' },
+  map: { icon: <Icons.Refresh size={14} />, label: '字段映射', color: 'map' },
+  compute: { icon: <Icons.Zap size={14} />, label: '字段新增', color: 'compute' },
+  sort: { icon: <Icons.Activity size={14} />, label: '排序限制', color: 'sort' },
 };
 
 function createDefaultConfig(type: OrchestrationNodeType): FilterNodeConfig | MapNodeConfig | ComputeNodeConfig | SortNodeConfig {
@@ -226,17 +227,17 @@ function TriStateCheckbox({
   indeterminate: boolean;
   onChange: () => void;
 }) {
-  const [inputEl, setInputEl] = useState<HTMLInputElement | null>(null);
+  const checkboxRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (inputEl) {
-      inputEl.indeterminate = indeterminate;
+    if (checkboxRef.current) {
+      checkboxRef.current.indeterminate = indeterminate;
     }
-  }, [inputEl, indeterminate]);
+  }, [indeterminate]);
 
   return (
     <input
-      ref={setInputEl}
+      ref={checkboxRef}
       type="checkbox"
       checked={checked}
       onChange={onChange}
@@ -267,9 +268,15 @@ function FieldTreePicker({
     if (selectablePathSet.has(node.path)) {
       paths.push(node.path);
     }
-    for (const child of node.children) {
-      paths.push(...getNodeSelectablePaths(child));
-    }
+    const collectChildren = (n: FieldTreeNode) => {
+      for (const child of n.children) {
+        if (selectablePathSet.has(child.path)) {
+          paths.push(child.path);
+        }
+        collectChildren(child);
+      }
+    };
+    collectChildren(node);
     return paths;
   }, [selectablePathSet]);
 
@@ -285,7 +292,7 @@ function FieldTreePicker({
             const indeterminate = selectedCount > 0 && selectedCount < totalCount;
 
             return (
-              <label className={styles.fieldCheckboxItem} style={{ paddingLeft: 8 + level * 14 }}>
+              <label className={styles.fieldCheckboxItem} style={{ paddingLeft: 12 + level * 16 }}>
                 <TriStateCheckbox
                   checked={checked}
                   indeterminate={indeterminate}
@@ -414,20 +421,29 @@ function MapConfigEditor({
   return (
     <div className={styles.configSection}>
       <div className={styles.configSectionTitle}>映射规则</div>
-      {config.mappings.map((m, i) => (
-        <div key={i} className={styles.configRow}>
-          <select value={m.from} onChange={(e) => updateMapping(i, 'from', e.target.value)}
-            className="form-select" style={{ flex: 1, fontSize: 13 }}>
-            <option value="">选择原字段</option>
-            {availableFields.map(f => <option key={f} value={f}>{f}</option>)}
-          </select>
-          <span style={{ color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12, flexShrink: 0 }}>→</span>
-          <input type="text" value={m.to} onChange={(e) => updateMapping(i, 'to', e.target.value)}
-            className="form-input" placeholder="新字段名" style={{ flex: 1, fontSize: 13 }} />
-          <button className={styles.configRemoveBtn} onClick={() => removeMapping(i)} title="删除">✕</button>
-        </div>
-      ))}
-      <button className={styles.configAddBtn} onClick={addMapping}>+ 添加映射</button>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {config.mappings.map((m, i) => (
+          <div key={i} className={styles.configRow}>
+            <select value={m.from} onChange={(e) => updateMapping(i, 'from', e.target.value)}
+              className="form-select" style={{ flex: 1, fontSize: 13 }}>
+              <option value="">选择原字段</option>
+              {availableFields.map(f => <option key={f} value={f}>{f}</option>)}
+            </select>
+            <div style={{ display: 'flex', alignItems: 'center', color: 'var(--color-text-muted)' }}>
+              <Icons.ChevronRight size={14} />
+            </div>
+            <input type="text" value={m.to} onChange={(e) => updateMapping(i, 'to', e.target.value)}
+              className="form-input" placeholder="新字段名" style={{ flex: 1, fontSize: 13 }} />
+            <button className={styles.configRemoveBtn} onClick={() => removeMapping(i)} title="删除映射规则">
+              <Icons.Trash size={16} />
+            </button>
+          </div>
+        ))}
+      </div>
+      <button className={styles.configAddBtn} onClick={addMapping}>
+        <Icons.Plus size={16} />
+        添加映射规则
+      </button>
     </div>
   );
 }
@@ -452,31 +468,49 @@ function ComputeConfigEditor({
       <div className={styles.configSectionTitle}>计算规则</div>
       {config.computations.map((c, i) => (
         <div key={i} className={styles.computeBlock}>
-          <div className={styles.configRow}>
-            <input type="text" value={c.field} onChange={(e) => updateComp(i, 'field', e.target.value)}
-              className="form-input" placeholder="新字段名" style={{ flex: 1, fontSize: 13 }} />
-            <button className={styles.configRemoveBtn} onClick={() => removeComp(i)} title="删除">✕</button>
+          <div style={{ position: 'absolute', right: 12, top: 12 }}>
+            <button className={styles.configRemoveBtn} onClick={() => removeComp(i)} title="删除计算规则">
+              <Icons.Trash size={16} />
+            </button>
           </div>
-          <div className={styles.configRow} style={{ marginTop: 6 }}>
+          <div className={styles.formGroup}>
+            <label className={styles.formLabel}>新字段名</label>
+            <input type="text" value={c.field} onChange={(e) => updateComp(i, 'field', e.target.value)}
+              className="form-input" placeholder="例如: totalPrice" style={{ fontSize: 13 }} />
+          </div>
+          <div className={styles.formGroup}>
+            <label className={styles.formLabel}>数据来源 (可选)</label>
             <select value={c.sourceField || ''} onChange={(e) => updateComp(i, 'sourceField', e.target.value)}
-              className="form-select" style={{ flex: 1, fontSize: 13 }}>
-              <option value="">复制来源字段（可选）</option>
+              className="form-select" style={{ fontSize: 13 }}>
+              <option value="">复制来源字段...</option>
               {availableFields.map(f => <option key={f} value={f}>{f}</option>)}
               {customParams.map(p => <option key={`param-direct:${p.key}`} value={p.key}>📌 入参直取: {p.key}</option>)}
               {customParams.map(p => <option key={`param:${p.key}`} value={`$param.${p.key}`}>📌 入参: {p.key}</option>)}
             </select>
           </div>
-          <div className={styles.configRow} style={{ marginTop: 6 }}>
+          <div className={styles.formGroup} style={{ marginBottom: 0 }}>
+            <label className={styles.formLabel}>计算表达式</label>
             <input type="text" value={c.expression} onChange={(e) => updateComp(i, 'expression', e.target.value)}
-              className="form-input" placeholder="如 {{bbb}} * 0.1 或 {{$param.rate}}" style={{ flex: 1, fontSize: 13 }} />
+              className="form-input" placeholder="如 {{price}} * {{count}}" style={{ fontSize: 13 }} />
           </div>
         </div>
       ))}
-      <button className={styles.configAddBtn} onClick={addComp}>+ 添加字段</button>
-      <div className={styles.computeHint}>支持模板: {'{{字段}}'}、{'{{入参key}}'}、{'{{$param.key}}'}</div>
+      <button className={styles.configAddBtn} onClick={addComp}>
+        <Icons.Plus size={16} />
+        添加计算字段
+      </button>
+      <div className={styles.computeHint}>
+        <Icons.Info size={16} />
+        <div>
+          <strong>表达式支持模板语法：</strong><br />
+          使用 <code>{`{{字段}}`}</code> 引用接口字段，<code>{`{{$param.入参key}}`}</code> 引用入参。支持基本算术运算。
+        </div>
+      </div>
     </div>
   );
 }
+
+
 
 function SortConfigEditor({
   config, onChange, availableFields, arrayFieldOptions,
@@ -500,9 +534,9 @@ function SortConfigEditor({
   };
 
   return (
-    <div>
-      <div className={styles.configSection}>
-        <div className={styles.configSectionTitle}>数组路径</div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <div className={styles.formGroup}>
+        <label className={styles.formLabel}>目标数组路径</label>
         <input
           type="text"
           list="array-path-options"
@@ -520,34 +554,42 @@ function SortConfigEditor({
             </option>
           ))}
         </datalist>
-      </div>
-      <div className={styles.configSection}>
-        <div className={styles.configSectionTitle}>排序字段</div>
-        <select value={config.sortField} onChange={(e) => onChange({ ...config, sortField: e.target.value })}
-          className="form-select" style={{ fontSize: 13 }}>
-          <option value="">选择排序字段</option>
-          {sortFields.map(f => <option key={f} value={f}>{f}</option>)}
-        </select>
         {selectedArray && (
-          <div className={styles.sortHint}>当前针对数组: {selectedArray.arrayPath || '(根数组)'}</div>
+          <div style={{ marginTop: 6, fontSize: 11, color: 'var(--color-primary)', fontWeight: 500 }}>
+            <Icons.Check size={10} style={{ marginRight: 4 }} />
+            当前识别到路径下的字段
+          </div>
         )}
       </div>
-      <div className={styles.configSection}>
-        <div className={styles.configSectionTitle}>排序方向</div>
-        <select value={config.order} onChange={(e) => onChange({ ...config, order: e.target.value as 'asc' | 'desc' })}
+
+      <div className={styles.formGroup}>
+        <label className={styles.formLabel}>排序字段</label>
+        <select value={config.sortField} onChange={(e) => onChange({ ...config, sortField: e.target.value })}
           className="form-select" style={{ fontSize: 13 }}>
-          <option value="asc">升序 (ASC)</option>
-          <option value="desc">降序 (DESC)</option>
+          <option value="">请选择排序字段...</option>
+          {sortFields.map(f => <option key={f} value={f}>{f}</option>)}
         </select>
       </div>
-      <div className={styles.configSection}>
-        <div className={styles.configSectionTitle}>结果限制 (可选)</div>
-        <input type="number" value={config.limit || ''} onChange={(e) => onChange({ ...config, limit: e.target.value ? parseInt(e.target.value) : undefined })}
-          className="form-input" placeholder="留空表示不限制" style={{ fontSize: 13 }} min={1} />
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+        <div className={styles.formGroup} style={{ marginBottom: 0 }}>
+          <label className={styles.formLabel}>排序方向</label>
+          <select value={config.order} onChange={(e) => onChange({ ...config, order: e.target.value as 'asc' | 'desc' })}
+            className="form-select" style={{ fontSize: 13 }}>
+            <option value="asc">升序 (ASC)</option>
+            <option value="desc">降序 (DESC)</option>
+          </select>
+        </div>
+        <div className={styles.formGroup} style={{ marginBottom: 0 }}>
+          <label className={styles.formLabel}>结果限制</label>
+          <input type="number" value={config.limit || ''} onChange={(e) => onChange({ ...config, limit: e.target.value ? parseInt(e.target.value) : undefined })}
+            className="form-input" placeholder="不限制数量" style={{ fontSize: 13 }} min={1} />
+        </div>
       </div>
     </div>
   );
 }
+
 
 // ============================================
 // Node Summary
@@ -561,7 +603,7 @@ function NodeSummary({ node }: { node: OrchestrationNode }) {
         <div className={styles.nodeSummary}>
           <div className={styles.nodeSummaryItem}>
             <span className={styles.nodeSummaryKey}>{cfg.mode === 'include' ? '保留' : '排除'}:</span>
-            <span className={styles.nodeSummaryValue}>{cfg.fields.length > 0 ? cfg.fields.join(', ') : '未配置'}</span>
+            <span className={styles.nodeSummaryValue}>{cfg.fields.length > 0 ? cfg.fields.slice(0, 3).join(', ') + (cfg.fields.length > 3 ? '...' : '') : '未配置'}</span>
           </div>
         </div>
       );
@@ -573,7 +615,7 @@ function NodeSummary({ node }: { node: OrchestrationNode }) {
           {cfg.mappings.length > 0 ? cfg.mappings.slice(0, 2).map((m, i) => (
             <div key={i} className={styles.nodeSummaryItem}>
               <span className={styles.nodeSummaryValue}>{m.from || '?'}</span>
-              <span className={styles.nodeSummaryKey}>→</span>
+              <Icons.ChevronRight size={10} style={{ opacity: 0.5 }} />
               <span className={styles.nodeSummaryValue}>{m.to || '?'}</span>
             </div>
           )) : <div className={styles.nodeSummaryItem}><span className={styles.nodeSummaryKey}>未配置</span></div>}
@@ -589,7 +631,7 @@ function NodeSummary({ node }: { node: OrchestrationNode }) {
             <div key={i} className={styles.nodeSummaryItem}>
               <span className={styles.nodeSummaryValue}>{c.field || '?'}</span>
               <span className={styles.nodeSummaryKey}>=</span>
-              <span className={styles.nodeSummaryValue}>{c.sourceField || c.expression || '?'}</span>
+              <span className={styles.nodeSummaryValue} style={{ maxWidth: 80 }}>{c.sourceField || c.expression || '?'}</span>
             </div>
           )) : <div className={styles.nodeSummaryItem}><span className={styles.nodeSummaryKey}>未配置</span></div>}
         </div>
@@ -649,8 +691,8 @@ function OrchestrationWorkspace({
   const [debugResult, setDebugResult] = useState<any>(null);
   const [debugLoading, setDebugLoading] = useState(false);
   const [saveLoading, setSaveLoading] = useState(false);
-  const [debugMode, setDebugMode] = useState<'node' | 'pipeline' | null>(null);
   const [dragNodeId, setDragNodeId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<'input' | 'config' | 'output'>('input');
 
   const nodes = config?.nodes || [];
   const sortedNodes = [...nodes].sort((a, b) => a.order - b.order);
@@ -660,25 +702,8 @@ function OrchestrationWorkspace({
     () => (inputData ? extractFieldPaths(inputData) : []),
     [inputData]
   );
-  const computedNodeOutputs = useMemo(() => {
-    if (!inputData || sortedNodes.length === 0) return {} as Record<string, any>;
 
-    const outputs: Record<string, any> = {};
-    let current = inputData;
-
-    for (const node of sortedNodes) {
-      try {
-        current = applyNode(current, node, previewParams);
-      } catch {
-        // Keep current output when this node has invalid config while editing.
-      }
-      outputs[node.id] = current;
-    }
-
-    return outputs;
-  }, [inputData, sortedNodes, previewParams]);
-
-  // 获取输入数据：通过当前API转发配置执行请求
+  // 获取输入数据
   const fetchInputData = useCallback(async () => {
     if (!forwardConfig.targetId) return;
     setInputLoading(true);
@@ -724,24 +749,27 @@ function OrchestrationWorkspace({
 
   const getNodeInputData = useCallback((nodeId: string): any => {
     const idx = sortedNodes.findIndex(n => n.id === nodeId);
-    if (idx <= 0) {
-      return inputData;
+    if (idx <= 0) return inputData;
+    
+    // We would ideally use pre-computed outputs, but for simplicity in editor
+    // we re-run engine for current node's input context if needed.
+    let current = inputData;
+    for (let i = 0; i < idx; i++) {
+      try {
+        current = applyNode(current, sortedNodes[i], previewParams);
+      } catch { break; }
     }
-    const prevNodeId = sortedNodes[idx - 1].id;
-    return computedNodeOutputs[prevNodeId] ?? inputData;
-  }, [sortedNodes, inputData, computedNodeOutputs]);
+    return current;
+  }, [sortedNodes, inputData, previewParams]);
 
-  // 计算每个节点的可用字段（基于前一个节点输出或原始输入）
   const getAvailableFields = useCallback((nodeId: string): string[] => {
     const nodeInputData = getNodeInputData(nodeId);
-    if (!nodeInputData) return [];
-    return extractFieldPaths(nodeInputData);
+    return nodeInputData ? extractFieldPaths(nodeInputData) : [];
   }, [getNodeInputData]);
 
   const getArrayFieldOptions = useCallback((nodeId: string): ArrayFieldOption[] => {
     const nodeInputData = getNodeInputData(nodeId);
-    if (!nodeInputData) return [];
-    return extractArrayFieldOptions(nodeInputData);
+    return nodeInputData ? extractArrayFieldOptions(nodeInputData) : [];
   }, [getNodeInputData]);
 
   const updateNodes = useCallback((newNodes: OrchestrationNode[]) => {
@@ -756,6 +784,7 @@ function OrchestrationWorkspace({
       order: nodes.length,
     };
     updateNodes([...nodes, newNode]);
+    setEditingNodeId(newNode.id);
   };
 
   const removeNode = (id: string) => {
@@ -772,12 +801,11 @@ function OrchestrationWorkspace({
     updateNodes(nodes.map(n => n.id === id ? { ...n, label } : n));
   };
 
-  // 调试到某个节点
   const debugNode = async (nodeId: string) => {
     if (!inputData) { await fetchInputData(); return; }
     setDebugLoading(true);
     setDebugResult(null);
-    setDebugMode('node');
+    setActiveTab('output');
     try {
       const res = await fetch('/api/forwards/orchestrate', {
         method: 'POST',
@@ -798,12 +826,11 @@ function OrchestrationWorkspace({
     }
   };
 
-  // 全量试运行
   const runFullPipeline = async () => {
     if (!inputData) { await fetchInputData(); return; }
     setDebugLoading(true);
     setDebugResult(null);
-    setDebugMode('pipeline');
+    setActiveTab('output');
     try {
       const res = await fetch('/api/forwards/orchestrate', {
         method: 'POST',
@@ -827,14 +854,9 @@ function OrchestrationWorkspace({
   const saveWorkflowConfig = async () => {
     if (!onSave) return;
     setSaveLoading(true);
-    try {
-      await onSave();
-    } finally {
-      setSaveLoading(false);
-    }
+    try { await onSave(); } finally { setSaveLoading(false); }
   };
 
-  // 拖拽排序
   const handleDragStart = (e: React.DragEvent, nodeId: string) => {
     setDragNodeId(nodeId);
     e.dataTransfer.effectAllowed = 'move';
@@ -852,7 +874,6 @@ function OrchestrationWorkspace({
     updateNodes(reordered.map((n, i) => ({ ...n, order: i })));
     setDragNodeId(null);
   };
-  const handleDragEnd = () => { setDragNodeId(null); };
 
   return (
     <div className={styles.workspaceOverlay}>
@@ -861,45 +882,43 @@ function OrchestrationWorkspace({
         <div className={styles.workspaceTopBar}>
           <div className={styles.topBarLeft}>
             <button className={styles.backBtn} onClick={onClose}>
-              ← 返回配置
+              <Icons.X size={14} /> 返回配置
             </button>
             <div className={styles.topBarTitle}>
-              <span className={styles.topBarIcon}>⚙</span>
+              <Icons.Settings className={styles.topBarIcon} size={20} />
               高级编排工作流
             </div>
           </div>
           <div className={styles.topBarRight}>
             {customParams.length > 0 && (
               <div className={styles.paramsBadge}>
-                📌 可用入参: {customParams.map(p => p.key).join(', ')}
+                <Icons.Info size={14} /> 可用入参: {customParams.map(p => p.key).join(', ')}
               </div>
             )}
             <button className={styles.refreshBtn} onClick={fetchInputData} disabled={inputLoading}>
-              {inputLoading ? '⏳ 获取中...' : '🔄 刷新数据'}
+              <Icons.Refresh className={inputLoading ? 'animate-spin' : ''} size={14} />
+              {inputLoading ? '获取中...' : '刷新数据'}
             </button>
             <button
               className={`${styles.runBtn} ${debugLoading ? styles.running : ''}`}
               onClick={runFullPipeline}
               disabled={debugLoading || nodes.length === 0}
             >
-              {debugLoading ? '⏳ 执行中...' : '➡️ 编排试运行'}
+              <Icons.Activity size={14} />
+              {debugLoading ? '执行中...' : '编排试运行'}
             </button>
-            <button
-              className={styles.saveBtn}
-              onClick={saveWorkflowConfig}
-              disabled={saveLoading}
-            >
-              {saveLoading ? '⏳ 保存中...' : '💾 保存编排'}
+            <button className={styles.saveBtn} onClick={saveWorkflowConfig} disabled={saveLoading}>
+              <Icons.Check size={14} />
+              {saveLoading ? '保存中...' : '保存编排'}
             </button>
           </div>
         </div>
 
         <div className={styles.workspaceBody}>
-          {/* Left: Canvas */}
           <div className={styles.canvasArea}>
             {/* Node Toolbar */}
             <div className={styles.canvasToolbar}>
-              <span className={styles.toolbarLabel}>添加节点:</span>
+              <span className={styles.toolbarLabel}>添加处理节点:</span>
               {(Object.entries(NODE_TYPE_META) as [OrchestrationNodeType, typeof NODE_TYPE_META[OrchestrationNodeType]][]).map(([type, meta]) => (
                 <button key={type} className={styles.addNodeBtn} onClick={() => addNode(type)}>
                   <span className={styles.nodeTypeIcon}>{meta.icon}</span>
@@ -911,158 +930,187 @@ function OrchestrationWorkspace({
             {/* Pipeline Canvas */}
             {nodes.length === 0 ? (
               <div className={styles.pipelineEmpty}>
-                <div className={styles.emptyIcon}>🔗</div>
-                <div>点击上方按钮添加编排节点，构建数据处理管线</div>
-                <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
-                  支持: 数据筛选 → 字段映射 → 字段新增 → 排序限制
+                <div className={styles.emptyIcon}><Icons.Layers size={56} /></div>
+                <div style={{ fontSize: 16, fontWeight: 600, color: 'var(--color-text)' }}>开始构建您的管线</div>
+                <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 8 }}>
+                  添加节点来筛选、映射或计算您的API返回数据
                 </div>
               </div>
             ) : (
-              <>
-                <div className={styles.pipeline}>
-                  <div className={`${styles.endpointBox} ${styles.input}`}>
-                    <span className={styles.endpointIcon}>📥</span>
-                    <span className={styles.endpointLabel}>输入</span>
-                  </div>
-                  {sortedNodes.map((node, index) => (
-                    <div key={node.id} style={{ display: 'flex', alignItems: 'flex-start' }}>
-                      <div className={styles.connector}><div className={styles.connectorLine} /></div>
-                      <div
-                        className={`${styles.nodeCard} ${editingNodeId === node.id ? styles.active : ''} ${dragNodeId === node.id ? styles.dragging : ''}`}
-                        draggable
-                        onDragStart={(e) => handleDragStart(e, node.id)}
-                        onDragOver={handleDragOver}
-                        onDrop={(e) => handleDrop(e, node.id)}
-                        onDragEnd={handleDragEnd}
-                        onClick={() => setEditingNodeId(editingNodeId === node.id ? null : node.id)}
-                      >
-                        <span className={styles.nodeOrderBadge}>{index + 1}</span>
-                        <div className={styles.nodeCardHeader}>
-                          <span className={`${styles.nodeTypeTag} ${styles[NODE_TYPE_META[node.type].color]}`}>
-                            {NODE_TYPE_META[node.type].icon} {NODE_TYPE_META[node.type].label}
-                          </span>
-                          <div className={styles.nodeActions}>
-                            <button className={`${styles.nodeActionBtn} ${styles.debug}`}
-                              onClick={(e) => { e.stopPropagation(); debugNode(node.id); }} title="调试到此节点">🐛</button>
-                            <button className={`${styles.nodeActionBtn} ${styles.delete}`}
-                              onClick={(e) => { e.stopPropagation(); removeNode(node.id); }} title="删除节点">🗑</button>
-                          </div>
-                        </div>
-                        <div className={styles.nodeCardBody}><NodeSummary node={node} /></div>
-                      </div>
-                    </div>
-                  ))}
-                  <div className={styles.connector}><div className={styles.connectorLine} /></div>
-                  <div className={`${styles.endpointBox} ${styles.output}`}>
-                    <span className={styles.endpointIcon}>📤</span>
-                    <span className={styles.endpointLabel}>输出</span>
-                  </div>
+              <div className={styles.pipeline}>
+                <div className={`${styles.endpointBox} ${styles.input}`}>
+                  <span className={styles.endpointIcon}><Icons.Server size={24} /></span>
+                  <span className={styles.endpointLabel}>INPUT</span>
                 </div>
-                <div className={styles.dragHint}>💡 拖拽节点卡片可调整执行顺序 · 点击节点可在右侧编辑</div>
-              </>
+                {sortedNodes.map((node, index) => (
+                  <div key={node.id} style={{ display: 'flex', alignItems: 'center' }}>
+                    <div className={styles.connector}><div className={styles.connectorLine} /></div>
+                    <div
+                      className={`${styles.nodeCard} ${editingNodeId === node.id ? styles.active : ''} ${dragNodeId === node.id ? styles.dragging : ''}`}
+                      draggable
+                      onDragStart={(e) => handleDragStart(e, node.id)}
+                      onDragOver={handleDragOver}
+                      onDrop={(e) => handleDrop(e, node.id)}
+                      onDragEnd={() => setDragNodeId(null)}
+                      onClick={() => setEditingNodeId(editingNodeId === node.id ? null : node.id)}
+                    >
+                      <span className={styles.nodeOrderBadge}>{index + 1}</span>
+                      <div className={styles.nodeCardHeader}>
+                        <span className={`${styles.nodeTypeTag} ${styles[NODE_TYPE_META[node.type].color]}`}>
+                          {NODE_TYPE_META[node.type].icon} {node.label || NODE_TYPE_META[node.type].label}
+                        </span>
+                        <div className={styles.nodeActions}>
+                          <button className={`${styles.nodeActionBtn} ${styles.debug}`}
+                            onClick={(e) => { e.stopPropagation(); debugNode(node.id); }} title="调试到此"><Icons.Activity size={12} /></button>
+                          <button className={`${styles.nodeActionBtn} ${styles.delete}`}
+                            onClick={(e) => { e.stopPropagation(); removeNode(node.id); }} title="删除"><Icons.Trash size={12} /></button>
+                        </div>
+                      </div>
+                      <div className={styles.nodeCardBody}><NodeSummary node={node} /></div>
+                    </div>
+                  </div>
+                ))}
+                <div className={styles.connector}><div className={styles.connectorLine} /></div>
+                <div className={`${styles.endpointBox} ${styles.output}`}>
+                  <span className={styles.endpointIcon}><Icons.Monitor size={24} /></span>
+                  <span className={styles.endpointLabel}>OUTPUT</span>
+                </div>
+              </div>
             )}
 
-            {/* Input/Output Data Preview */}
+            {/* Bottom Data Preview */}
             <div className={styles.dataPreviewArea}>
-              <div className={styles.dataPreviewPane}>
-                <div className={styles.dataPreviewHeader}>
-                  📥 输入数据
-                  <button className={styles.miniBtn} onClick={fetchInputData} disabled={inputLoading}>
-                    {inputLoading ? '⏳' : '🔄'}
-                  </button>
+              <div className={styles.dataPreviewTabs}>
+                <div className={`${styles.dataPreviewTab} ${activeTab === 'input' ? styles.active : ''}`} onClick={() => setActiveTab('input')}>
+                  <Icons.Server size={14} style={{ marginRight: 6 }} /> 输入数据
                 </div>
-                {customParams.length > 0 && (
-                  <div className={styles.previewParamsPanel}>
-                    <div className={styles.previewParamsHint}>先填写真实入参，再点击刷新获取真实返回数据</div>
-                    <div className={styles.previewParamsGrid}>
-                      {customParams.map((param) => (
-                        <label key={param.key} className={styles.previewParamItem}>
-                          <span className={styles.previewParamLabel}>{param.key}</span>
-                          <input
-                            type={param.type === 'number' || param.type === 'integer' ? 'number' : 'text'}
-                            value={previewParams[param.key] || ''}
-                            onChange={(e) => setPreviewParams((prev) => ({ ...prev, [param.key]: e.target.value }))}
-                            className="form-input"
-                            placeholder={param.defaultValue || ''}
-                            style={{ fontSize: 12, height: 30 }}
-                          />
-                        </label>
-                      ))}
+                <div className={`${styles.dataPreviewTab} ${activeTab === 'config' ? styles.active : ''}`} onClick={() => setActiveTab('config')}>
+                  <Icons.Code size={14} style={{ marginRight: 6 }} /> 配置 JSON
+                </div>
+                {debugResult && (
+                  <div className={`${styles.dataPreviewTab} ${activeTab === 'output' ? styles.active : ''}`} onClick={() => setActiveTab('output')}>
+                    <Icons.Activity size={14} style={{ marginRight: 6 }} /> 编排输出
+                  </div>
+                )}
+              </div>
+              <div className={styles.dataPreviewContent}>
+                {activeTab === 'input' && (
+                  <div className={styles.inputTabContent}>
+                    <div className={styles.inputSubSection}>
+                      <div className={styles.subSectionHeader}>
+                        <span><Icons.Edit size={12} style={{ marginRight: 6 }} /> 参数输入 (Parameter Input)</span>
+                      </div>
+                      {customParams.length > 0 ? (
+                        <div className={styles.previewParamsPanel}>
+                          <div className={styles.previewParamsGrid}>
+                            {customParams.map((param) => (
+                              <label key={param.key} className={styles.previewParamItem}>
+                                <span className={styles.previewParamLabel}>{param.key}</span>
+                                <input
+                                  type={param.type === 'number' || param.type === 'integer' ? 'number' : 'text'}
+                                  value={previewParams[param.key] || ''}
+                                  onChange={(e) => setPreviewParams((prev) => ({ ...prev, [param.key]: e.target.value }))}
+                                  className="form-input"
+                                  placeholder={param.defaultValue || ''}
+                                  style={{ fontSize: 12, height: 32 }}
+                                />
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+                      ) : (
+                        <div style={{ padding: 20, color: 'var(--color-text-muted)', fontSize: 12, textAlign: 'center' }}>
+                          未定义输入参数
+                        </div>
+                      )}
+                    </div>
+                    <div className={styles.inputSubSection}>
+                      <div className={styles.subSectionHeader}>
+                        <span><Icons.Server size={12} style={{ marginRight: 6 }} /> 接口输出 (Interface Output)</span>
+                        <button className={styles.miniBtn} onClick={fetchInputData} disabled={inputLoading} title="刷新接口数据">
+                          <Icons.Refresh className={inputLoading ? 'animate-spin' : ''} size={12} />
+                        </button>
+                      </div>
+                      <pre className={styles.dataPreviewPre}>
+                        {inputData ? JSON.stringify(inputData, null, 2) : (inputLoading ? '正在拉取实时数据...' : '请刷新以获取预览数据')}
+                      </pre>
                     </div>
                   </div>
                 )}
-                <pre className={styles.dataPreviewPre}>
-                  {inputData ? JSON.stringify(inputData, null, 2) : (inputLoading ? '获取中...' : '暂无数据，点击刷新获取')}
-                </pre>
-              </div>
-              <div className={styles.dataPreviewPane}>
-                <div className={styles.dataPreviewHeader}>
-                  🧾 工作流配置 JSON
-                </div>
-                <pre className={styles.dataPreviewPre}>{configJsonPreview}</pre>
-              </div>
-              {debugResult && (
-                <div className={styles.dataPreviewPane}>
-                  <div className={styles.dataPreviewHeader}>
-                    {debugResult.error
-                      ? '❌ 执行错误'
-                      : '📤 编排输出'}
-                    <button className={styles.miniBtn} onClick={() => setDebugResult(null)}>✕</button>
+                {activeTab === 'config' && (
+                  <div className={styles.dataPreviewPane}>
+                    <pre className={styles.dataPreviewPre}>{configJsonPreview}</pre>
                   </div>
-                  <pre className={styles.dataPreviewPre}>
-                    {JSON.stringify(debugResult, null, 2)}
-                  </pre>
-                </div>
-              )}
+                )}
+                {activeTab === 'output' && debugResult && (
+                  <div className={styles.dataPreviewPane} style={{ borderColor: debugResult.error ? '#ef4444' : undefined }}>
+                    <pre className={styles.dataPreviewPre}>
+                      {JSON.stringify(debugResult, null, 2)}
+                    </pre>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
-          {/* Right: Node Properties Panel */}
+          {/* Right Panel */}
           {editingNode && (
             <div className={styles.rightPanel}>
-              <div className={styles.configHeader}>
+              <div className={styles.configHeader} style={{ padding: '16px 20px' }}>
                 <div className={styles.configTitle}>
-                  <span className={`${styles.nodeTypeTag} ${styles[NODE_TYPE_META[editingNode.type].color]}`}>
+                  <div className={`${styles.nodeTypeTag} ${styles[NODE_TYPE_META[editingNode.type].color]}`} style={{ marginBottom: 4 }}>
                     {NODE_TYPE_META[editingNode.type].icon} {NODE_TYPE_META[editingNode.type].label}
-                  </span>
-                  节点配置
+                  </div>
+                  <div style={{ fontSize: 15, fontWeight: 700 }}>节点配置</div>
                 </div>
-                <button className={styles.configCloseBtn} onClick={() => setEditingNodeId(null)}>✕</button>
+                <button className={styles.configCloseBtn} onClick={() => setEditingNodeId(null)} title="关闭面板">
+                  <Icons.X size={18} />
+                </button>
               </div>
-              <div className={styles.configBody}>
-                <div className={styles.configSection}>
+              
+              <div className={styles.configBody} style={{ padding: '20px' }}>
+                <div className={styles.configSection} style={{ marginBottom: 24 }}>
                   <div className={styles.configSectionTitle}>节点名称</div>
                   <input type="text" value={editingNode.label || ''} onChange={(e) => updateNodeLabel(editingNode.id, e.target.value)}
-                    className="form-input" placeholder="自定义节点名称" style={{ fontSize: 13 }} />
+                    className="form-input" placeholder="自定义节点标签" style={{ fontSize: 13 }} />
                 </div>
-                {editingNode.type === 'filter' && (
-                  <FilterConfigEditor config={editingNode.config as FilterNodeConfig}
-                    onChange={(c) => updateNodeConfig(editingNode.id, c)}
-                    availableFields={originalInputFields} />
-                )}
-                {editingNode.type === 'map' && (
-                  <MapConfigEditor config={editingNode.config as MapNodeConfig}
-                    onChange={(c) => updateNodeConfig(editingNode.id, c)}
-                    availableFields={getAvailableFields(editingNode.id)} />
-                )}
-                {editingNode.type === 'compute' && (
-                  <ComputeConfigEditor config={editingNode.config as ComputeNodeConfig}
-                    onChange={(c) => updateNodeConfig(editingNode.id, c)}
-                    availableFields={getAvailableFields(editingNode.id)}
-                    customParams={customParams} />
-                )}
-                {editingNode.type === 'sort' && (
-                  <SortConfigEditor config={editingNode.config as SortNodeConfig}
-                    onChange={(c) => updateNodeConfig(editingNode.id, c)}
-                    availableFields={getAvailableFields(editingNode.id)}
-                    arrayFieldOptions={getArrayFieldOptions(editingNode.id)} />
-                )}
+
+                <div className={styles.configSection}>
+                  <div className={styles.configSectionTitle}>功能配置</div>
+                  {editingNode.type === 'filter' && (
+                    <FilterConfigEditor config={editingNode.config as FilterNodeConfig}
+                      onChange={(c) => updateNodeConfig(editingNode.id, c)}
+                      availableFields={originalInputFields} />
+                  )}
+                  {editingNode.type === 'map' && (
+                    <MapConfigEditor config={editingNode.config as MapNodeConfig}
+                      onChange={(c) => updateNodeConfig(editingNode.id, c)}
+                      availableFields={getAvailableFields(editingNode.id)} />
+                  )}
+                  {editingNode.type === 'compute' && (
+                    <ComputeConfigEditor config={editingNode.config as ComputeNodeConfig}
+                      onChange={(c) => updateNodeConfig(editingNode.id, c)}
+                      availableFields={getAvailableFields(editingNode.id)}
+                      customParams={customParams} />
+                  )}
+                  {editingNode.type === 'sort' && (
+                    <SortConfigEditor config={editingNode.config as SortNodeConfig}
+                      onChange={(c) => updateNodeConfig(editingNode.id, c)}
+                      availableFields={getAvailableFields(editingNode.id)}
+                      arrayFieldOptions={getArrayFieldOptions(editingNode.id)} />
+                  )}
+                </div>
               </div>
-              <div className={styles.configFooter}>
+
+              <div className={styles.configFooter} style={{ padding: '16px 20px' }}>
                 <button className="btn btn-secondary btn-sm" onClick={() => debugNode(editingNode.id)} disabled={debugLoading}>
-                  🐛 调试此节点
+                  <Icons.Activity size={12} style={{ marginRight: 6 }} />
+                  调试节点
                 </button>
-                <button className="btn btn-primary btn-sm" onClick={() => setEditingNodeId(null)}>完成</button>
+                <button className="btn btn-primary btn-sm" onClick={() => setEditingNodeId(null)}>
+                  <Icons.Check size={12} style={{ marginRight: 6 }} />
+                  完成配置
+                </button>
               </div>
             </div>
           )}
@@ -1091,26 +1139,24 @@ export default function OrchestrationEditor({
 
   return (
     <>
-      {/* Toggle Entry Row */}
       <div className={styles.orchestrationEntry}>
         <div className={styles.entryLeft}>
-          <span className={styles.entryIcon}>⚙</span>
+          <div className={styles.entryIcon}><Icons.Settings size={20} /></div>
           <div className={styles.entryInfo}>
-            <div className={styles.entryTitle}>高级编排</div>
-            <div className={styles.entryDesc}>对API返回结果进行JSON数据编排处理</div>
+            <div className={styles.entryTitle}>高级数据编排</div>
+            <div className={styles.entryDesc}>对接口返回结果进行实时数据清洗与转换</div>
           </div>
           {nodeCount > 0 ? (
-            <span className={styles.statusConfigured}>✓ 已编排</span>
+            <span className={styles.statusConfigured}><Icons.Check size={10} /> 已启用 {nodeCount} 个节点</span>
           ) : (
-            <span className={styles.statusUnconfigured}>未编排</span>
+            <span className={styles.statusUnconfigured}>未启用</span>
           )}
         </div>
-        <button className={styles.entryNavBtn} onClick={() => setShowWorkspace(true)} title="打开编排工作流">
-          ›
+        <button className={styles.entryNavBtn} onClick={() => setShowWorkspace(true)} title="配置工作流">
+          <Icons.ChevronRight size={20} />
         </button>
       </div>
 
-      {/* Full-screen Workspace */}
       {showWorkspace && (
         <OrchestrationWorkspace
           config={config}
@@ -1125,3 +1171,5 @@ export default function OrchestrationEditor({
     </>
   );
 }
+
+

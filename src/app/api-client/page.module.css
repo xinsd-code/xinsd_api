@@ -1,119 +1,71 @@
 .workspace {
   display: flex;
   height: 100%;
-  gap: 20px;
+  gap: 16px;
+  overflow: hidden;
 }
 
 .sidebar {
   width: 320px;
-  background: var(--color-bg-card);
+  background: white;
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-xl);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  box-shadow: var(--shadow-sm);
 }
 
 .sidebarHeader {
-  padding: 16px;
+  padding: 20px 24px;
   border-bottom: 1px solid var(--color-border);
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 16px;
 }
 
 .sidebarTitle {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-weight: 600;
+  font-weight: 800;
   font-size: 16px;
+  letter-spacing: -0.02em;
 }
 
 .apiList {
   flex: 1;
   overflow-y: auto;
+  padding: 8px 0;
 }
 
 .apiItem {
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--color-border);
+  padding: 12px 24px;
   cursor: pointer;
-  transition: background var(--transition-fast);
+  transition: all var(--transition-fast);
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 
 .apiItem:hover {
-  background: var(--color-bg-hover);
+  background: var(--color-bg-subtle);
 }
 
 .apiItem.active {
-  background: var(--color-primary-lighter);
-}
-
-.apiItemHeader {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.apiItemName {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--color-text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.apiItemUrl {
-  font-size: 12px;
-  color: var(--color-text-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-family: var(--font-mono);
+  background: var(--color-bg-subtle);
+  border-right: 3px solid var(--color-primary);
 }
 
 .mainPanel {
   flex: 1;
-  background: var(--color-bg-card);
+  background: white;
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-xl);
   display: flex;
   flex-direction: column;
   overflow: hidden;
-}
-
-.requestBar {
-  padding: 16px;
-  border-bottom: 1px solid var(--color-border);
-  display: flex;
-  gap: 12px;
-  align-items: center;
-}
-
-.urlInput {
-  flex: 1;
-  display: flex;
-}
-
-.urlInput select {
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
-  border-right: none;
-  width: 110px;
-  background: var(--color-bg-hover);
-  font-weight: 600;
-}
-
-.urlInput input {
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
-  flex: 1;
-  font-family: var(--font-mono);
+  box-shadow: var(--shadow-md);
 }
 
 .editorBody {
@@ -122,46 +74,6 @@
   flex-direction: column;
   overflow: hidden;
 }
-
-.panels {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  height: 100%;
-}
-
-.configPanel {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  border-bottom: 1px solid var(--color-border);
-  overflow-y: auto;
-}
-
-.panelContent {
-  padding: 16px;
-}
-
-.responsePanel {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  background: var(--color-bg);
-  overflow-y: auto;
-  padding: 16px;
-}
-
-.responseHeader {
-  display: flex;
-  justify-content: flex-start;
-  gap: 24px;
-  margin-bottom: 12px;
-  font-size: 13px;
-  color: var(--color-text-secondary);
-}
-
-.statusOk { color: var(--color-success); font-weight: 600; }
-.statusErr { color: var(--color-danger); font-weight: 600; }
 
 .emptyCenter {
   display: flex;
@@ -172,4 +84,6 @@
   font-size: 14px;
   flex-direction: column;
   gap: 12px;
+  text-align: center;
+  padding: 40px;
 }

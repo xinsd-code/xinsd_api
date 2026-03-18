@@ -1,9 +1,10 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { ApiForwardConfig, CustomParamDef, ParamBinding, MockAPI, ApiClientConfig, KeyValuePair, OrchestrationConfig } from '@/lib/types';
 import JsonEditor from '@/components/JsonEditor';
 import OrchestrationEditor from '@/components/OrchestrationEditor';
+import { Icons } from '@/components/Icons';
 import styles from './page.module.css';
 
 function CustomParamEditor({
@@ -29,28 +30,32 @@ function CustomParamEditor({
 
   return (
     <div className="card" style={{ padding: '24px', marginBottom: '24px' }}>
-      <div className="section-header">
-        <h3 className="section-title">自定义入参定义</h3>
+      <div className="section-header" style={{ marginBottom: 20 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <Icons.Layers size={18} />
+          <h3 className="section-title">输入参数定义</h3>
+        </div>
         <button onClick={handleAdd} className="btn btn-secondary btn-sm">
-          + 添加参数
+          <Icons.Plus size={14} />
+          添加参数
         </button>
       </div>
       
-      {params.length > 0 && (
-        <div>
+      {params.length > 0 ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {params.map((p, i) => (
-            <div key={i} style={{ display: 'flex', gap: '12px', marginBottom: '12px', alignItems: 'center' }}>
+            <div key={i} style={{ display: 'flex', gap: '12px', alignItems: 'center', padding: '12px', background: 'var(--color-bg-subtle)', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border)' }}>
               <input
                 type="text"
-                placeholder="参数名 (key)"
+                placeholder="键名"
                 value={p.key}
                 onChange={(e) => handleUpdate(i, 'key', e.target.value)}
-                className="form-input" style={{ flex: 1.5 }}
+                className="form-input" style={{ flex: 1.5, height: 36 }}
               />
               <select
                 value={p.type}
                 onChange={(e) => handleUpdate(i, 'type', e.target.value)}
-                className="form-select" style={{ width: '120px' }}
+                className="form-select" style={{ width: '110px', height: 36 }}
               >
                 <option value="string">string</option>
                 <option value="number">number</option>
@@ -60,27 +65,30 @@ function CustomParamEditor({
               </select>
               <input
                 type="text"
-                placeholder="默认值 (可选)"
+                placeholder="默认值"
                 value={p.defaultValue || ''}
                 onChange={(e) => handleUpdate(i, 'defaultValue', e.target.value)}
-                className="form-input" style={{ flex: 1.5 }}
+                className="form-input" style={{ flex: 1.5, height: 36 }}
               />
               <input
                 type="text"
                 placeholder="描述说明"
                 value={p.description || ''}
                 onChange={(e) => handleUpdate(i, 'description', e.target.value)}
-                className="form-input" style={{ flex: 2 }}
+                className="form-input" style={{ flex: 2, height: 36 }}
               />
               <button
                 onClick={() => handleRemove(i)}
-                className="btn btn-ghost btn-icon" style={{ color: 'var(--color-danger)' }}
-                title="删除参数"
+                className="btn btn-ghost btn-icon btn-sm" style={{ color: 'var(--color-danger)' }}
               >
-                ✕
+                <Icons.Trash size={14} />
               </button>
             </div>
           ))}
+        </div>
+      ) : (
+        <div style={{ padding: '32px', textAlign: 'center', background: 'var(--color-bg-subtle)', borderRadius: 'var(--radius-lg)', color: 'var(--color-text-muted)', fontSize: 13, border: '1px dashed var(--color-border)' }}>
+          未定义输入参数。
         </div>
       )}
     </div>
@@ -113,26 +121,28 @@ function ParamBindingEditor({
   }
 
   return (
-    <div style={{ marginTop: '20px' }}>
-      <h3 className="section-title" style={{ marginBottom: '16px' }}>参数映射 (连线)</h3>
-      <div>
+    <div style={{ marginTop: '24px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+        <Icons.Refresh size={16} />
+        <h3 style={{ fontSize: 15, fontWeight: 800 }}>参数映射绑定</h3>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {targetParams.map((tp, i) => {
           const binding = getBindingFor(tp.key);
-          const isMappingCustom = !!binding?.customParamKey;
           const isMappingStatic = !!binding?.staticValue;
           
           return (
-            <div key={i} className={styles.bindingRow}>
-              <div className={styles.bindingTarget}>
-                <div style={{ fontSize: '14px', fontWeight: 600 }}>{tp.key}</div>
-                <div style={{ fontSize: '12px', color: 'var(--color-text-muted)' }}>底层目标参数</div>
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '12px 16px', background: 'white', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)' }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: '13px', fontWeight: 700 }}>{tp.key}</div>
+                <div style={{ fontSize: '11px', color: 'var(--color-text-muted)' }}>目标接口参数</div>
               </div>
               
-              <div className={styles.bindingArrow}>{'<='}</div>
+              <Icons.ChevronRight size={16} style={{ color: 'var(--color-text-muted)' }} />
               
-              <div className={styles.bindingSource}>
+              <div style={{ flex: 2, display: 'flex', gap: 8 }}>
                 <select 
-                  className="form-select" style={{ flex: 1 }}
+                  className="form-select" style={{ flex: 1, height: 36, fontSize: 13, minWidth: '140px' }}
                   value={isMappingStatic ? '__static__' : (binding?.customParamKey || '')}
                   onChange={(e) => {
                     const val = e.target.value;
@@ -145,8 +155,8 @@ function ParamBindingEditor({
                     }
                   }}
                 >
-                  <option value="">-- 未映射 (不传递) --</option>
-                  <optgroup label="自定义入参">
+                  <option value="">-- 未绑定 --</option>
+                  <optgroup label="自定义输入参数">
                     {customParams.map(cp => (
                       <option key={cp.key} value={cp.key}>{cp.key} ({cp.type})</option>
                     ))}
@@ -157,8 +167,8 @@ function ParamBindingEditor({
                 {isMappingStatic && (
                   <input 
                     type="text" 
-                    placeholder="请输入静态值" 
-                    className="form-input" style={{ flex: 1 }}
+                    placeholder="输入固定值" 
+                    className="form-input" style={{ flex: 1, height: 36, fontSize: 13 }}
                     value={binding?.staticValue || ''}
                     onChange={(e) => handleUpdate(tp.key, '', e.target.value)}
                   />
@@ -172,7 +182,6 @@ function ParamBindingEditor({
   );
 }
 
-// --- Main Page Component ---
 export default function ApiForwardPage() {
   const [forwards, setForwards] = useState<ApiForwardConfig[]>([]);
   const [mocks, setMocks] = useState<MockAPI[]>([]);
@@ -181,7 +190,7 @@ export default function ApiForwardPage() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   
-  // Editor State
+  // 编辑器状态
   const [name, setName] = useState('');
   const [apiGroup, setApiGroup] = useState('未分组');
   const [description, setDescription] = useState('');
@@ -200,8 +209,13 @@ export default function ApiForwardPage() {
   const [runStatus, setRunStatus] = useState<number | null>(null);
   const [runTime, setRunTime] = useState<number>(0);
   const [isLoading, setIsLoading] = useState(false);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
-  // Fetch initial data
+  const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 3000);
+  }, []);
+
   useEffect(() => {
     fetchForwards();
     fetchTargets();
@@ -234,7 +248,6 @@ export default function ApiForwardPage() {
 
   const activeForward = useMemo(() => forwards.find(f => f.id === activeId), [forwards, activeId]);
 
-  // Set editor state when activeId changes
   useEffect(() => {
     if (activeForward) {
       setName(activeForward.name);
@@ -261,7 +274,7 @@ export default function ApiForwardPage() {
 
   const handleCreateNew = () => {
     setActiveId(null);
-    setName('New Forward API');
+    setName('新建转发接口');
     setApiGroup('未分组');
     setDescription('');
     setMethod('POST');
@@ -299,28 +312,23 @@ export default function ApiForwardPage() {
         if (!activeId) {
           setActiveId(saved.id);
         }
-        
-        // Show success toast (a simple implementation)
-        const toast = document.createElement('div');
-        toast.className = 'toast toast-success';
-        toast.textContent = '保存成功';
-        document.body.appendChild(toast);
-        setTimeout(() => toast.remove(), 3000);
+        showToast('配置已保存');
       } else {
-        alert('保存失败');
+        showToast('保存失败', 'error');
       }
     } catch (e) {
       console.error(e);
-      alert('保存失败');
+      showToast('保存时发生错误', 'error');
     }
   };
 
   const handleDelete = async () => {
-    if (!activeId || !confirm('确认删除该接口转发?')) return;
+    if (!activeId || !confirm('确定要删除这个转发接口吗？')) return;
     try {
       const res = await fetch(`/api/forwards/${activeId}`, { method: 'DELETE' });
       if (res.ok) {
         setActiveId(null);
+        showToast('接口已删除');
         fetchForwards();
       }
     } catch (e) {
@@ -328,8 +336,7 @@ export default function ApiForwardPage() {
     }
   };
 
-    const handleRun = async () => {
-    // Construct the current state config instead of relying solely on the saved activeForward
+  const handleRun = async () => {
     const currentConfig: ApiForwardConfig = {
       id: activeId || 'temp_id',
       name,
@@ -355,7 +362,7 @@ export default function ApiForwardPage() {
       : apiClients.find(c => c.id === targetId);
       
     if (!target) {
-      alert('绑定的目标接口不存在，请检查配置');
+      showToast('未找到目标接口', 'error');
       setIsLoading(false);
       return;
     }
@@ -414,12 +421,15 @@ export default function ApiForwardPage() {
 
     return (
       <div className={styles.configPanel}>
-        <div className={styles.panelContent}>
+        <div className={styles.panelContent} style={{ padding: 24 }}>
           <CustomParamEditor params={customParams} onChange={setCustomParams} />
 
-          <div className="card" style={{ padding: '24px' }}>
-            <h3 className="section-title" style={{ marginBottom: '20px' }}>底层服务绑定</h3>
-            <div className="form-row">
+          <div className="card" style={{ padding: '24px', marginBottom: 24 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 20 }}>
+              <Icons.Server size={18} />
+              <h3 className="section-title">后端服务绑定</h3>
+            </div>
+            <div className="form-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
               <div className="form-group">
                 <label className="form-label">服务类型</label>
                 <select
@@ -431,12 +441,12 @@ export default function ApiForwardPage() {
                   }}
                   className="form-select"
                 >
-                  <option value="api-client">API 接入 (Third-Party API)</option>
-                  <option value="mock">Mock 接入 (Mock API)</option>
+                  <option value="api-client">API 接入 (第三方接口)</option>
+                  <option value="mock">Mock 接口 (内部模拟)</option>
                 </select>
               </div>
               <div className="form-group">
-                <label className="form-label">选择具体接口</label>
+                <label className="form-label">目标接口</label>
                 <select
                   value={targetId}
                   onChange={(e) => {
@@ -445,10 +455,10 @@ export default function ApiForwardPage() {
                   }}
                   className="form-select"
                 >
-                  <option value="">-- 请选择 --</option>
+                  <option value="">-- 选择目标端点 --</option>
                   {targetType === 'mock' 
-                    ? mocks.map(m => <option key={m.id} value={m.id}>[{m.apiGroup}] {m.name} ({m.path})</option>)
-                    : apiClients.map(c => <option key={c.id} value={c.id}>[{c.apiGroup}] {c.name} ({c.url})</option>)
+                    ? mocks.map(m => <option key={m.id} value={m.id}>[{m.apiGroup}] {m.name}</option>)
+                    : apiClients.map(c => <option key={c.id} value={c.id}>[{c.apiGroup}] {c.name}</option>)
                   }
                 </select>
               </div>
@@ -464,7 +474,6 @@ export default function ApiForwardPage() {
             )}
           </div>
 
-          {/* Advanced Orchestration */}
           <OrchestrationEditor
             config={orchestration}
             onChange={setOrchestration}
@@ -487,28 +496,34 @@ export default function ApiForwardPage() {
 
   const renderRunMode = () => (
     <div className={styles.configPanel} style={{ borderBottom: 'none' }}>
-      <div className={styles.panelContent}>
+      <div className={styles.panelContent} style={{ padding: 24 }}>
         <div className="card" style={{ padding: '24px' }}>
-          <h3 className="section-title" style={{ marginBottom: '20px' }}>入参填写 (Run Parameters)</h3>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 20 }}>
+            <Icons.Settings size={18} />
+            <h3 className="section-title">运行调试参数</h3>
+          </div>
           {customParams.length === 0 ? (
-            <div className="emptyCenter" style={{ minHeight: '100px', background: 'var(--color-bg-hover)', borderRadius: 'var(--radius-md)' }}>
-              <div>该转发接口未定义任何自定义入参，可以直接点击【发送】测试。</div>
+            <div style={{ padding: '40px', textAlign: 'center', background: 'var(--color-bg-subtle)', borderRadius: 'var(--radius-lg)', color: 'var(--color-text-muted)', fontSize: 13, border: '1px dashed var(--color-border)' }}>
+              未定义输入参数，您可以直接执行请求。
             </div>
           ) : (
-            <div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
               {customParams.map(p => (
-                <div key={p.key} className={styles.runFormRow}>
-                  <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    {p.key}
-                    <span className="method-badge" style={{ background: 'var(--color-bg-badge)', color: 'var(--color-text-secondary)' }}>{p.type}</span>
-                    {p.description && <span style={{ fontSize: '12px', fontWeight: 400, color: 'var(--color-text-muted)' }}>- {p.description}</span>}
-                  </label>
+                <div key={p.key} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <label style={{ fontSize: 13, fontWeight: 700 }}>{p.key}</label>
+                      {p.description && <span style={{ fontSize: '11px', color: 'var(--color-text-muted)' }}>- {p.description}</span>}
+                    </div>
+                    <span style={{ fontSize: 10, fontWeight: 700, background: 'var(--color-bg-hover)', padding: '2px 8px', borderRadius: 4, textTransform: 'uppercase', color: 'var(--color-text-muted)' }}>{p.type}</span>
+                  </div>
                   <input
                     type={p.type === 'number' || p.type === 'integer' ? 'number' : 'text'}
                     value={runParams[p.key] || ''}
                     onChange={(e) => setRunParams({ ...runParams, [p.key]: e.target.value })}
-                    placeholder={p.defaultValue ? `默认值: ${p.defaultValue}` : `输入 ${p.key}`}
-                    className="form-input form-input-mono"
+                    placeholder={p.defaultValue ? `默认值: ${p.defaultValue}` : `请输入 ${p.key} 的值`}
+                    className="form-input"
+                    style={{ fontFamily: 'var(--font-mono)', fontSize: 13 }}
                   />
                 </div>
               ))}
@@ -524,18 +539,18 @@ export default function ApiForwardPage() {
       <aside className={styles.sidebar}>
         <div className={styles.sidebarHeader}>
           <div className={styles.sidebarTitle}>
-            <span>接口转发列表</span>
-            <button className="btn btn-icon btn-ghost" onClick={handleCreateNew} title="新建转发">
-              +
+            <span>转发接口列表</span>
+            <button className="btn btn-icon btn-ghost" onClick={handleCreateNew} title="新建转发配置">
+              <Icons.Plus size={18} />
             </button>
           </div>
-          <div className="search-bar">
-            <span className="search-bar-icon">🔍</span>
+          <div className="search-bar" style={{ maxWidth: '100%' }}>
+            <Icons.Search className="search-bar-icon" size={14} />
             <input
               type="text"
-              className="form-input"
-              style={{ borderRadius: '20px', fontSize: '13px' }}
-              placeholder="搜索接口..."
+              className="search-bar-input"
+              style={{ height: '36px' }}
+              placeholder="搜索转发配置..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
@@ -544,28 +559,39 @@ export default function ApiForwardPage() {
         
         <div className={styles.apiList}>
           {Object.keys(groupedForwards).length === 0 ? (
-            <div className={styles.emptyCenter}>
-              <span style={{ fontSize: '24px' }}>🔄</span>
-              <span>暂无接口转发</span>
+            <div style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-muted)' }}>
+              <Icons.Refresh size={48} strokeWidth={1} style={{ opacity: 0.3, marginBottom: 16 }} />
+              <div style={{ fontSize: 13 }}>暂无转发配置</div>
             </div>
           ) : (
             Object.entries(groupedForwards).map(([group, list]) => (
-              <div key={group} style={{ padding: '8px 0' }}>
-                <div style={{ padding: '4px 16px', fontSize: '12px', fontWeight: 600, color: 'var(--color-text-muted)', background: 'var(--color-bg-card)', position: 'sticky', top: 0 }}>
+              <div key={group} className={styles.apiGroupContainer}>
+                <div style={{ 
+                  padding: '8px 12px', 
+                  fontSize: 11, 
+                  fontWeight: 800, 
+                  color: 'var(--color-text-muted)', 
+                  background: 'var(--color-bg-subtle)', 
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.05em',
+                  margin: '2px 4px',
+                  borderRadius: 'var(--radius-md)'
+                }}>
                   {group}
                 </div>
-                <div>
+                <div className="stagger-in">
                   {list.map(f => (
                     <div
                       key={f.id}
                       className={`${styles.apiItem} ${activeId === f.id ? styles.active : ''}`}
                       onClick={() => setActiveId(f.id)}
+                      style={{ padding: '10px 16px', cursor: 'pointer', borderBottom: '1px solid var(--color-bg-subtle)' }}
                     >
-                      <div className={styles.apiItemHeader}>
-                        <span className={`method-badge method-${f.method.toLowerCase()}`}>{f.method}</span>
-                        <span className={styles.apiItemName}>{f.name}</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
+                        <span className={`method-badge method-${f.method.toLowerCase()}`} style={{ transform: 'scale(0.8)', transformOrigin: 'left' }}>{f.method}</span>
+                        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{f.name}</span>
                       </div>
-                      <div className={styles.apiItemUrl}>{f.path}</div>
+                      <div style={{ fontSize: 11, color: 'var(--color-text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontFamily: 'var(--font-mono)' }}>{f.path}</div>
                     </div>
                   ))}
                 </div>
@@ -578,120 +604,181 @@ export default function ApiForwardPage() {
       <main className={styles.mainPanel}>
         {!activeId && !name ? (
           <div className={styles.emptyCenter}>
-            <div style={{ fontSize: 48 }}>⚡</div>
-            <div>选择左侧接口或新建一个接口进行测试</div>
-            <button className="btn btn-primary" onClick={handleCreateNew}>新建接口</button>
+            <div style={{ 
+              width: 80, 
+              height: 80, 
+              background: 'var(--color-bg-subtle)', 
+              borderRadius: 'var(--radius-xl)', 
+              display: 'flex', 
+              alignItems: 'center', 
+              justifyContent: 'center', 
+              marginBottom: 24,
+              color: 'var(--color-text-muted)'
+            }}>
+              <Icons.Refresh size={40} />
+            </div>
+            <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>API 转发与编排</h3>
+            <p style={{ color: 'var(--color-text-muted)', fontSize: 14, marginBottom: 24 }}>将入站请求映射到现有端点，并加入自定义处理逻辑。</p>
+            <button className="btn btn-primary" onClick={handleCreateNew}>
+              <Icons.Plus size={18} />
+              新建转发配置
+            </button>
           </div>
         ) : (
-          <>
-            {/* Toolbar */}
-            <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--color-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-                <input
-                  type="text"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  className="form-input"
-                  style={{ width: 200, border: 'none', background: 'transparent', fontSize: 16, fontWeight: 600, padding: 0 }}
-                  placeholder="接口名称"
-                />
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'var(--color-bg-subtle)', padding: '4px 8px', borderRadius: 6, border: '1px solid var(--color-border)' }}>
-                  <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>📂</span>
+          <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+            <div style={{ padding: '16px 24px', borderBottom: '1px solid var(--color-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'white' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 20 }}>
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
                   <input
                     type="text"
-                    onChange={(e) => setApiGroup(e.target.value)}
-                    value={apiGroup}
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
                     className="form-input"
-                    style={{ width: 120, height: 20, fontSize: 12, padding: 0, border: 'none', background: 'transparent' }}
-                    placeholder="所属分组..."
+                    style={{ border: 'none', background: 'transparent', fontSize: 18, fontWeight: 800, padding: 0, height: 'auto', marginBottom: 2 }}
+                    placeholder="请输入转发名称"
                   />
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <Icons.Layers size={12} style={{ color: 'var(--color-text-muted)' }} />
+                    <input
+                      type="text"
+                      onChange={(e) => setApiGroup(e.target.value)}
+                      value={apiGroup}
+                      className="form-input"
+                      style={{ width: 140, height: 'auto', fontSize: 12, padding: 0, border: 'none', background: 'transparent', fontWeight: 600, color: 'var(--color-text-secondary)' }}
+                      placeholder="分组名称..."
+                    />
+                  </div>
                 </div>
-                <div className="tabs" style={{ margin: 0 }}>
+                
+                <div className="tabs" style={{ margin: 0, height: 40, width: 240 }}>
                   <button 
                     className={`tab ${viewMode === 'design' ? 'active' : ''}`} 
                     onClick={() => setViewMode('design')}
-                    style={{ padding: '4px 12px', fontSize: 13 }}
                   >
-                    配置模式 (Design)
+                    配置设计
                   </button>
                   <button 
                     className={`tab ${viewMode === 'run' ? 'active' : ''}`} 
                     onClick={() => setViewMode('run')}
-                    style={{ padding: '4px 12px', fontSize: 13 }}
                   >
-                    运行调试 (Run)
+                    运行调试
                   </button>
                 </div>
               </div>
-              <div style={{ display: 'flex', gap: 8 }}>
+              <div style={{ display: 'flex', gap: 12 }}>
                 {activeId && (
-                  <button onClick={handleDelete} className="btn btn-danger btn-sm">删除</button>
+                  <button className="btn btn-ghost btn-icon" onClick={handleDelete} title="删除">
+                    <Icons.Trash size={18} style={{ color: 'var(--color-danger)' }} />
+                  </button>
                 )}
-                <button onClick={handleSave} className="btn btn-secondary btn-sm">保存配置</button>
+                <button className="btn btn-primary" onClick={handleSave}>
+                  保存转发配置
+                </button>
               </div>
             </div>
 
-            {/* Request Bar */}
-            <div className={styles.requestBar}>
-              <div className={styles.urlInput}>
-                <select
-                  value={method}
-                  onChange={(e) => setMethod(e.target.value)}
-                  className="form-select"
-                >
-                  <option value="GET">GET</option>
-                  <option value="POST">POST</option>
-                  <option value="PUT">PUT</option>
-                  <option value="DELETE">DELETE</option>
-                  <option value="PATCH">PATCH</option>
-                  <option value="OPTIONS">OPTIONS</option>
-                  <option value="HEAD">HEAD</option>
-                </select>
-                <input
-                  type="text"
-                  value={path}
-                  onChange={(e) => setPath(e.target.value)}
-                  className="form-input"
-                  placeholder="暴露的 API 路径，如 /forward/my-service"
-                />
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+              <div style={{ padding: '24px', borderBottom: '1px solid var(--color-border)', background: 'var(--color-bg-subtle)' }}>
+                <div style={{ display: 'flex', gap: 12, maxWidth: 1000 }}>
+                  <div style={{ display: 'flex', flex: 1, background: 'white', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)', overflow: 'hidden', boxShadow: 'var(--shadow-sm)' }}>
+                    <select
+                      value={method}
+                      onChange={(e) => setMethod(e.target.value)}
+                      className="form-select"
+                      style={{ width: '110px', border: 'none', borderRight: '1px solid var(--color-border)', borderRadius: 0, fontWeight: 700, fontSize: 13, height: '42px' }}
+                    >
+                      <option value="GET">GET</option>
+                      <option value="POST">POST</option>
+                      <option value="PUT">PUT</option>
+                      <option value="DELETE">DELETE</option>
+                      <option value="PATCH">PATCH</option>
+                    </select>
+                    <input
+                      type="text"
+                      value={path}
+                      onChange={(e) => setPath(e.target.value)}
+                      className="form-input"
+                      style={{ flex: 1, border: 'none', fontFamily: 'var(--font-mono)', fontSize: 13 }}
+                      placeholder="/api/v1/forward/endpoint"
+                    />
+                  </div>
+                  <button 
+                    className="btn btn-primary" 
+                    onClick={handleRun}
+                    disabled={isLoading}
+                    style={{ width: 120, height: 42 }}
+                  >
+                    {isLoading ? <div style={{ width: 16, height: 16, border: '2px solid white', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></div> : <Icons.Zap size={18} />}
+                    {isLoading ? '' : '执行测试'}
+                  </button>
+                </div>
               </div>
-              <button 
-                className="btn btn-primary" 
-                onClick={handleRun}
-                disabled={isLoading}
-                style={{ width: 100, justifyContent: 'center' }}
-              >
-                {isLoading ? '发送中...' : '发 送'}
-              </button>
-            </div>
 
-            <div className={styles.editorBody}>
-              <div className={styles.panels} style={{ display: 'flex', width: '100%', height: '100%', gap: '16px', overflow: 'hidden' }}>
-                <div style={{ flex: 1, overflowY: 'auto' }}>
+              <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+                <div style={{ flex: 1, overflowY: 'auto', borderRight: '1px solid var(--color-border)' }}>
                   {viewMode === 'design' ? renderDesignMode() : renderRunMode()}
                 </div>
+                
                 {runResult && (
-                  <div className={styles.responsePanel} style={{ borderLeft: '1px solid var(--color-border)', flex: 1, height: '100%', overflowY: 'auto' }}>
-                    <div className={styles.responseHeader}>
-                      <span className={runStatus && runStatus >= 200 && runStatus < 300 ? styles.statusOk : styles.statusErr}>
-                        状态码: {runStatus || 'Error'}
-                      </span>
-                      <span>耗时: <span style={{ color: 'var(--color-primary)', fontWeight: 600 }}>{runTime} ms</span></span>
+                  <div style={{ flex: 1, background: 'var(--color-bg-subtle)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                    <div style={{ padding: '16px 24px', borderBottom: '1px solid var(--color-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'white' }}>
+                      <div style={{ display: 'flex', gap: 16 }}>
+                        <div style={{ display: 'flex', flexDirection: 'column' }}>
+                          <span style={{ fontSize: 10, fontWeight: 800, color: 'var(--color-text-muted)', textTransform: 'uppercase', marginBottom: 2 }}>响应状态</span>
+                          <span style={{ 
+                            fontSize: 14, 
+                            fontWeight: 800, 
+                            color: runStatus && runStatus >= 200 && runStatus < 300 ? 'var(--color-success)' : 'var(--color-danger)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 6
+                          }}>
+                            {runStatus && runStatus >= 200 && runStatus < 300 ? <Icons.Check size={14} /> : <Icons.Info size={14} />}
+                            {runStatus || '错误'}
+                          </span>
+                        </div>
+                        <div style={{ width: 1, height: 24, background: 'var(--color-border)', alignSelf: 'center' }}></div>
+                        <div style={{ display: 'flex', flexDirection: 'column' }}>
+                          <span style={{ fontSize: 10, fontWeight: 800, color: 'var(--color-text-muted)', textTransform: 'uppercase', marginBottom: 2 }}>执行耗时</span>
+                          <span style={{ fontSize: 14, fontWeight: 800 }}>{runTime} ms</span>
+                        </div>
+                      </div>
+                      
+                      <button className="btn btn-secondary btn-sm" onClick={() => setRunResult(null)}>
+                        清除结果
+                      </button>
                     </div>
-                    <div className="card" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-                      <JsonEditor
-                        value={typeof runResult === 'string' ? runResult : JSON.stringify(runResult, null, 2)}
-                        onChange={() => {}}
-                        height={250}
-                      />
+                    
+                    <div style={{ flex: 1, padding: 24, overflowY: 'auto' }}>
+                      <div className="card" style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+                        <div style={{ padding: '8px 16px', background: 'var(--color-bg-subtle)', borderBottom: '1px solid var(--color-border)', fontSize: 11, fontWeight: 700, color: 'var(--color-text-muted)', textTransform: 'uppercase' }}>
+                          运行输出结果
+                        </div>
+                        <JsonEditor
+                          value={typeof runResult === 'string' ? runResult : JSON.stringify(runResult, null, 2)}
+                          onChange={() => {}}
+                          height={400}
+                        />
+                      </div>
                     </div>
                   </div>
                 )}
               </div>
             </div>
-          </>
+          </div>
         )}
       </main>
+
+      {toast && (
+        <div className={`toast toast-${toast.type}`}>
+          {toast.type === 'success' ? <Icons.Check size={18} /> : <Icons.Info size={18} />}
+          {toast.message}
+        </div>
+      )}
+      
+      <style dangerouslySetInnerHTML={{ __html: `
+        @keyframes spin { to { transform: rotate(360deg); } }
+      `}} />
     </div>
   );
 }

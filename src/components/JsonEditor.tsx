@@ -1,6 +1,7 @@
 'use client';
 
 import { useRef, useEffect } from 'react';
+import { Icons } from './Icons';
 
 interface JsonEditorProps {
   value: string;
@@ -22,7 +23,7 @@ export default function JsonEditor({ value, onChange, height = 200 }: JsonEditor
       const parsed = JSON.parse(value);
       onChange(JSON.stringify(parsed, null, 2));
     } catch {
-      // invalid JSON, don't format
+      // 格式不正确，跳过格式化
     }
   };
 
@@ -31,7 +32,7 @@ export default function JsonEditor({ value, onChange, height = 200 }: JsonEditor
       const parsed = JSON.parse(value);
       onChange(JSON.stringify(parsed));
     } catch {
-      // invalid JSON, don't format
+      // 格式不正确，跳过压缩
     }
   };
 
@@ -45,17 +46,27 @@ export default function JsonEditor({ value, onChange, height = 200 }: JsonEditor
   })();
 
   return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-        <span style={{ fontSize: 12, color: isValidJson ? 'var(--color-success)' : 'var(--color-danger)', fontWeight: 500 }}>
-          {isValidJson ? '✓ 有效 JSON' : '✕ 无效 JSON'}
-        </span>
-        <div style={{ display: 'flex', gap: 6 }}>
-          <button className="btn btn-ghost btn-sm" onClick={handleFormat}>格式化</button>
-          <button className="btn btn-ghost btn-sm" onClick={handleMinify}>压缩</button>
+    <div className="card" style={{ border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)', overflow: 'hidden', background: 'white' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 16px', background: 'var(--color-bg-subtle)', borderBottom: '1px solid var(--color-border)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {isValidJson ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--color-success)', fontSize: 11, fontWeight: 700, textTransform: 'uppercase' }}>
+              <Icons.Check size={12} />
+              JSON 格式正确
+            </div>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--color-danger)', fontSize: 11, fontWeight: 700, textTransform: 'uppercase' }}>
+              <Icons.Info size={12} />
+              JSON 格式有误
+            </div>
+          )}
+        </div>
+        <div style={{ display: 'flex', gap: 4 }}>
+          <button className="btn btn-ghost btn-sm" style={{ height: 24, fontSize: 11, fontWeight: 700, padding: '0 8px' }} onClick={handleFormat}>格式化</button>
+          <button className="btn btn-ghost btn-sm" style={{ height: 24, fontSize: 11, fontWeight: 700, padding: '0 8px' }} onClick={handleMinify}>压缩</button>
         </div>
       </div>
-      <div className="editor-container">
+      <div style={{ padding: 0 }}>
         <textarea
           ref={textareaRef}
           value={value}
@@ -71,10 +82,12 @@ export default function JsonEditor({ value, onChange, height = 200 }: JsonEditor
             fontSize: 13,
             lineHeight: 1.6,
             color: 'var(--color-text)',
-            background: '#fafbfc',
+            background: 'transparent',
             tabSize: 2,
+            display: 'block'
           }}
           spellCheck={false}
+          placeholder='{ "data": "在此处输入 JSON" }'
         />
       </div>
     </div>
