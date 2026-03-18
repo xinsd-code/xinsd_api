@@ -23,6 +23,28 @@ const NODE_TYPE_META: Record<OrchestrationNodeType, { icon: React.ReactNode; lab
   sort: { icon: <Icons.Activity size={14} />, label: '排序限制', color: 'sort' },
 };
 
+interface AiChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  error?: boolean;
+  diffLines?: string[];
+}
+
+interface ValidationIssue {
+  severity: 'warning' | 'error';
+  message: string;
+  nodeId?: string;
+}
+
+type AiChatMode = 'general' | 'fix-validation';
+
+const AI_CHAT_SUGGESTIONS = [
+  '保留核心字段并整理输出结构',
+  '把列表按时间倒序，只保留最近 20 条',
+  '新增计算字段，组合多个字段生成展示文案',
+];
+
 function createDefaultConfig(type: OrchestrationNodeType): FilterNodeConfig | MapNodeConfig | ComputeNodeConfig | SortNodeConfig {
   switch (type) {
     case 'filter': return { mode: 'include', fields: [] };
@@ -34,6 +56,265 @@ function createDefaultConfig(type: OrchestrationNodeType): FilterNodeConfig | Ma
 
 function generateNodeId(): string {
   return 'n_' + Math.random().toString(36).substring(2, 9);
+}
+
+function generateChatMessageId(): string {
+  return 'm_' + Math.random().toString(36).substring(2, 9);
+}
+
+function parseSseBlocks(buffer: string): { events: Array<{ event: string; data: string }>; rest: string } {
+  const events: Array<{ event: string; data: string }> = [];
+  let remaining = buffer;
+
+  let boundaryIndex = remaining.indexOf('\n\n');
+  while (boundaryIndex !== -1) {
+    const block = remaining.slice(0, boundaryIndex);
+    remaining = remaining.slice(boundaryIndex + 2);
+
+    const lines = block
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (lines.length > 0) {
+      const event = lines.find((line) => line.startsWith('event:'))?.slice(6).trim() || 'message';
+      const data = lines
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).trim())
+        .join('\n');
+
+      if (data) {
+        events.push({ event, data });
+      }
+    }
+
+    boundaryIndex = remaining.indexOf('\n\n');
+  }
+
+  return { events, rest: remaining };
+}
+
+function summarizeWorkflowDiff(previous: OrchestrationConfig, next: OrchestrationConfig): string[] {
+  const previousNodes = previous.nodes || [];
+  const nextNodes = next.nodes || [];
+  const previousMap = new Map(previousNodes.map((node) => [node.id, node]));
+  const nextMap = new Map(nextNodes.map((node) => [node.id, node]));
+  const lines: string[] = [];
+
+  const addedNodes = nextNodes.filter((node) => !previousMap.has(node.id));
+  const removedNodes = previousNodes.filter((node) => !nextMap.has(node.id));
+  const changedNodes = nextNodes.filter((node) => {
+    const previousNode = previousMap.get(node.id);
+    if (!previousNode) return false;
+    return previousNode.label !== node.label
+      || previousNode.order !== node.order
+      || JSON.stringify(previousNode.config) !== JSON.stringify(node.config);
+  });
+
+  if (addedNodes.length > 0) {
+    lines.push(`新增 ${addedNodes.length} 个节点：${addedNodes.slice(0, 3).map((node) => node.label || NODE_TYPE_META[node.type].label).join('、')}${addedNodes.length > 3 ? '…' : ''}`);
+  }
+  if (removedNodes.length > 0) {
+    lines.push(`删除 ${removedNodes.length} 个节点：${removedNodes.slice(0, 3).map((node) => node.label || NODE_TYPE_META[node.type].label).join('、')}${removedNodes.length > 3 ? '…' : ''}`);
+  }
+  if (changedNodes.length > 0) {
+    lines.push(`修改 ${changedNodes.length} 个节点：${changedNodes.slice(0, 3).map((node) => node.label || NODE_TYPE_META[node.type].label).join('、')}${changedNodes.length > 3 ? '…' : ''}`);
+  }
+  if (lines.length === 0) {
+    lines.push('未检测到结构差异，可能仅做了细微标准化或说明性修复。');
+  }
+
+  return lines;
+}
+
+function normalizeSortFieldValue(sortField: string, arrayPath: string): string {
+  const normalizedSortField = normalizePath(sortField || '');
+  const normalizedArrayPath = normalizePath(arrayPath || '');
+
+  if (!normalizedSortField) return '';
+  if (normalizedArrayPath && normalizedSortField.startsWith(`${normalizedArrayPath}.`)) {
+    return normalizedSortField.slice(normalizedArrayPath.length + 1);
+  }
+  if (normalizedSortField.startsWith('[].')) {
+    return normalizedSortField.slice(3);
+  }
+  return normalizedSortField;
+}
+
+function rebasePathPrefix(path: string, fromPrefix: string, toPrefix: string): string {
+  if (!path || !fromPrefix || !toPrefix || fromPrefix === toPrefix) return path;
+  if (path === fromPrefix) return toPrefix;
+  if (path.startsWith(`${fromPrefix}[].`)) {
+    return `${toPrefix}[].${path.slice(fromPrefix.length + 3)}`;
+  }
+  if (path.startsWith(`${fromPrefix}.`)) {
+    return `${toPrefix}.${path.slice(fromPrefix.length + 1)}`;
+  }
+  return path;
+}
+
+function extractArrayPrefixes(paths: string[]): string[] {
+  return Array.from(
+    new Set(
+      paths
+        .filter((path) => path.includes('[].'))
+        .map((path) => path.slice(0, path.indexOf('[].')))
+        .filter(Boolean)
+    )
+  ).sort((a, b) => a.localeCompare(b));
+}
+
+function normalizeSortNodeConfig(config: SortNodeConfig): { config: SortNodeConfig; changed: boolean } {
+  const rawArrayPath = normalizePath(config.arrayPath || '');
+  const rawSortField = normalizePath(config.sortField || '');
+
+  if (!rawSortField) {
+    const nextArrayPath = rawArrayPath;
+    const changed = nextArrayPath !== (config.arrayPath || '');
+    return {
+      config: {
+        ...config,
+        arrayPath: nextArrayPath,
+      },
+      changed,
+    };
+  }
+
+  let nextArrayPath = rawArrayPath;
+  let nextSortField = rawSortField;
+
+  if (!nextArrayPath && rawSortField.includes('[].')) {
+    const markerIndex = rawSortField.indexOf('[].');
+    nextArrayPath = rawSortField.slice(0, markerIndex);
+    nextSortField = rawSortField.slice(markerIndex + 3);
+  } else {
+    nextSortField = normalizeSortFieldValue(rawSortField, nextArrayPath);
+  }
+
+  const changed = nextArrayPath !== (config.arrayPath || '') || nextSortField !== (config.sortField || '');
+
+  return {
+    config: {
+      ...config,
+      arrayPath: nextArrayPath,
+      sortField: nextSortField,
+    },
+    changed,
+  };
+}
+
+function normalizeWorkflowConfig(config: OrchestrationConfig): { config: OrchestrationConfig; changes: string[] } {
+  const changes: string[] = [];
+
+  const nodes = config.nodes.map((node) => {
+    if (node.type !== 'sort') return node;
+
+    const normalized = normalizeSortNodeConfig(node.config as SortNodeConfig);
+    if (!normalized.changed) return node;
+
+    changes.push(`已修正排序节点“${node.label || '排序限制'}”的字段写法`);
+    return {
+      ...node,
+      config: normalized.config,
+    };
+  });
+
+  return {
+    config: { ...config, nodes },
+    changes,
+  };
+}
+
+function projectFieldPathsByMappings(paths: string[], mappings: MapNodeConfig['mappings']): string[] {
+  const projected = [...paths];
+
+  for (const mapping of mappings) {
+    if (!mapping.from || !mapping.to) continue;
+
+    for (let i = 0; i < projected.length; i++) {
+      projected[i] = rebasePathPrefix(projected[i], mapping.from, mapping.to);
+    }
+  }
+
+  return Array.from(new Set(projected)).sort((a, b) => a.localeCompare(b));
+}
+
+function validateWorkflowConfig(
+  config: OrchestrationConfig,
+  arrayFieldOptions: ArrayFieldOption[]
+): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const arrayPathSet = new Set(arrayFieldOptions.map((option) => normalizePath(option.arrayPath || '')));
+
+  for (const node of config.nodes) {
+    const label = node.label || NODE_TYPE_META[node.type].label;
+
+    if (node.type === 'filter') {
+      const cfg = node.config as FilterNodeConfig;
+      if (!cfg.fields || cfg.fields.length === 0) {
+        issues.push({ severity: 'warning', message: `节点“${label}”尚未选择字段`, nodeId: node.id });
+      }
+      continue;
+    }
+
+    if (node.type === 'map') {
+      const cfg = node.config as MapNodeConfig;
+      if (!cfg.mappings || cfg.mappings.length === 0) {
+        issues.push({ severity: 'warning', message: `节点“${label}”尚未配置映射规则`, nodeId: node.id });
+        continue;
+      }
+
+      const invalidMapping = cfg.mappings.find((mapping) => !mapping.from || !mapping.to);
+      if (invalidMapping) {
+        issues.push({ severity: 'error', message: `节点“${label}”存在未填完整的映射规则`, nodeId: node.id });
+      }
+      continue;
+    }
+
+    if (node.type === 'compute') {
+      const cfg = node.config as ComputeNodeConfig;
+      if (!cfg.computations || cfg.computations.length === 0) {
+        issues.push({ severity: 'warning', message: `节点“${label}”尚未配置计算规则`, nodeId: node.id });
+        continue;
+      }
+
+      for (const computation of cfg.computations) {
+        if (!computation.field) {
+          issues.push({ severity: 'error', message: `节点“${label}”存在缺少目标字段的计算规则`, nodeId: node.id });
+          break;
+        }
+        if (!computation.expression && !computation.sourceField) {
+          issues.push({ severity: 'error', message: `节点“${label}”存在缺少数据来源和表达式的计算规则`, nodeId: node.id });
+          break;
+        }
+        if (computation.field.includes('[') && !computation.field.includes('[].')) {
+          issues.push({ severity: 'warning', message: `节点“${label}”的目标字段“${computation.field}”建议使用 list[].field 形式`, nodeId: node.id });
+          break;
+        }
+      }
+      continue;
+    }
+
+    if (node.type === 'sort') {
+      const cfg = normalizeSortNodeConfig(node.config as SortNodeConfig).config;
+      if (!cfg.sortField) {
+        issues.push({ severity: 'error', message: `节点“${label}”尚未选择排序字段`, nodeId: node.id });
+        continue;
+      }
+
+      const normalizedArrayPath = normalizePath(cfg.arrayPath || '');
+      if (normalizedArrayPath && arrayFieldOptions.length > 0 && !arrayPathSet.has(normalizedArrayPath)) {
+        issues.push({ severity: 'warning', message: `节点“${label}”的数组路径“${cfg.arrayPath}”未在当前输出中识别到`, nodeId: node.id });
+        continue;
+      }
+
+      const selectedArray = arrayFieldOptions.find((option) => normalizePath(option.arrayPath || '') === normalizedArrayPath);
+      if (selectedArray && cfg.sortField && !selectedArray.itemFields.includes(cfg.sortField)) {
+        issues.push({ severity: 'warning', message: `节点“${label}”的排序字段“${cfg.sortField}”不在数组项字段列表中`, nodeId: node.id });
+      }
+    }
+  }
+
+  return issues;
 }
 
 function buildPreviewParams(customParams: CustomParamDef[], baseParams: Record<string, string>): Record<string, string> {
@@ -413,10 +694,27 @@ function MapConfigEditor({
 }) {
   const addMapping = () => onChange({ ...config, mappings: [...config.mappings, { from: '', to: '' }] });
   const updateMapping = (i: number, field: 'from' | 'to', val: string) => {
-    const m = [...config.mappings]; m[i] = { ...m[i], [field]: val };
+    const m = [...config.mappings];
+    const previous = m[i];
+    m[i] = { ...m[i], [field]: val };
+
+    if (field === 'to' && previous?.to && previous.to !== val) {
+      for (let idx = i + 1; idx < m.length; idx++) {
+        m[idx] = {
+          ...m[idx],
+          from: rebasePathPrefix(m[idx].from, previous.to, val),
+          to: rebasePathPrefix(m[idx].to, previous.to, val),
+        };
+      }
+    }
+
     onChange({ ...config, mappings: m });
   };
   const removeMapping = (i: number) => onChange({ ...config, mappings: config.mappings.filter((_, idx) => idx !== i) });
+  const effectiveFieldOptionsByRow = useMemo(
+    () => config.mappings.map((_, index) => projectFieldPathsByMappings(availableFields, config.mappings.slice(0, index))),
+    [availableFields, config.mappings]
+  );
 
   return (
     <div className={styles.configSection}>
@@ -427,7 +725,7 @@ function MapConfigEditor({
             <select value={m.from} onChange={(e) => updateMapping(i, 'from', e.target.value)}
               className="form-select" style={{ flex: 1, fontSize: 13 }}>
               <option value="">选择原字段</option>
-              {availableFields.map(f => <option key={f} value={f}>{f}</option>)}
+              {(effectiveFieldOptionsByRow[i] || availableFields).map(f => <option key={f} value={f}>{f}</option>)}
             </select>
             <div style={{ display: 'flex', alignItems: 'center', color: 'var(--color-text-muted)' }}>
               <Icons.ChevronRight size={14} />
@@ -444,6 +742,9 @@ function MapConfigEditor({
         <Icons.Plus size={16} />
         添加映射规则
       </button>
+      <div className={styles.formHelperText}>
+        映射按顺序执行。若前一条规则把父级字段改名，后续规则的“原字段”下拉会自动跟随新的路径空间；修改父级目标名时，后续子级规则也会联动更新。
+      </div>
     </div>
   );
 }
@@ -462,6 +763,19 @@ function ComputeConfigEditor({
     onChange({ ...config, computations: c });
   };
   const removeComp = (i: number) => onChange({ ...config, computations: config.computations.filter((_, idx) => idx !== i) });
+  const arrayFieldExamples = useMemo(
+    () => availableFields.filter((field) => field.includes('[].')).slice(0, 4),
+    [availableFields]
+  );
+  const arrayPrefixes = useMemo(() => extractArrayPrefixes(availableFields), [availableFields]);
+  const applyArrayPrefix = (index: number, prefix: string) => {
+    if (!prefix) return;
+    const currentField = config.computations[index]?.field || '';
+    const currentSuffix = currentField.includes('[].')
+      ? currentField.slice(currentField.indexOf('[].') + 3)
+      : currentField;
+    updateComp(index, 'field', `${prefix}[].${currentSuffix || 'newField'}`);
+  };
 
   return (
     <div className={styles.configSection}>
@@ -475,8 +789,29 @@ function ComputeConfigEditor({
           </div>
           <div className={styles.formGroup}>
             <label className={styles.formLabel}>新字段名</label>
-            <input type="text" value={c.field} onChange={(e) => updateComp(i, 'field', e.target.value)}
-              className="form-input" placeholder="例如: totalPrice" style={{ fontSize: 13 }} />
+            <div className={styles.fieldInputRow}>
+              <input type="text" value={c.field} onChange={(e) => updateComp(i, 'field', e.target.value)}
+                className="form-input" placeholder="例如: totalPrice 或 userlist[].sex" style={{ fontSize: 13 }} />
+              {arrayPrefixes.length > 0 && (
+                <select
+                  className="form-select"
+                  value=""
+                  onChange={(e) => {
+                    applyArrayPrefix(i, e.target.value);
+                    e.target.value = '';
+                  }}
+                  style={{ width: 176, fontSize: 12 }}
+                >
+                  <option value="">快捷填充数组路径</option>
+                  {arrayPrefixes.map((prefix) => (
+                    <option key={prefix} value={prefix}>{prefix}[].*</option>
+                  ))}
+                </select>
+              )}
+            </div>
+            <div className={styles.formHelperText}>
+              普通对象字段直接写 `totalPrice`；写入数组每一项时请使用 `列表路径[].字段名`，例如 `userlist[].sex`
+            </div>
           </div>
           <div className={styles.formGroup}>
             <label className={styles.formLabel}>数据来源 (可选)</label>
@@ -504,6 +839,14 @@ function ComputeConfigEditor({
         <div>
           <strong>表达式支持模板语法：</strong><br />
           使用 <code>{`{{字段}}`}</code> 引用接口字段，<code>{`{{$param.入参key}}`}</code> 引用入参。支持基本算术运算。
+          <br />
+          写入数组项请把目标字段写成 <code>{`list[].field`}</code>；表达式会对数组里的每一项分别执行。
+          {arrayFieldExamples.length > 0 && (
+            <>
+              <br />
+              当前可参考的数组字段示例：<code>{arrayFieldExamples.join(', ')}</code>
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -523,13 +866,21 @@ function SortConfigEditor({
   const normalizedArrayPath = normalizePath(config.arrayPath || '');
   const selectedArray = arrayFieldOptions.find(option => normalizePath(option.arrayPath) === normalizedArrayPath);
   const sortFields = selectedArray?.itemFields || availableFields;
+  const normalizedSortField = normalizeSortFieldValue(config.sortField || '', config.arrayPath || '');
+
+  useEffect(() => {
+    if (config.sortField && config.sortField !== normalizedSortField) {
+      onChange({ ...config, sortField: normalizedSortField });
+    }
+  }, [config, normalizedSortField, onChange]);
 
   const handleArrayPathChange = (value: string) => {
     const normalizedNextPath = normalizePath(value);
     const nextArray = arrayFieldOptions.find(option => normalizePath(option.arrayPath) === normalizedNextPath);
-    const nextSortField = nextArray && config.sortField && !nextArray.itemFields.includes(config.sortField)
+    const currentSortField = normalizeSortFieldValue(config.sortField || '', value);
+    const nextSortField = nextArray && currentSortField && !nextArray.itemFields.includes(currentSortField)
       ? ''
-      : config.sortField;
+      : currentSortField;
     onChange({ ...config, arrayPath: value, sortField: nextSortField });
   };
 
@@ -537,38 +888,51 @@ function SortConfigEditor({
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       <div className={styles.formGroup}>
         <label className={styles.formLabel}>目标数组路径</label>
-        <input
-          type="text"
-          list="array-path-options"
-          value={config.arrayPath}
-          onChange={(e) => handleArrayPathChange(e.target.value)}
-          className="form-input"
-          placeholder="留空表示根数组，或如 data.items"
-          style={{ fontSize: 13 }}
-        />
-        <datalist id="array-path-options">
-          <option value="">(根数组)</option>
-          {arrayFieldOptions.map(option => (
-            <option key={option.arrayPath || '__root'} value={option.arrayPath}>
-              {option.arrayPath || '(根数组)'}
-            </option>
-          ))}
-        </datalist>
+        {arrayFieldOptions.length > 0 ? (
+          <select
+            value={config.arrayPath}
+            onChange={(e) => handleArrayPathChange(e.target.value)}
+            className="form-select"
+            style={{ fontSize: 13 }}
+          >
+            <option value="">(根数组)</option>
+            {arrayFieldOptions.map(option => (
+              <option key={option.arrayPath || '__root'} value={option.arrayPath}>
+                {option.arrayPath || '(根数组)'}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input
+            type="text"
+            value={config.arrayPath}
+            onChange={(e) => handleArrayPathChange(e.target.value)}
+            className="form-input"
+            placeholder="留空表示根数组，或如 data.items"
+            style={{ fontSize: 13 }}
+          />
+        )}
         {selectedArray && (
           <div style={{ marginTop: 6, fontSize: 11, color: 'var(--color-primary)', fontWeight: 500 }}>
             <Icons.Check size={10} style={{ marginRight: 4 }} />
             当前识别到路径下的字段
           </div>
         )}
+        <div className={styles.formHelperText}>
+          这里填写数组本身的路径，例如 `userlist` 或 `data.items`；不要把字段名一起写进来。
+        </div>
       </div>
 
       <div className={styles.formGroup}>
         <label className={styles.formLabel}>排序字段</label>
-        <select value={config.sortField} onChange={(e) => onChange({ ...config, sortField: e.target.value })}
+        <select value={normalizedSortField} onChange={(e) => onChange({ ...config, sortField: e.target.value })}
           className="form-select" style={{ fontSize: 13 }}>
           <option value="">请选择排序字段...</option>
           {sortFields.map(f => <option key={f} value={f}>{f}</option>)}
         </select>
+        <div className={styles.formHelperText}>
+          这里只填数组项内部字段，例如选择了 `userlist` 后，这里应填 `age`，而不是 `userlist[].age`
+        </div>
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
@@ -676,7 +1040,7 @@ function OrchestrationWorkspace({
 }: {
   config: OrchestrationConfig;
   onChange: (config: OrchestrationConfig) => void;
-  onSave?: () => Promise<void> | void;
+  onSave?: (config?: OrchestrationConfig) => Promise<void> | void;
   onClose: () => void;
   forwardConfig: ForwardConfigRef;
   customParams: CustomParamDef[];
@@ -693,6 +1057,58 @@ function OrchestrationWorkspace({
   const [saveLoading, setSaveLoading] = useState(false);
   const [dragNodeId, setDragNodeId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'input' | 'config' | 'output'>('input');
+  const [previewHeight, setPreviewHeight] = useState(320);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatInput, setChatInput] = useState('');
+  const [chatLoading, setChatLoading] = useState(false);
+  const [chatMessages, setChatMessages] = useState<AiChatMessage[]>([
+    {
+      id: generateChatMessageId(),
+      role: 'assistant',
+      content: '我可以根据接口 output、当前编排 scheme、节点格式和入参定义，直接帮你生成或修改工作流配置。',
+    },
+  ]);
+  const isResizing = useRef(false);
+  const chatMessagesEndRef = useRef<HTMLDivElement>(null);
+  const [saveNotice, setSaveNotice] = useState<string | null>(null);
+
+  const handleMouseMove = useCallback((e: MouseEvent) => {
+    if (!isResizing.current) return;
+    const newHeight = window.innerHeight - e.clientY;
+    // Set boundaries for the preview height (min 150px, max 80% of window height)
+    if (newHeight > 150 && newHeight < window.innerHeight * 0.8) {
+      setPreviewHeight(newHeight);
+    }
+  }, []);
+
+  const stopResizing = useCallback(() => {
+    isResizing.current = false;
+    document.removeEventListener('mousemove', handleMouseMove);
+    document.removeEventListener('mouseup', stopResizing);
+    document.body.style.cursor = 'default';
+    document.body.style.userSelect = 'auto';
+  }, [handleMouseMove]);
+
+  const startResizing = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isResizing.current = true;
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', stopResizing);
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+  }, [handleMouseMove, stopResizing]);
+
+  useEffect(() => {
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', stopResizing);
+    };
+  }, [handleMouseMove, stopResizing]);
+
+  useEffect(() => {
+    if (!chatOpen) return;
+    chatMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatMessages, chatOpen]);
 
   const nodes = config?.nodes || [];
   const sortedNodes = [...nodes].sort((a, b) => a.order - b.order);
@@ -703,10 +1119,30 @@ function OrchestrationWorkspace({
     () => (inputData ? extractFieldPaths(inputData) : []),
     [inputData]
   );
+  const rootArrayFieldOptions = useMemo(
+    () => (inputData ? extractArrayFieldOptions(inputData) : []),
+    [inputData]
+  );
+  const validationIssues = useMemo(
+    () => validateWorkflowConfig({ nodes: sortedNodes }, rootArrayFieldOptions),
+    [sortedNodes, rootArrayFieldOptions]
+  );
+  const validationErrorCount = validationIssues.filter((issue) => issue.severity === 'error').length;
+  const focusNode = useCallback((nodeId: string) => {
+    setEditingNodeId(nodeId);
+    setActiveTab('config');
+    setChatOpen(false);
+    requestAnimationFrame(() => {
+      const nodeElement = document.querySelector(`[data-node-id="${nodeId}"]`);
+      if (nodeElement instanceof HTMLElement) {
+        nodeElement.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+      }
+    });
+  }, []);
 
   // 获取输入数据
-  const fetchInputData = useCallback(async () => {
-    if (!forwardConfig.targetId) return;
+  const fetchInputData = useCallback(async (): Promise<unknown | null> => {
+    if (!forwardConfig.targetId) return null;
     setInputLoading(true);
     try {
       const res = await fetch('/api/forwards/execute', {
@@ -731,10 +1167,14 @@ function OrchestrationWorkspace({
       });
       if (res.ok) {
         const result = await res.json();
-        setInputData(result.data || result);
+        const nextInputData = result.data || result;
+        setInputData(nextInputData);
+        return nextInputData;
       }
+      return null;
     } catch (err) {
       console.error('Failed to fetch input data', err);
+      return null;
     } finally {
       setInputLoading(false);
     }
@@ -854,8 +1294,190 @@ function OrchestrationWorkspace({
 
   const saveWorkflowConfig = async () => {
     if (!onSave) return;
+    const normalized = normalizeWorkflowConfig({ nodes: sortedNodes });
+    const normalizedIssues = validateWorkflowConfig(normalized.config, rootArrayFieldOptions);
+    if (normalized.changes.length > 0) {
+      updateNodes(normalized.config.nodes);
+      setSaveNotice(normalized.changes.join('；'));
+    } else {
+      setSaveNotice(null);
+    }
+
+    const blockingIssues = normalizedIssues.filter((issue) => issue.severity === 'error');
+    if (blockingIssues.length > 0) {
+      setSaveNotice(`发现 ${blockingIssues.length} 个需要先修复的问题`);
+      return;
+    }
+
     setSaveLoading(true);
-    try { await onSave(); } finally { setSaveLoading(false); }
+    try { await onSave(normalized.config); } finally { setSaveLoading(false); }
+  };
+
+  const sendChatMessage = async (preset?: string, mode: AiChatMode = 'general') => {
+    const content = (preset ?? chatInput).trim();
+    if (!content || chatLoading) return;
+
+    const blockingValidationIssues = validationIssues.filter((issue) => issue.severity === 'error');
+    if (mode === 'fix-validation' && blockingValidationIssues.length === 0) {
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          id: generateChatMessageId(),
+          role: 'assistant',
+          content: '当前没有体检报错需要修复。若你想顺手优化 warning，可以直接使用常规 AI Chat。',
+        },
+      ]);
+      setChatOpen(true);
+      return;
+    }
+
+    const nextUserMessage: AiChatMessage = {
+      id: generateChatMessageId(),
+      role: 'user',
+      content: mode === 'fix-validation' ? `[只修复体检报错模式]\n${content}` : content,
+    };
+
+    const nextConversation = [
+      ...chatMessages.map((message) => ({ role: message.role, content: message.content })),
+      { role: nextUserMessage.role, content: nextUserMessage.content },
+    ];
+    const assistantMessageId = generateChatMessageId();
+    const previousConfigSnapshot: OrchestrationConfig = { nodes: sortedNodes };
+
+    setChatMessages((prev) => [
+      ...prev,
+      nextUserMessage,
+      {
+        id: assistantMessageId,
+        role: 'assistant',
+        content: '正在理解你的需求并生成工作流配置...',
+      },
+    ]);
+    setChatInput('');
+    setChatLoading(true);
+    setChatOpen(true);
+
+    try {
+      const sampleOutput = inputData ?? await fetchInputData();
+      const res = await fetch('/api/forwards/ai-chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          stream: true,
+          mode,
+          messages: nextConversation,
+          currentConfig: { nodes: sortedNodes },
+          sampleOutput,
+          customParams,
+          runParams: previewParams,
+          forwardConfig,
+          validationIssues: mode === 'fix-validation' ? blockingValidationIssues : validationIssues,
+        }),
+      });
+
+      if (!res.ok) {
+        const errorText = await res.text();
+        try {
+          const errorData = errorText ? JSON.parse(errorText) as { error?: string } : {};
+          throw new Error(errorData.error || 'AI 编排请求失败');
+        } catch {
+          throw new Error(errorText || 'AI 编排请求失败');
+        }
+      }
+
+      if (!res.body) {
+        throw new Error('AI 流式响应不可用');
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let finalMessage = '';
+      let finalConfig: OrchestrationConfig | null = null;
+      let previewText = '';
+
+      const updateAssistantMessage = (message: string, error = false, diffLines?: string[]) => {
+        setChatMessages((prev) => prev.map((item) => (
+          item.id === assistantMessageId
+            ? { ...item, content: message, error, diffLines }
+            : item
+        )));
+      };
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const parsed = parseSseBlocks(buffer);
+        buffer = parsed.rest;
+
+        for (const block of parsed.events) {
+          const payload = JSON.parse(block.data) as Record<string, unknown>;
+
+          if (block.event === 'delta') {
+            const chunk = typeof payload.content === 'string' ? payload.content : '';
+            if (!chunk) continue;
+            previewText += chunk;
+            updateAssistantMessage(previewText);
+            continue;
+          }
+
+          if (block.event === 'done') {
+            finalMessage = typeof payload.message === 'string'
+              ? payload.message
+              : '已根据你的要求更新工作流，并同步渲染到工作流画布。';
+            const rawConfig = payload.config && typeof payload.config === 'object'
+              ? payload.config as OrchestrationConfig
+              : { nodes: [] };
+            const normalized = normalizeWorkflowConfig(rawConfig);
+            const aiArrayFieldOptions = sampleOutput ? extractArrayFieldOptions(sampleOutput) : rootArrayFieldOptions;
+            const aiIssues = validateWorkflowConfig(normalized.config, aiArrayFieldOptions);
+            const notes: string[] = [];
+            if (normalized.changes.length > 0) {
+              notes.push(normalized.changes.join('；'));
+            }
+            if (aiIssues.length > 0) {
+              const topIssues = aiIssues.slice(0, 3).map((issue) => issue.message).join('；');
+              notes.push(`体检发现 ${aiIssues.length} 项问题：${topIssues}${aiIssues.length > 3 ? '…' : ''}`);
+            }
+            finalConfig = normalized.config;
+            updateAssistantMessage(
+              notes.length > 0 ? `${finalMessage}\n\n${notes.join('\n')}` : finalMessage,
+              false,
+              summarizeWorkflowDiff(previousConfigSnapshot, normalized.config)
+            );
+            continue;
+          }
+
+          if (block.event === 'error') {
+            throw new Error(typeof payload.error === 'string' ? payload.error : 'AI 流式响应处理失败');
+          }
+        }
+      }
+
+      if (finalConfig) {
+        updateNodes(finalConfig.nodes);
+        const nextIssues = validateWorkflowConfig(finalConfig, sampleOutput ? extractArrayFieldOptions(sampleOutput) : rootArrayFieldOptions);
+        const focusTargetId = nextIssues[0]?.nodeId || finalConfig.nodes[0]?.id || null;
+        if (focusTargetId) {
+          focusNode(focusTargetId);
+        } else {
+          setEditingNodeId(null);
+          setActiveTab('config');
+        }
+      } else {
+        throw new Error('AI 未返回最终工作流配置');
+      }
+    } catch (err) {
+      setChatMessages((prev) => prev.map((item) => (
+        item.id === assistantMessageId
+          ? { ...item, content: err instanceof Error ? err.message : 'AI 编排请求失败', error: true }
+          : item
+      )));
+    } finally {
+      setChatLoading(false);
+    }
   };
 
   const handleDragStart = (e: React.DragEvent, nodeId: string) => {
@@ -896,6 +1518,17 @@ function OrchestrationWorkspace({
                 <Icons.Info size={14} /> 可用入参: {customParams.map(p => p.key).join(', ')}
               </div>
             )}
+            {validationIssues.length > 0 && (
+              <div className={styles.warningBadge}>
+                <Icons.AlertTriangle size={14} />
+                体检发现 {validationIssues.length} 项问题{validationErrorCount > 0 ? `，其中 ${validationErrorCount} 项需先修复` : ''}
+              </div>
+            )}
+            {saveNotice && (
+              <div className={styles.noticeBadge}>
+                <Icons.Check size={14} /> {saveNotice}
+              </div>
+            )}
             <button className={styles.refreshBtn} onClick={fetchInputData} disabled={inputLoading}>
               <Icons.Refresh className={inputLoading ? 'animate-spin' : ''} size={14} />
               {inputLoading ? '获取中...' : '刷新数据'}
@@ -915,6 +1548,23 @@ function OrchestrationWorkspace({
           </div>
         </div>
 
+        {validationIssues.length > 0 && (
+          <div className={styles.validationPanel}>
+            {validationIssues.map((issue, index) => (
+              <button
+                key={`${issue.message}-${index}`}
+                type="button"
+                className={`${styles.validationItem} ${issue.severity === 'error' ? styles.error : styles.warning} ${issue.nodeId ? styles.clickable : ''}`}
+                onClick={() => issue.nodeId && focusNode(issue.nodeId)}
+                disabled={!issue.nodeId}
+              >
+                <Icons.AlertTriangle size={14} />
+                <span>{issue.message}</span>
+              </button>
+            ))}
+          </div>
+        )}
+
         <div className={styles.workspaceBody}>
           <div className={styles.canvasArea}>
             {/* Node Toolbar */}
@@ -926,6 +1576,15 @@ function OrchestrationWorkspace({
                   {meta.label}
                 </button>
               ))}
+              <div className={styles.toolbarSpacer} />
+              <button
+                className={`${styles.addNodeBtn} ${styles.chatTriggerBtn}`}
+                onClick={() => setChatOpen(true)}
+                title="打开 AI Chat 对话页"
+              >
+                <Icons.MessageSquare size={14} />
+                AI Chat
+              </button>
             </div>
 
             {/* Pipeline Canvas */}
@@ -948,6 +1607,7 @@ function OrchestrationWorkspace({
                     <div className={styles.connector}><div className={styles.connectorLine} /></div>
                     <div
                       className={`${styles.nodeCard} ${editingNodeId === node.id ? styles.active : ''} ${dragNodeId === node.id ? styles.dragging : ''}`}
+                      data-node-id={node.id}
                       draggable
                       onDragStart={(e) => handleDragStart(e, node.id)}
                       onDragOver={handleDragOver}
@@ -980,7 +1640,10 @@ function OrchestrationWorkspace({
             )}
 
             {/* Bottom Data Preview */}
-            <div className={styles.dataPreviewArea}>
+            <div className={styles.dataPreviewArea} style={{ height: previewHeight }}>
+              <div className={styles.resizer} onMouseDown={startResizing}>
+                <div className={styles.resizerHandle} />
+              </div>
               <div className={styles.dataPreviewTabs}>
                 <div className={`${styles.dataPreviewTab} ${activeTab === 'input' ? styles.active : ''}`} onClick={() => setActiveTab('input')}>
                   <Icons.Server size={14} style={{ marginRight: 6 }} /> 输入数据
@@ -1115,6 +1778,117 @@ function OrchestrationWorkspace({
               </div>
             </div>
           )}
+
+          {chatOpen && (
+            <div className={styles.chatPanelOverlay}>
+              <div className={styles.chatPanel}>
+                <div className={styles.chatPanelHeader}>
+                  <div>
+                    <div className={styles.chatPanelTitle}>
+                      <Icons.Sparkles size={16} />
+                      AI Chat 对话页
+                    </div>
+                    <div className={styles.chatPanelDesc}>
+                      基于当前编排 scheme、节点格式、参数定义和接口 output 生成工作流配置
+                    </div>
+                  </div>
+                  <button className={styles.configCloseBtn} onClick={() => setChatOpen(false)} title="关闭 AI Chat">
+                    <Icons.X size={18} />
+                  </button>
+                </div>
+
+                <div className={styles.chatContextBar}>
+                  <span>当前节点 {sortedNodes.length}</span>
+                  <span>可用参数 {customParams.length}</span>
+                  <span>{inputData ? '已加载 output' : '待加载 output'}</span>
+                </div>
+
+                <div className={styles.chatSuggestionRow}>
+                  {AI_CHAT_SUGGESTIONS.map((suggestion) => (
+                    <button
+                      key={suggestion}
+                      className={styles.chatSuggestionBtn}
+                      onClick={() => void sendChatMessage(suggestion)}
+                      disabled={chatLoading}
+                    >
+                      {suggestion}
+                    </button>
+                  ))}
+                </div>
+
+                <div className={styles.chatMessages}>
+                  {chatMessages.map((message) => (
+                    <div
+                      key={message.id}
+                      className={`${styles.chatMessage} ${message.role === 'user' ? styles.user : styles.assistant} ${message.error ? styles.error : ''}`}
+                    >
+                      <div className={styles.chatMessageRole}>
+                        {message.role === 'user' ? '你' : 'AI'}
+                      </div>
+                      <div className={styles.chatMessageBubble}>
+                        {message.content}
+                        {message.diffLines && message.diffLines.length > 0 && (
+                          <div className={styles.chatDiffCard}>
+                            <div className={styles.chatDiffTitle}>本次改动摘要</div>
+                            {message.diffLines.map((line, index) => (
+                              <div key={`${message.id}-diff-${index}`} className={styles.chatDiffItem}>
+                                <span className={styles.chatDiffBullet}>•</span>
+                                <span>{line}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  {chatLoading && (
+                    <div className={`${styles.chatMessage} ${styles.assistant}`}>
+                      <div className={styles.chatMessageRole}>AI</div>
+                      <div className={styles.chatMessageBubble}>正在分析接口输出并生成可渲染的工作流配置...</div>
+                    </div>
+                  )}
+                  <div ref={chatMessagesEndRef} />
+                </div>
+
+                <div className={styles.chatComposer}>
+                  <textarea
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                        e.preventDefault();
+                        void sendChatMessage();
+                      }
+                    }}
+                    className={styles.chatTextarea}
+                    placeholder="例如：保留 data.list 下的 id、name、status，新增 displayName 字段，并按 updatedAt 倒序只保留 10 条。"
+                  />
+                  <div className={styles.chatComposerFooter}>
+                    <span className={styles.chatComposerHint}>Ctrl/Command + Enter 发送，并自动应用到画布</span>
+                    <div className={styles.chatComposerActions}>
+                      <button
+                        className={styles.chatFixBtn}
+                        onClick={() => void sendChatMessage(chatInput || '请仅修复当前体检报错，尽量少改动无关节点。', 'fix-validation')}
+                        disabled={chatLoading || validationErrorCount === 0}
+                        title={validationErrorCount === 0 ? '当前没有体检报错' : '仅修复当前体检报错'}
+                      >
+                        <Icons.AlertTriangle size={14} />
+                        只修复体检报错
+                      </button>
+                      <button
+                        className={styles.chatSendBtn}
+                        onClick={() => void sendChatMessage()}
+                        disabled={chatLoading || !chatInput.trim()}
+                      >
+                        <Icons.Send size={14} />
+                        {chatLoading ? '生成中...' : '发送并应用'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -1130,7 +1904,7 @@ export default function OrchestrationEditor({
 }: {
   config: OrchestrationConfig;
   onChange: (config: OrchestrationConfig) => void;
-  onSave?: () => Promise<void> | void;
+  onSave?: (config?: OrchestrationConfig) => Promise<void> | void;
   forwardConfig: ForwardConfigRef;
   customParams: CustomParamDef[];
   runParams: Record<string, string>;

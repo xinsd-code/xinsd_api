@@ -329,43 +329,99 @@ function removeByPath(data: unknown, path: string): unknown {
   return removeBySegments(data, segments, 0);
 }
 
-function applyArrayItemMapping(data: unknown, fromPath: string, toPath: string): unknown {
+function splitArrayItemPath(path: string): { arrayPath: string; itemPath: string } | null {
   const marker = '[].';
-  const markerIndex = fromPath.indexOf(marker);
-  if (markerIndex === -1) return data;
+  const markerIndex = path.indexOf(marker);
+  if (markerIndex === -1) return null;
 
-  const arrayPath = fromPath.slice(0, markerIndex);
-  const itemSourcePath = fromPath.slice(markerIndex + marker.length);
-  if (!itemSourcePath) return data;
+  const arrayPath = path.slice(0, markerIndex);
+  const itemPath = path.slice(markerIndex + marker.length);
+  if (!itemPath) return null;
 
-  const sourceArray = arrayPath ? getByPath(data, arrayPath) : data;
+  return { arrayPath, itemPath };
+}
+
+function applyArrayItemMapping(data: unknown, sourceData: unknown, fromPath: string, toPath: string): unknown {
+  const fromMeta = splitArrayItemPath(fromPath);
+  if (!fromMeta) return data;
+
+  const targetMeta = splitArrayItemPath(toPath);
+  const sourceArrayPath = fromMeta.arrayPath;
+  const itemSourcePath = fromMeta.itemPath;
+  const targetArrayPath = targetMeta?.arrayPath ?? sourceArrayPath;
+  const itemTargetPath = targetMeta?.itemPath ?? toPath;
+
+  const sourceArrayFromCurrent = sourceArrayPath ? getByPath(data, sourceArrayPath) : data;
+  const sourceArrayFromOriginal = sourceArrayPath ? getByPath(sourceData, sourceArrayPath) : sourceData;
+  const sourceArray = Array.isArray(sourceArrayFromCurrent)
+    ? sourceArrayFromCurrent
+    : sourceArrayFromOriginal;
   if (!Array.isArray(sourceArray)) return data;
 
-  const itemTargetPath = toPath.includes('.') || toPath.includes('[')
-    ? toPath
-    : (() => {
-      const sourceSegments = itemSourcePath.split('.');
-      if (sourceSegments.length <= 1) return toPath;
-      sourceSegments[sourceSegments.length - 1] = toPath;
-      return sourceSegments.join('.');
-    })();
+  const targetArrayFromCurrent = targetArrayPath ? getByPath(data, targetArrayPath) : data;
+  const targetArray = Array.isArray(targetArrayFromCurrent) ? targetArrayFromCurrent : null;
 
-  const mappedArray = sourceArray.map((item) => {
-    if (!isRecord(item)) return item;
-    const sourceValue = getByPath(item, itemSourcePath);
-    if (sourceValue === undefined) return item;
+  const mappedArray = sourceArray.map((sourceItem, index) => {
+    if (!isRecord(sourceItem)) return sourceItem;
+    const sourceValue = getByPath(sourceItem, itemSourcePath);
+    const targetItemCandidate = targetArray?.[index];
+    const baseItem = isRecord(targetItemCandidate)
+      ? targetItemCandidate
+      : sourceItem;
+    if (sourceValue === undefined) return baseItem;
 
-    let updatedItem = setByPath(item, itemTargetPath, sourceValue);
+    let updatedItem = setByPath(baseItem, itemTargetPath, sourceValue);
     if (itemTargetPath !== itemSourcePath) {
       updatedItem = removeByPath(updatedItem, itemSourcePath);
     }
     return updatedItem;
   });
 
-  if (arrayPath) {
-    return setByPath(data, arrayPath, mappedArray);
+  if (targetArrayPath) {
+    return setByPath(data, targetArrayPath, mappedArray);
   }
   return mappedArray;
+}
+
+function applyArrayItemCompute(
+  data: unknown,
+  fieldPath: string,
+  expression: string | undefined,
+  sourceField: string | undefined,
+  context?: Record<string, unknown>
+): unknown {
+  const marker = '[].';
+  const markerIndex = fieldPath.indexOf(marker);
+  if (markerIndex === -1) return data;
+
+  const arrayPath = fieldPath.slice(0, markerIndex);
+  const itemTargetPath = fieldPath.slice(markerIndex + marker.length);
+  if (!itemTargetPath) return data;
+
+  const sourceArray = arrayPath ? getByPath(data, arrayPath) : data;
+  if (!Array.isArray(sourceArray)) return data;
+
+  const computedArray = sourceArray.map((item) => {
+    if (!isRecord(item)) return item;
+
+    let computedValue: unknown = undefined;
+    if (sourceField) {
+      computedValue = resolveRefValue(sourceField, item, context);
+    } else if (expression) {
+      try {
+        computedValue = safeEvaluate(expression, item, context);
+      } catch {
+        computedValue = expression;
+      }
+    }
+
+    return setByPath(item, itemTargetPath, computedValue);
+  });
+
+  if (arrayPath) {
+    return setByPath(data, arrayPath, computedArray);
+  }
+  return computedArray;
 }
 
 /**
@@ -402,14 +458,15 @@ function applyMap(data: unknown, config: MapNodeConfig): unknown {
     return data.map(item => applyMap(item, config));
   }
 
+  const sourceSnapshot = deepClone(data);
   let result: Record<string, unknown> = { ...data };
   for (const mapping of config.mappings) {
     if (mapping.from.includes('[].')) {
-      result = applyArrayItemMapping(result, mapping.from, mapping.to) as Record<string, unknown>;
+      result = applyArrayItemMapping(result, sourceSnapshot, mapping.from, mapping.to) as Record<string, unknown>;
       continue;
     }
 
-    const val = getByPath(result, mapping.from);
+    const val = getByPath(result, mapping.from) ?? getByPath(sourceSnapshot, mapping.from);
     if (val !== undefined) {
       const nextResult = setByPath(result, mapping.to, val);
       result = nextResult as Record<string, unknown>;
@@ -436,6 +493,11 @@ function applyCompute(data: unknown, config: ComputeNodeConfig, context?: Record
   let result: Record<string, unknown> = { ...data };
   for (const comp of config.computations) {
     if (!comp.field) continue;
+
+    if (comp.field.includes('[].')) {
+      result = applyArrayItemCompute(result, comp.field, comp.expression, comp.sourceField, context) as Record<string, unknown>;
+      continue;
+    }
     
     let computedValue: unknown = undefined;
     if (comp.sourceField) {

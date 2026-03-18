@@ -288,9 +288,21 @@ export default function ApiForwardPage() {
     setRunResult(null);
   };
 
-  const handleSave = async () => {
+  const handleSave = async (nextOrchestration?: OrchestrationConfig | React.MouseEvent<HTMLButtonElement>) => {
+    const orchestrationToSave = nextOrchestration && 'nodes' in nextOrchestration
+      ? nextOrchestration
+      : orchestration;
     const payload = {
-      name, apiGroup, description, method, path, customParams, targetType, targetId, paramBindings, orchestration
+      name,
+      apiGroup,
+      description,
+      method,
+      path,
+      customParams,
+      targetType,
+      targetId,
+      paramBindings,
+      orchestration: orchestrationToSave,
     };
 
     try {
