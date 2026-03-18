@@ -86,6 +86,36 @@ export interface ApiForwardConfig {
 export type CreateApiForwardConfig = Omit<ApiForwardConfig, 'id' | 'createdAt' | 'updatedAt'>;
 export type UpdateApiForwardConfig = Partial<CreateApiForwardConfig>;
 
+export type AIModelAuthType = 'none' | 'bearer' | 'custom-header';
+
+export interface AIModelProfile {
+  id: string;
+  name: string;
+  baseUrl: string;
+  authType: AIModelAuthType;
+  authToken?: string;
+  authHeaderName?: string;
+  modelIds: string[];
+  defaultModelId: string;
+  isDefault: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type CreateAIModelProfile = Omit<AIModelProfile, 'id' | 'createdAt' | 'updatedAt'>;
+export type UpdateAIModelProfile = Partial<CreateAIModelProfile>;
+
+export interface AIModelSelection {
+  profileId: string;
+  profileName: string;
+  baseUrl: string;
+  authType: AIModelAuthType;
+  authToken?: string;
+  authHeaderName?: string;
+  modelId: string;
+  isDefault?: boolean;
+}
+
 // --- Orchestration Types ---
 
 export interface FilterNodeConfig {

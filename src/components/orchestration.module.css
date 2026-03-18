@@ -1194,6 +1194,126 @@
   color: var(--color-text-muted);
 }
 
+.chatHeaderActions {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.chatModelPicker {
+  position: relative;
+}
+
+.chatModelBtn {
+  min-width: 220px;
+  max-width: 300px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  height: 36px;
+  border-radius: 12px;
+  border: 1px solid rgba(99, 102, 241, 0.18);
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--color-primary);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  box-shadow: var(--shadow-sm);
+}
+
+.chatModelBtn span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chatModelBtn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.chatModelMenu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 320px;
+  padding: 12px;
+  border-radius: 16px;
+  border: 1px solid var(--color-border);
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.16);
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chatModelMenuHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-muted);
+}
+
+.chatModelRefreshBtn {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg);
+  color: var(--color-text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.chatModelOption {
+  text-align: left;
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  background: var(--color-bg);
+  padding: 10px 12px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--color-text-secondary);
+}
+
+.chatModelOption strong {
+  color: var(--color-text);
+  font-size: 13px;
+}
+
+.chatModelOption span {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-primary);
+}
+
+.chatModelOption.active,
+.chatModelOption:hover {
+  border-color: rgba(99, 102, 241, 0.2);
+  background: rgba(99, 102, 241, 0.06);
+}
+
+.chatModelEmpty {
+  padding: 12px;
+  border-radius: 14px;
+  background: var(--color-bg-subtle);
+  border: 1px dashed var(--color-border);
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+}
+
 .chatContextBar {
   display: flex;
   flex-wrap: wrap;
@@ -1424,6 +1544,53 @@
   cursor: not-allowed;
 }
 
+.modelReminderCard {
+  width: min(480px, calc(100% - 32px));
+  margin: auto;
+  padding: 28px;
+  border-radius: 24px;
+  background:
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.1), transparent 34%),
+    radial-gradient(circle at bottom left, rgba(16, 185, 129, 0.1), transparent 30%),
+    rgba(255, 255, 255, 0.98);
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.modelReminderIcon {
+  width: 52px;
+  height: 52px;
+  border-radius: 18px;
+  background: rgba(99, 102, 241, 0.08);
+  color: var(--color-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modelReminderTitle {
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  color: var(--color-text);
+}
+
+.modelReminderDesc {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+}
+
+.modelReminderActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 6px;
+}
+
 @media (max-width: 1400px) {
   .rightPanel {
     width: 380px;
@@ -1481,6 +1648,17 @@
     box-shadow: 0 -12px 32px rgba(15, 23, 42, 0.16);
   }
 
+  .chatHeaderActions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .chatModelBtn {
+    min-width: 0;
+    width: 100%;
+    max-width: none;
+  }
+
   .chatComposerFooter {
     flex-direction: column;
     align-items: stretch;
@@ -1490,5 +1668,9 @@
     width: 100%;
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .modelReminderActions {
+    flex-direction: column-reverse;
   }
 }

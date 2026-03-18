@@ -1,7 +1,23 @@
 import Database from 'better-sqlite3';
 import path from 'path';
-import { MockAPI, CreateMockAPI, UpdateMockAPI, ApiClientConfig, CreateApiClientConfig, UpdateApiClientConfig, KeyValuePair, ApiForwardConfig, CreateApiForwardConfig, UpdateApiForwardConfig, OrchestrationConfig } from './types';
+import {
+  MockAPI,
+  CreateMockAPI,
+  UpdateMockAPI,
+  ApiClientConfig,
+  CreateApiClientConfig,
+  UpdateApiClientConfig,
+  KeyValuePair,
+  ApiForwardConfig,
+  CreateApiForwardConfig,
+  UpdateApiForwardConfig,
+  OrchestrationConfig,
+  AIModelProfile,
+  CreateAIModelProfile,
+  UpdateAIModelProfile,
+} from './types';
 import { nanoid } from 'nanoid';
+import { sanitizeAIModelProfileInput } from './ai-models';
 
 const DB_PATH = path.join(process.cwd(), 'mock-data.db');
 
@@ -96,6 +112,22 @@ function initializeDb(database: Database.Database) {
       target_id TEXT NOT NULL,
       param_bindings TEXT DEFAULT '[]',
       orchestration TEXT DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS ai_model_profiles (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      base_url TEXT NOT NULL,
+      auth_type TEXT NOT NULL DEFAULT 'bearer',
+      auth_token TEXT DEFAULT '',
+      auth_header_name TEXT DEFAULT '',
+      model_ids TEXT DEFAULT '[]',
+      default_model_id TEXT DEFAULT '',
+      is_default INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -435,5 +467,132 @@ export function updateApiForward(id: string, data: UpdateApiForwardConfig): ApiF
 export function deleteApiForward(id: string): boolean {
   const db = getDb();
   const result = db.prepare('DELETE FROM api_forwards WHERE id = ?').run(id);
+  return result.changes > 0;
+}
+
+function rowToAIModelProfile(row: Record<string, unknown>): AIModelProfile {
+  return {
+    id: row.id as string,
+    name: row.name as string,
+    baseUrl: row.base_url as string,
+    authType: row.auth_type as AIModelProfile['authType'],
+    authToken: (row.auth_token as string) || '',
+    authHeaderName: (row.auth_header_name as string) || '',
+    modelIds: JSON.parse((row.model_ids as string) || '[]'),
+    defaultModelId: (row.default_model_id as string) || '',
+    isDefault: (row.is_default as number) === 1,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  };
+}
+
+export function getAllAIModelProfiles(): AIModelProfile[] {
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT *
+    FROM ai_model_profiles
+    ORDER BY is_default DESC, updated_at DESC, created_at DESC
+  `).all();
+
+  return rows.map((row) => rowToAIModelProfile(row as Record<string, unknown>));
+}
+
+export function getAIModelProfileById(id: string): AIModelProfile | null {
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM ai_model_profiles WHERE id = ?').get(id);
+  return row ? rowToAIModelProfile(row as Record<string, unknown>) : null;
+}
+
+export function createAIModelProfile(input: CreateAIModelProfile): AIModelProfile {
+  const db = getDb();
+  const id = nanoid(12);
+  const now = new Date().toISOString();
+  const data = sanitizeAIModelProfileInput(input);
+
+  const tx = db.transaction(() => {
+    if (data.isDefault) {
+      db.prepare('UPDATE ai_model_profiles SET is_default = 0').run();
+    }
+
+    db.prepare(`
+      INSERT INTO ai_model_profiles (
+        id, name, base_url, auth_type, auth_token, auth_header_name,
+        model_ids, default_model_id, is_default, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      data.name,
+      data.baseUrl,
+      data.authType,
+      data.authToken || '',
+      data.authHeaderName || '',
+      JSON.stringify(data.modelIds),
+      data.defaultModelId,
+      data.isDefault ? 1 : 0,
+      now,
+      now
+    );
+  });
+
+  tx();
+  return getAIModelProfileById(id)!;
+}
+
+export function updateAIModelProfile(id: string, input: UpdateAIModelProfile): AIModelProfile | null {
+  const db = getDb();
+  const existing = getAIModelProfileById(id);
+  if (!existing) return null;
+
+  const data = sanitizeAIModelProfileInput({
+    ...existing,
+    ...input,
+    modelIds: input.modelIds ?? existing.modelIds,
+    defaultModelId: input.defaultModelId ?? existing.defaultModelId,
+    authType: input.authType ?? existing.authType,
+    authToken: input.authToken ?? existing.authToken,
+    authHeaderName: input.authHeaderName ?? existing.authHeaderName,
+  });
+  const now = new Date().toISOString();
+
+  const tx = db.transaction(() => {
+    if (data.isDefault) {
+      db.prepare('UPDATE ai_model_profiles SET is_default = 0 WHERE id != ?').run(id);
+    }
+
+    db.prepare(`
+      UPDATE ai_model_profiles
+      SET
+        name = ?,
+        base_url = ?,
+        auth_type = ?,
+        auth_token = ?,
+        auth_header_name = ?,
+        model_ids = ?,
+        default_model_id = ?,
+        is_default = ?,
+        updated_at = ?
+      WHERE id = ?
+    `).run(
+      data.name,
+      data.baseUrl,
+      data.authType,
+      data.authToken || '',
+      data.authHeaderName || '',
+      JSON.stringify(data.modelIds),
+      data.defaultModelId,
+      data.isDefault ? 1 : 0,
+      now,
+      id
+    );
+  });
+
+  tx();
+  return getAIModelProfileById(id);
+}
+
+export function deleteAIModelProfile(id: string): boolean {
+  const db = getDb();
+  const result = db.prepare('DELETE FROM ai_model_profiles WHERE id = ?').run(id);
   return result.changes > 0;
 }

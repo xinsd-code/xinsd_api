@@ -24,6 +24,13 @@ export default function Sidebar() {
       icon: <Icons.Refresh size={18} />,
     },
   ];
+  const bottomNavItems = [
+    {
+      name: '模型管理',
+      path: '/model-management',
+      icon: <Icons.Sparkles size={18} />,
+    },
+  ];
 
   return (
     <aside className="app-sidebar">
@@ -46,8 +53,28 @@ export default function Sidebar() {
         })}
       </div>
 
-      <div style={{ marginTop: 'auto', padding: '0 14px' }}>
+      <div className="sidebar-bottom">
+        <div className="sidebar-nav sidebar-nav-bottom">
+          <div style={{ padding: '0 14px 12px', fontSize: 11, fontWeight: 700, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            AI 配置
+          </div>
+          {bottomNavItems.map((item) => {
+            const isActive = pathname === item.path;
+            return (
+              <Link
+                key={item.path}
+                href={item.path}
+                className={`sidebar-link ${isActive ? 'active' : ''}`}
+              >
+                <span className="sidebar-link-icon">{item.icon}</span>
+                <span className="sidebar-link-text">{item.name}</span>
+              </Link>
+            );
+          })}
+        </div>
+
         <div style={{ 
+          marginTop: 16,
           padding: '16px', 
           background: 'white', 
           borderRadius: 'var(--radius-lg)', 

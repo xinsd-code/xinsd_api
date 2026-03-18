@@ -1,7 +1,9 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { NextResponse } from 'next/server';
+import { buildAiChatEndpoint } from '@/lib/ai-models';
 import {
+  AIModelSelection,
   ComputeNodeConfig,
   CustomParamDef,
   FilterNodeConfig,
@@ -48,6 +50,7 @@ interface AiChatRequestBody {
   stream?: boolean;
   mode?: ChatMode;
   validationIssues?: ValidationIssueInput[];
+  selectedModel?: AIModelSelection;
 }
 
 const NODE_LABELS: Record<OrchestrationNodeType, string> = {
@@ -70,6 +73,15 @@ function compactJson(value: unknown, maxLength = 18000): string {
   if (!text) return 'null';
   if (text.length <= maxLength) return text;
   return `${text.slice(0, maxLength)}\n...<truncated>`;
+}
+
+function parseJsonSafely(text: string): unknown {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { error: { message: text } };
+  }
 }
 
 function extractJsonPayload(content: string): string {
@@ -293,15 +305,15 @@ function buildModePrompt(mode: ChatMode, validationIssues: ValidationIssueInput[
   return '当前模式：常规生成/修改工作流。';
 }
 
-function getDeepSeekErrorMessage(upstreamJson: unknown): string {
+function getModelErrorMessage(upstreamJson: unknown): string {
   return isRecord(upstreamJson) && typeof upstreamJson.error === 'object' && upstreamJson.error && 'message' in upstreamJson.error
     ? String(upstreamJson.error.message)
-    : 'DeepSeek 请求失败';
+    : '模型请求失败';
 }
 
 function buildUpstreamPayload(body: AiChatRequestBody, systemPrompt: string, stream: boolean) {
   return {
-    model: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
+    model: body.selectedModel?.modelId || '',
     temperature: 0.2,
     stream,
     messages: [
@@ -317,6 +329,31 @@ function buildUpstreamPayload(body: AiChatRequestBody, systemPrompt: string, str
   };
 }
 
+function validateSelectedModel(input: unknown): AIModelSelection | null {
+  if (!isRecord(input)) return null;
+  if (
+    typeof input.profileId !== 'string'
+    || typeof input.profileName !== 'string'
+    || typeof input.baseUrl !== 'string'
+    || typeof input.modelId !== 'string'
+  ) {
+    return null;
+  }
+
+  const authType = input.authType === 'none' || input.authType === 'custom-header' ? input.authType : 'bearer';
+
+  return {
+    profileId: input.profileId.trim(),
+    profileName: input.profileName.trim(),
+    baseUrl: input.baseUrl.trim(),
+    modelId: input.modelId.trim(),
+    authType,
+    authToken: typeof input.authToken === 'string' ? input.authToken.trim() : '',
+    authHeaderName: typeof input.authHeaderName === 'string' ? input.authHeaderName.trim() : '',
+    isDefault: input.isDefault === true,
+  };
+}
+
 function encodeSseEvent(event: string, data: unknown): Uint8Array {
   const encoder = new TextEncoder();
   return encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -324,15 +361,15 @@ function encodeSseEvent(event: string, data: unknown): Uint8Array {
 
 export async function POST(request: Request) {
   try {
-    const apiKey = process.env.DEEPSEEK_API_KEY;
-    if (!apiKey) {
+    const body = await request.json() as AiChatRequestBody;
+    const selectedModel = validateSelectedModel(body.selectedModel);
+    if (!selectedModel) {
       return NextResponse.json(
-        { error: '未配置 DEEPSEEK_API_KEY，无法使用 AI 编排对话。' },
-        { status: 500 }
+        { error: '请先在模型管理中配置并选择可用模型。' },
+        { status: 400 }
       );
     }
 
-    const body = await request.json() as AiChatRequestBody;
     const messages = Array.isArray(body.messages) ? body.messages : [];
     const mode: ChatMode = body.mode === 'fix-validation' ? 'fix-validation' : 'general';
     const validationIssues = Array.isArray(body.validationIssues) ? body.validationIssues : [];
@@ -344,22 +381,38 @@ export async function POST(request: Request) {
       DYNAMIC_CONTEXT: contextPrompt,
     });
     const stream = body.stream === true;
+    const endpoint = buildAiChatEndpoint(selectedModel.baseUrl);
+    if (!endpoint) {
+      return NextResponse.json({ error: '当前模型的 Base URL 无效。' }, { status: 400 });
+    }
 
-    const upstreamRes = await fetch(process.env.DEEPSEEK_API_URL || 'https://api.deepseek.com/chat/completions', {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (selectedModel.authType === 'bearer') {
+      if (!selectedModel.authToken) {
+        return NextResponse.json({ error: '当前模型缺少 Bearer Token。' }, { status: 400 });
+      }
+      headers.Authorization = `Bearer ${selectedModel.authToken}`;
+    } else if (selectedModel.authType === 'custom-header') {
+      if (!selectedModel.authHeaderName || !selectedModel.authToken) {
+        return NextResponse.json({ error: '当前模型缺少自定义鉴权配置。' }, { status: 400 });
+      }
+      headers[selectedModel.authHeaderName] = selectedModel.authToken;
+    }
+
+    const upstreamRes = await fetch(endpoint, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(buildUpstreamPayload({ ...body, messages }, systemPrompt, stream)),
+      headers,
+      body: JSON.stringify(buildUpstreamPayload({ ...body, messages, selectedModel }, systemPrompt, stream)),
     });
 
     if (stream) {
       if (!upstreamRes.ok) {
         const upstreamText = await upstreamRes.text();
-        const upstreamJson = upstreamText ? JSON.parse(upstreamText) : null;
+        const upstreamJson = parseJsonSafely(upstreamText);
         return NextResponse.json(
-          { error: getDeepSeekErrorMessage(upstreamJson) },
+          { error: getModelErrorMessage(upstreamJson) },
           { status: upstreamRes.status }
         );
       }
@@ -455,10 +508,10 @@ export async function POST(request: Request) {
     }
 
     const upstreamText = await upstreamRes.text();
-    const upstreamJson = upstreamText ? JSON.parse(upstreamText) : null;
+    const upstreamJson = parseJsonSafely(upstreamText);
 
     if (!upstreamRes.ok) {
-      return NextResponse.json({ error: getDeepSeekErrorMessage(upstreamJson) }, { status: upstreamRes.status });
+      return NextResponse.json({ error: getModelErrorMessage(upstreamJson) }, { status: upstreamRes.status });
     }
 
     const content = isRecord(upstreamJson)

@@ -1,7 +1,10 @@
 'use client';
 
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import { flattenAIModelSelections, getAIModelSelectionKey, getDefaultAIModelSelection } from '@/lib/ai-models';
 import {
+  AIModelProfile,
+  AIModelSelection,
   OrchestrationConfig,
   OrchestrationNode,
   OrchestrationNodeType,
@@ -60,6 +63,10 @@ function generateNodeId(): string {
 
 function generateChatMessageId(): string {
   return 'm_' + Math.random().toString(36).substring(2, 9);
+}
+
+function getModelOptionLabel(model: AIModelSelection): string {
+  return `${model.profileName} / ${model.modelId}`;
 }
 
 function parseSseBlocks(buffer: string): { events: Array<{ event: string; data: string }>; rest: string } {
@@ -1061,6 +1068,11 @@ function OrchestrationWorkspace({
   const [chatOpen, setChatOpen] = useState(false);
   const [chatInput, setChatInput] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
+  const [modelProfiles, setModelProfiles] = useState<AIModelProfile[]>([]);
+  const [modelLoading, setModelLoading] = useState(false);
+  const [activeModelKey, setActiveModelKey] = useState<string | null>(null);
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [modelReminderOpen, setModelReminderOpen] = useState(false);
   const [chatMessages, setChatMessages] = useState<AiChatMessage[]>([
     {
       id: generateChatMessageId(),
@@ -1110,6 +1122,46 @@ function OrchestrationWorkspace({
     chatMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages, chatOpen]);
 
+  useEffect(() => {
+    if (!chatOpen) {
+      setModelPickerOpen(false);
+    }
+  }, [chatOpen]);
+
+  const loadModelProfiles = useCallback(async () => {
+    try {
+      setModelLoading(true);
+      const res = await fetch('/api/ai-models');
+      if (!res.ok) {
+        throw new Error('获取模型配置失败');
+      }
+      const data = await res.json() as AIModelProfile[];
+      setModelProfiles(data);
+      return data;
+    } catch (error) {
+      setChatMessages((prev) => (
+        prev.some((item) => item.error && item.content.includes('获取模型配置失败'))
+          ? prev
+          : [
+              ...prev,
+              {
+                id: generateChatMessageId(),
+                role: 'assistant',
+                content: error instanceof Error ? error.message : '获取模型配置失败',
+                error: true,
+              },
+            ]
+      ));
+      return [];
+    } finally {
+      setModelLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadModelProfiles();
+  }, [loadModelProfiles]);
+
   const nodes = config?.nodes || [];
   const sortedNodes = [...nodes].sort((a, b) => a.order - b.order);
   const editingNode = editingNodeId ? nodes.find(n => n.id === editingNodeId) : null;
@@ -1128,10 +1180,34 @@ function OrchestrationWorkspace({
     [sortedNodes, rootArrayFieldOptions]
   );
   const validationErrorCount = validationIssues.filter((issue) => issue.severity === 'error').length;
+  const modelOptions = useMemo(() => flattenAIModelSelections(modelProfiles), [modelProfiles]);
+  const defaultModelOption = useMemo(() => getDefaultAIModelSelection(modelProfiles), [modelProfiles]);
+  const activeModel = useMemo(() => {
+    const matched = modelOptions.find((item) => getAIModelSelectionKey(item) === activeModelKey);
+    return matched || defaultModelOption || null;
+  }, [activeModelKey, defaultModelOption, modelOptions]);
+  useEffect(() => {
+    if (modelOptions.length === 0) {
+      setActiveModelKey(null);
+      return;
+    }
+
+    if (activeModelKey && modelOptions.some((item) => getAIModelSelectionKey(item) === activeModelKey)) {
+      return;
+    }
+
+    if (defaultModelOption) {
+      setActiveModelKey(getAIModelSelectionKey(defaultModelOption));
+      return;
+    }
+
+    setActiveModelKey(getAIModelSelectionKey(modelOptions[0]));
+  }, [activeModelKey, defaultModelOption, modelOptions]);
   const focusNode = useCallback((nodeId: string) => {
     setEditingNodeId(nodeId);
     setActiveTab('config');
     setChatOpen(false);
+    setModelPickerOpen(false);
     requestAnimationFrame(() => {
       const nodeElement = document.querySelector(`[data-node-id="${nodeId}"]`);
       if (nodeElement instanceof HTMLElement) {
@@ -1313,9 +1389,29 @@ function OrchestrationWorkspace({
     try { await onSave(normalized.config); } finally { setSaveLoading(false); }
   };
 
+  const openChatPanel = async () => {
+    const profiles = modelProfiles.length > 0 ? modelProfiles : await loadModelProfiles();
+    const nextDefault = getDefaultAIModelSelection(profiles);
+    if (!nextDefault) {
+      setModelReminderOpen(true);
+      return;
+    }
+
+    if (!activeModelKey) {
+      setActiveModelKey(getAIModelSelectionKey(nextDefault));
+    }
+
+    setModelReminderOpen(false);
+    setChatOpen(true);
+  };
+
   const sendChatMessage = async (preset?: string, mode: AiChatMode = 'general') => {
     const content = (preset ?? chatInput).trim();
     if (!content || chatLoading) return;
+    if (!activeModel) {
+      setModelReminderOpen(true);
+      return;
+    }
 
     const blockingValidationIssues = validationIssues.filter((issue) => issue.severity === 'error');
     if (mode === 'fix-validation' && blockingValidationIssues.length === 0) {
@@ -1371,6 +1467,7 @@ function OrchestrationWorkspace({
           customParams,
           runParams: previewParams,
           forwardConfig,
+          selectedModel: activeModel,
           validationIssues: mode === 'fix-validation' ? blockingValidationIssues : validationIssues,
         }),
       });
@@ -1579,7 +1676,7 @@ function OrchestrationWorkspace({
               <div className={styles.toolbarSpacer} />
               <button
                 className={`${styles.addNodeBtn} ${styles.chatTriggerBtn}`}
-                onClick={() => setChatOpen(true)}
+                onClick={() => void openChatPanel()}
                 title="打开 AI Chat 对话页"
               >
                 <Icons.MessageSquare size={14} />
@@ -1792,15 +1889,61 @@ function OrchestrationWorkspace({
                       基于当前编排 scheme、节点格式、参数定义和接口 output 生成工作流配置
                     </div>
                   </div>
-                  <button className={styles.configCloseBtn} onClick={() => setChatOpen(false)} title="关闭 AI Chat">
-                    <Icons.X size={18} />
-                  </button>
+                  <div className={styles.chatHeaderActions}>
+                    <div className={styles.chatModelPicker}>
+                      <button
+                        className={styles.chatModelBtn}
+                        type="button"
+                        onClick={() => setModelPickerOpen((prev) => !prev)}
+                        disabled={modelOptions.length === 0}
+                        title={activeModel ? getModelOptionLabel(activeModel) : '选择模型'}
+                      >
+                        <Icons.Sparkles size={14} />
+                        <span>{activeModel ? getModelOptionLabel(activeModel) : (modelLoading ? '读取模型中...' : '选择模型')}</span>
+                      </button>
+                      {modelPickerOpen && (
+                        <div className={styles.chatModelMenu}>
+                          <div className={styles.chatModelMenuHeader}>
+                            <span>切换 AI 模型</span>
+                            <button type="button" className={styles.chatModelRefreshBtn} onClick={() => void loadModelProfiles()}>
+                              <Icons.Refresh size={12} />
+                            </button>
+                          </div>
+                          {modelOptions.length > 0 ? modelOptions.map((option) => {
+                            const optionKey = getAIModelSelectionKey(option);
+                            const isActive = activeModelKey === optionKey || (!activeModelKey && option.isDefault);
+                            return (
+                              <button
+                                key={optionKey}
+                                type="button"
+                                className={`${styles.chatModelOption} ${isActive ? styles.active : ''}`}
+                                onClick={() => {
+                                  setActiveModelKey(optionKey);
+                                  setModelPickerOpen(false);
+                                }}
+                              >
+                                <div>{option.profileName}</div>
+                                <strong>{option.modelId}</strong>
+                                {option.isDefault && <span>默认</span>}
+                              </button>
+                            );
+                          }) : (
+                            <div className={styles.chatModelEmpty}>还没有可用模型，请先去模型管理创建配置。</div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    <button className={styles.configCloseBtn} onClick={() => { setChatOpen(false); setModelPickerOpen(false); }} title="关闭 AI Chat">
+                      <Icons.X size={18} />
+                    </button>
+                  </div>
                 </div>
 
                 <div className={styles.chatContextBar}>
                   <span>当前节点 {sortedNodes.length}</span>
                   <span>可用参数 {customParams.length}</span>
                   <span>{inputData ? '已加载 output' : '待加载 output'}</span>
+                  <span>{activeModel ? `当前模型 ${activeModel.modelId}` : '未选择模型'}</span>
                 </div>
 
                 <div className={styles.chatSuggestionRow}>
@@ -1885,6 +2028,38 @@ function OrchestrationWorkspace({
                       </button>
                     </div>
                   </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {modelReminderOpen && (
+            <div className={styles.chatPanelOverlay}>
+              <div className={styles.modelReminderCard}>
+                <div className={styles.modelReminderIcon}>
+                  <Icons.Sparkles size={22} />
+                </div>
+                <div className={styles.modelReminderTitle}>请先配置 AI 模型</div>
+                <div className={styles.modelReminderDesc}>
+                  AI Chat 现在改为从“模型管理”中读取 OpenAI 兼容模型配置。请先添加至少一个模型来源，并设置默认 Model ID。
+                </div>
+                <div className={styles.modelReminderActions}>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => setModelReminderOpen(false)}
+                  >
+                    稍后再说
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => {
+                      window.location.href = '/model-management';
+                    }}
+                  >
+                    前往模型管理
+                  </button>
                 </div>
               </div>
             </div>
