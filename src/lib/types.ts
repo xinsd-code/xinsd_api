@@ -18,6 +18,7 @@ export interface MockAPI {
   enabled: boolean;
   requestHeaders: KeyValuePair[];
   requestParams: KeyValuePair[];
+  requestBody: string;
   responseStatus: number;
   responseHeaders: KeyValuePair[];
   responseBody: string;   // JSON string

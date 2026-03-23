@@ -5,7 +5,9 @@ import { MockAPI, KeyValuePair, StreamConfig } from '@/lib/types';
 import KeyValueEditor from './KeyValueEditor';
 import StreamConfigEditor from './StreamConfigEditor';
 import JsonEditor from './JsonEditor';
+import JsonBodyEditor from './JsonBodyEditor';
 import { Icons } from './Icons';
+import { parseJsonBody } from '@/lib/json-body';
 
 interface MockEditorProps {
   mock?: MockAPI | null;
@@ -40,6 +42,7 @@ export default function MockEditor({ mock, onSave, onClose }: MockEditorProps) {
 
   const [requestHeaders, setRequestHeaders] = useState<KeyValuePair[]>(mock?.requestHeaders || []);
   const [requestParams, setRequestParams] = useState<KeyValuePair[]>(mock?.requestParams || []);
+  const [requestBody, setRequestBody] = useState(mock?.requestBody || '{\n  \n}');
 
   const [responseStatus, setResponseStatus] = useState(mock?.responseStatus || 200);
   const [responseHeaders, setResponseHeaders] = useState<KeyValuePair[]>(mock?.responseHeaders || []);
@@ -56,13 +59,23 @@ export default function MockEditor({ mock, onSave, onClose }: MockEditorProps) {
     const newErrors: Record<string, string> = {};
     if (!name.trim()) newErrors.name = '请输入接口名称';
     if (!path.trim()) newErrors.path = '请输入接口路径';
+    if (!['GET', 'HEAD'].includes(method)) {
+      const parsedRequestBody = parseJsonBody(requestBody);
+      if (parsedRequestBody.error) {
+        newErrors.requestBody = '请求体 JSON 格式有误，请先修复。';
+      }
+    }
     setErrors(newErrors);
-    return Object.keys(newErrors).length === 0;
+    return {
+      valid: Object.keys(newErrors).length === 0,
+      errors: newErrors,
+    };
   };
 
   const handleSubmit = () => {
-    if (!validate()) {
-      setActiveTab('basic');
+    const validation = validate();
+    if (!validation.valid) {
+      setActiveTab(validation.errors.requestBody ? 'request' : 'basic');
       return;
     }
 
@@ -75,6 +88,7 @@ export default function MockEditor({ mock, onSave, onClose }: MockEditorProps) {
       enabled,
       requestHeaders: requestHeaders.filter((h) => h.key),
       requestParams: requestParams.filter((p) => p.key),
+      requestBody,
       responseStatus,
       responseHeaders: responseHeaders.filter((h) => h.key),
       responseBody,
@@ -255,6 +269,37 @@ export default function MockEditor({ mock, onSave, onClose }: MockEditorProps) {
                     keyPlaceholder="参数名"
                     valuePlaceholder="期望的值 (可选)"
                   />
+                </div>
+
+                <div className="form-group" style={{ marginTop: '32px' }}>
+                  <label className="form-label">JSON 请求体匹配</label>
+                  <p style={{ fontSize: '12px', color: 'var(--color-text-muted)', marginBottom: '16px' }}>
+                    更适合 `POST application/json` 场景。支持表单视图与原始 JSON 双向编辑；空字符串字段会在匹配时自动忽略。
+                  </p>
+                  {['GET', 'HEAD'].includes(method) ? (
+                    <div style={{ padding: '20px', borderRadius: 'var(--radius-lg)', background: 'var(--color-bg-subtle)', border: '1px dashed var(--color-border)', color: 'var(--color-text-muted)', fontSize: 13 }}>
+                      当前请求方法通常不需要 JSON Body。如需切换，请先调整请求方法。
+                    </div>
+                  ) : (
+                    <>
+                      <JsonBodyEditor
+                        value={requestBody}
+                        onChange={(nextValue) => {
+                          setRequestBody(nextValue);
+                          if (errors.requestBody) {
+                            setErrors((prev) => ({ ...prev, requestBody: '' }));
+                          }
+                        }}
+                        title="请求体匹配器"
+                        description="像 Apifox / Postman 一样按字段编辑 JSON Body，用于匹配进入该 Mock 的请求。"
+                        hint="如果某个字段只需要保留结构、不需要严格匹配值，可先留空。"
+                        height={260}
+                      />
+                      {errors.requestBody && (
+                        <p style={{ color: 'var(--color-danger)', fontSize: '12px', marginTop: '8px' }}>{errors.requestBody}</p>
+                      )}
+                    </>
+                  )}
                 </div>
               </div>
             )}

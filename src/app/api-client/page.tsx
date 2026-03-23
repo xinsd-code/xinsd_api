@@ -6,8 +6,10 @@ import { resolveVariables } from '@/lib/utils';
 import KeyValueEditor from '@/components/KeyValueEditor';
 import ApiParamEditor from '@/components/ApiParamEditor';
 import JsonEditor from '@/components/JsonEditor';
+import JsonBodyEditor from '@/components/JsonBodyEditor';
 import GroupVarsModal from '@/components/GroupVarsModal';
 import { Icons } from '@/components/Icons';
+import { parseJsonBody } from '@/lib/json-body';
 import styles from './page.module.css';
 
 const HTTP_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD'];
@@ -17,7 +19,6 @@ type TabKey = 'params' | 'headers' | 'body';
 export default function ApiClientPage() {
   const [clients, setClients] = useState<ApiClientSummary[]>([]);
   const [loading, setLoading] = useState(true);
-  const [detailLoading, setDetailLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   
   // 当前编辑器状态
@@ -38,6 +39,7 @@ export default function ApiClientPage() {
 
   // 运行模式状态
   const [runParams, setRunParams] = useState<Record<string, string>>({});
+  const [runRequestBody, setRunRequestBody] = useState('{\n  \n}');
 
   // 环境变量弹窗状态
   const [showGroupVars, setShowGroupVars] = useState(false);
@@ -77,6 +79,12 @@ export default function ApiClientPage() {
     fetchClients();
   }, [fetchClients]);
 
+  useEffect(() => {
+    if (viewMode === 'run') {
+      setRunRequestBody(requestBody);
+    }
+  }, [requestBody, viewMode]);
+
   const handleCreateNew = () => {
     setActiveClient(null);
     setIsEditingNew(true);
@@ -88,13 +96,13 @@ export default function ApiClientPage() {
     setRequestHeaders([]);
     setRequestParams([]);
     setRequestBody('{\n  \n}');
+    setRunRequestBody('{\n  \n}');
     setResponse(null);
     setRunParams({});
     setViewMode('design');
   };
 
   const handleSelectClient = async (client: ApiClientSummary) => {
-    setDetailLoading(true);
     try {
       const res = await fetch(`/api/api-client/${client.id}`);
       if (!res.ok) throw new Error('Failed to load detail');
@@ -109,6 +117,7 @@ export default function ApiClientPage() {
       setRequestHeaders(detail.requestHeaders || []);
       setRequestParams(detail.requestParams || []);
       setRequestBody(detail.requestBody || '{\n  \n}');
+      setRunRequestBody(detail.requestBody || '{\n  \n}');
       setResponse(null);
       // 初始化运行参数
       const initialRunParams: Record<string, string> = {};
@@ -120,8 +129,6 @@ export default function ApiClientPage() {
     } catch (error) {
       console.error('Failed to load api-client detail:', error);
       showToast('加载接口详情失败', 'error');
-    } finally {
-      setDetailLoading(false);
     }
   };
 
@@ -129,6 +136,15 @@ export default function ApiClientPage() {
     if (!name.trim() || !url.trim()) {
       showToast('接口名称和 URL 不能为空', 'error');
       return;
+    }
+
+    if (!['GET', 'HEAD'].includes(method)) {
+      const parsedRequestBody = parseJsonBody(requestBody);
+      if (parsedRequestBody.error) {
+        showToast('请求体 JSON 格式有误，请先修复后再保存', 'error');
+        setActiveTab('body');
+        return;
+      }
     }
 
     const payload = {
@@ -237,9 +253,25 @@ export default function ApiClientPage() {
       headersConfig[h.key] = resolveVariables(h.value, vars);
     });
 
-    let finalBody = requestBody;
+    let finalBody = viewMode === 'run' ? runRequestBody : requestBody;
     if (method !== 'GET' && method !== 'HEAD') {
-      finalBody = resolveVariables(requestBody || '', vars);
+      const parsedRequestBody = parseJsonBody(finalBody || '{}');
+      if (parsedRequestBody.error) {
+        showToast('请求体 JSON 格式有误，请先修复后再发送', 'error');
+        setIsSending(false);
+        return;
+      }
+      finalBody = resolveVariables(finalBody || '', vars);
+      const resolvedRequestBody = parseJsonBody(finalBody || '{}');
+      if (resolvedRequestBody.error) {
+        showToast('变量替换后的请求体不是合法 JSON，请检查占位符取值', 'error');
+        setIsSending(false);
+        return;
+      }
+    }
+
+    if (!headersConfig['Content-Type'] && !headersConfig['content-type'] && method !== 'GET' && method !== 'HEAD') {
+      headersConfig['Content-Type'] = 'application/json';
     }
 
     try {
@@ -536,6 +568,25 @@ export default function ApiClientPage() {
                           ))}
                         </div>
                       )}
+
+                      {!['GET', 'HEAD'].includes(method) && (
+                        <div style={{ marginTop: 28, display: 'flex', flexDirection: 'column', gap: 14 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <Icons.Code size={16} />
+                            <h3 style={{ fontSize: 15, fontWeight: 800, margin: 0 }}>JSON Body</h3>
+                          </div>
+                          <JsonBodyEditor
+                            value={runRequestBody}
+                            onChange={setRunRequestBody}
+                            mode="run"
+                            title="运行时请求体"
+                            description="按字段填写 POST / PUT / PATCH 的 JSON Body，并实时同步到底层原始 JSON。"
+                            hint="这部分体验参考 Postman / Apifox：表单填值更高效，原始 JSON 仍可随时切换查看。"
+                            emptyHint="当前请求体还是空对象。你可以切到“配置设计 → 请求体”预先定义结构，或直接在原始 JSON 中输入。"
+                            height={260}
+                          />
+                        </div>
+                      )}
                     </div>
                   ) : (
                     <div style={{ padding: 24, display: 'flex', flexDirection: 'column', height: '100%' }} className="stagger-in">
@@ -562,16 +613,20 @@ export default function ApiClientPage() {
                         )}
                         {activeTab === 'body' && (
                           <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-                            <p style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
-                              {method === 'GET' ? 'GET 请求通常不需要请求体。' : '在下方定义您的 JSON 请求体。'}
-                            </p>
-                            <div className="editor-container" style={{ flex: 1, minHeight: 300 }}>
-                              <JsonEditor
+                            {method === 'GET' ? (
+                              <p style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
+                                GET 请求通常不需要请求体。
+                              </p>
+                            ) : (
+                              <JsonBodyEditor
                                 value={requestBody}
                                 onChange={setRequestBody}
-                                height={300}
+                                title="请求体设计器"
+                                description="参考 Apifox / Postman 的 body 参数工作区：既能按字段维护，也能直接编辑原始 JSON。"
+                                hint="建议先在这里定义稳定的 JSON 结构，运行调试时再针对字段快速填值。"
+                                height={320}
                               />
-                            </div>
+                            )}
                           </div>
                         )}
                       </div>

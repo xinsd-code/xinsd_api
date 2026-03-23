@@ -51,6 +51,7 @@ function initializeDb(database: Database.Database) {
       enabled INTEGER NOT NULL DEFAULT 1,
       request_headers TEXT DEFAULT '[]',
       request_params TEXT DEFAULT '[]',
+      request_body TEXT DEFAULT '{}',
       response_status INTEGER NOT NULL DEFAULT 200,
       response_headers TEXT DEFAULT '[]',
       response_body TEXT DEFAULT '{}',
@@ -71,6 +72,14 @@ function initializeDb(database: Database.Database) {
   } catch (err) {
     if (err instanceof Error && !err.message.includes('duplicate column name')) {
       console.error('Migration error mock_apis:', err);
+    }
+  }
+
+  try {
+    database.exec(`ALTER TABLE mock_apis ADD COLUMN request_body TEXT DEFAULT '{}';`);
+  } catch (err) {
+    if (err instanceof Error && !err.message.includes('duplicate column name')) {
+      console.error('Migration error mock_apis request_body:', err);
     }
   }
 
@@ -183,6 +192,7 @@ function rowToMockAPI(row: Record<string, unknown>): MockAPI {
     enabled: (row.enabled as number) === 1,
     requestHeaders: JSON.parse(row.request_headers as string),
     requestParams: JSON.parse(row.request_params as string),
+    requestBody: (row.request_body as string) || '{}',
     responseStatus: row.response_status as number,
     responseHeaders: JSON.parse(row.response_headers as string),
     responseBody: row.response_body as string,
@@ -243,9 +253,9 @@ export function createMock(data: CreateMockAPI): MockAPI {
 
   db.prepare(`
     INSERT INTO mock_apis (id, name, path, method, description, enabled,
-      request_headers, request_params, response_status, response_headers,
+      request_headers, request_params, request_body, response_status, response_headers,
       response_body, response_delay, is_stream, stream_config, api_group, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     data.name,
@@ -255,6 +265,7 @@ export function createMock(data: CreateMockAPI): MockAPI {
     data.enabled ? 1 : 0,
     JSON.stringify(data.requestHeaders || []),
     JSON.stringify(data.requestParams || []),
+    data.requestBody || '{}',
     data.responseStatus || 200,
     JSON.stringify(data.responseHeaders || []),
     data.responseBody || '{}',
@@ -285,6 +296,7 @@ export function updateMock(id: string, data: UpdateMockAPI): MockAPI | null {
   if (data.enabled !== undefined) { updates.push('enabled = ?'); values.push(data.enabled ? 1 : 0); }
   if (data.requestHeaders !== undefined) { updates.push('request_headers = ?'); values.push(JSON.stringify(data.requestHeaders)); }
   if (data.requestParams !== undefined) { updates.push('request_params = ?'); values.push(JSON.stringify(data.requestParams)); }
+  if (data.requestBody !== undefined) { updates.push('request_body = ?'); values.push(data.requestBody); }
   if (data.responseStatus !== undefined) { updates.push('response_status = ?'); values.push(data.responseStatus); }
   if (data.responseHeaders !== undefined) { updates.push('response_headers = ?'); values.push(JSON.stringify(data.responseHeaders)); }
   if (data.responseBody !== undefined) { updates.push('response_body = ?'); values.push(data.responseBody); }

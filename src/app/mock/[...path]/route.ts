@@ -23,6 +23,7 @@ async function handleMockRequest(
 
     // Collect request params (query + body)
     const requestParams: Record<string, string> = {};
+    let requestJsonBody: unknown = null;
     const url = new URL(request.url);
     url.searchParams.forEach((value, key) => {
       requestParams[key] = value;
@@ -34,6 +35,7 @@ async function handleMockRequest(
         const contentType = request.headers.get('content-type') || '';
         if (contentType.includes('application/json')) {
           const body = await request.clone().json();
+          requestJsonBody = body;
           if (typeof body === 'object' && body !== null) {
             for (const [key, value] of Object.entries(body)) {
               requestParams[key] = String(value);
@@ -46,7 +48,7 @@ async function handleMockRequest(
     }
 
     // Find matching mock
-    const result = findMatchingMock(mocks, method, requestPath, requestHeaders, requestParams);
+    const result = findMatchingMock(mocks, method, requestPath, requestHeaders, requestParams, requestJsonBody);
 
     if (!result) {
       return NextResponse.json(

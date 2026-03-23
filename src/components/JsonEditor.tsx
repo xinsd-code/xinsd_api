@@ -7,9 +7,17 @@ interface JsonEditorProps {
   value: string;
   onChange: (value: string) => void;
   height?: number;
+  textareaName?: string;
+  textareaLabel?: string;
 }
 
-export default function JsonEditor({ value, onChange, height = 200 }: JsonEditorProps) {
+export default function JsonEditor({
+  value,
+  onChange,
+  height = 200,
+  textareaName = 'json-editor',
+  textareaLabel = 'JSON 编辑器',
+}: JsonEditorProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -62,13 +70,15 @@ export default function JsonEditor({ value, onChange, height = 200 }: JsonEditor
           )}
         </div>
         <div style={{ display: 'flex', gap: 4 }}>
-          <button className="btn btn-ghost btn-sm" style={{ height: 24, fontSize: 11, fontWeight: 700, padding: '0 8px' }} onClick={handleFormat}>格式化</button>
-          <button className="btn btn-ghost btn-sm" style={{ height: 24, fontSize: 11, fontWeight: 700, padding: '0 8px' }} onClick={handleMinify}>压缩</button>
+          <button type="button" className="btn btn-ghost btn-sm" style={{ height: 24, fontSize: 11, fontWeight: 700, padding: '0 8px' }} onClick={handleFormat}>格式化</button>
+          <button type="button" className="btn btn-ghost btn-sm" style={{ height: 24, fontSize: 11, fontWeight: 700, padding: '0 8px' }} onClick={handleMinify}>压缩</button>
         </div>
       </div>
       <div style={{ padding: 0 }}>
         <textarea
           ref={textareaRef}
+          name={textareaName}
+          aria-label={textareaLabel}
           value={value}
           onChange={(e) => onChange(e.target.value)}
           style={{

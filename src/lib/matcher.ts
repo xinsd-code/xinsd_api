@@ -1,5 +1,6 @@
 import { match, MatchFunction } from 'path-to-regexp';
 import { MockAPI, KeyValuePair } from './types';
+import { matchConfiguredJsonBody } from './json-body';
 
 /**
  * Test if a request path matches a mock API path pattern.
@@ -89,7 +90,8 @@ export function findMatchingMock(
   method: string,
   requestPath: string,
   requestHeaders: Record<string, string>,
-  requestParams: Record<string, string>
+  requestParams: Record<string, string>,
+  requestBody?: unknown
 ): { mock: MockAPI; pathParams: Record<string, string> } | null {
   for (const mock of mocks) {
     // Check method
@@ -106,6 +108,8 @@ export function findMatchingMock(
 
     // Check params
     if (!matchParams(mock.requestParams, requestParams)) continue;
+
+    if (!matchConfiguredJsonBody(mock.requestBody, requestBody)) continue;
 
     return { mock, pathParams: pathResult.params };
   }

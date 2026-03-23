@@ -41,6 +41,7 @@ export async function POST(request: Request) {
       enabled: body.enabled !== false,
       requestHeaders: body.requestHeaders || [],
       requestParams: body.requestParams || [],
+      requestBody: body.requestBody || '{}',
       responseStatus: body.responseStatus || 200,
       responseHeaders: body.responseHeaders || [],
       responseBody: body.responseBody || '{}',

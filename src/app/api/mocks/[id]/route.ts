@@ -34,6 +34,7 @@ export async function PUT(
       enabled: body.enabled,
       requestHeaders: body.requestHeaders,
       requestParams: body.requestParams,
+      requestBody: body.requestBody,
       responseStatus: body.responseStatus,
       responseHeaders: body.responseHeaders,
       responseBody: body.responseBody,
