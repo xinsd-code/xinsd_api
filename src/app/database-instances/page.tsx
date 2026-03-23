@@ -10,6 +10,7 @@ import {
   CreateDatabaseInstance,
   DatabaseCollectionInfo,
   DatabaseInstance,
+  DatabaseInstanceSummary,
   DatabaseInstanceType,
   DatabaseQueryPayload,
   DatabaseSchemaPayload,
@@ -146,10 +147,11 @@ function getStructurePanelSubtitle(
 }
 
 export default function DatabaseInstancesPage() {
-  const [instances, setInstances] = useState<DatabaseInstance[]>([]);
+  const [instances, setInstances] = useState<DatabaseInstanceSummary[]>([]);
   const [panelMode, setPanelMode] = useState<PanelMode>('overview');
   const [activeId, setActiveId] = useState<string | null>(null);
   const [draft, setDraft] = useState<EditableInstance>(createEmptyDraft);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -217,7 +219,7 @@ export default function DatabaseInstancesPage() {
       if (!res.ok) {
         throw new Error('获取数据库实例失败');
       }
-      const data = await res.json() as DatabaseInstance[];
+      const data = await res.json() as DatabaseInstanceSummary[];
       setInstances(data);
       return data;
     } catch (error) {
@@ -268,8 +270,20 @@ export default function DatabaseInstancesPage() {
     resetEditorState('create');
   };
 
-  const handleSelectInstance = (instance: DatabaseInstance) => {
-    resetEditorState('edit', instance);
+  const handleSelectInstance = async (instance: DatabaseInstanceSummary) => {
+    setActiveId(instance.id);
+    setPanelMode('edit');
+    setDetailLoading(true);
+    try {
+      const res = await fetch(`/api/database-instances/${instance.id}`);
+      if (!res.ok) throw new Error('读取详情失败');
+      const detail = await res.json();
+      resetEditorState('edit', detail);
+    } catch {
+      showToast('获取数据库实例详情失败', 'error');
+    } finally {
+      setDetailLoading(false);
+    }
   };
 
   const handleTestConnection = async () => {
@@ -333,6 +347,13 @@ export default function DatabaseInstancesPage() {
 
   useEffect(() => {
     if (panelMode !== 'detail' || !activeId || !activeInstance) return;
+    if (activeInstance.type === 'redis') {
+      setSchemaData(null);
+      setSelectedCollection(null);
+      setQueryResult(null);
+      setQueryText(getDefaultQuery(activeInstance.type));
+      return;
+    }
     void loadSchema(activeId);
   }, [panelMode, activeId, activeInstance, loadSchema]);
 
@@ -366,9 +387,8 @@ export default function DatabaseInstancesPage() {
 
       const instancesData = await fetchInstances();
       if (instancesData) {
-        const saved = instancesData.find((item) => item.id === (data.id || activeId)) || null;
-        if (saved) {
-          resetEditorState('edit', saved);
+        if (activeId) {
+          resetEditorState('edit', data as DatabaseInstance);
         } else {
           resetEditorState('overview');
         }
@@ -601,7 +621,7 @@ export default function DatabaseInstancesPage() {
                 <div className={styles.detailMetaCard}>
                   <div className={styles.overviewLabel}>已选对象</div>
                   <div className={styles.detailPrimary}>{selectedCollection || '待选择'}</div>
-                  <div className={styles.inlineHint}>{activeInstance.type === 'redis' ? '从左侧选择一个 Key 进入数据浏览。' : '从左侧选择一张表查看字段属性和样例数据。'}</div>
+                  <div className={styles.inlineHint}>{activeInstance.type === 'redis' ? 'Redis 实例仅保留只读查询控制台，可直接输入命令执行。' : '从左侧选择一张表查看字段属性和样例数据。'}</div>
                 </div>
               </div>
             </>
@@ -619,7 +639,14 @@ export default function DatabaseInstancesPage() {
               </div>
 
               <div className={styles.panelBody}>
-                <div className={styles.formGrid}>
+                {detailLoading ? (
+                  <div className={styles.emptyState} style={{ padding: '120px 0' }}>
+                    <Icons.Activity size={32} className="spin" />
+                    <span style={{ marginTop: 16 }}>正在读取数据库实例详情...</span>
+                  </div>
+                ) : (
+                  <>
+                    <div className={styles.formGrid}>
                   <label className={styles.formSpan2}>
                     <div className="form-label">实例名称</div>
                     <input
@@ -750,56 +777,56 @@ export default function DatabaseInstancesPage() {
                     </button>
                   )}
                 </div>
+                  </>
+                )}
               </div>
             </>
           )}
         </div>
 
         {panelMode === 'detail' && activeInstance && (
-          <div className={styles.explorerGrid}>
-            <div className={styles.panel}>
-              <div className={styles.panelHeader}>
-                <div className={styles.panelTitle}>
-                  <strong>结构浏览</strong>
-                  <span>{activeInstance.type === 'redis' ? '查看 Key 与 Value 类型' : '查看表与字段结构'}</span>
+          <div className={activeInstance.type === 'redis' ? styles.consoleOnly : styles.explorerGrid}>
+            {activeInstance.type !== 'redis' && (
+              <div className={styles.panel}>
+                <div className={styles.panelHeader}>
+                  <div className={styles.panelTitle}>
+                    <strong>结构浏览</strong>
+                    <span>查看表与字段结构</span>
+                  </div>
+                  <button className="btn btn-secondary btn-sm" type="button" onClick={() => void loadSchema(activeInstance.id)} disabled={schemaLoading}>
+                    <Icons.Refresh size={14} /> {schemaLoading ? '刷新中...' : '刷新结构'}
+                  </button>
                 </div>
-                <button className="btn btn-secondary btn-sm" type="button" onClick={() => void loadSchema(activeInstance.id)} disabled={schemaLoading}>
-                  <Icons.Refresh size={14} /> {schemaLoading ? '刷新中...' : '刷新结构'}
-                </button>
+                <div className={`${styles.panelBody} ${styles.schemaBody}`}>
+                  {schemaLoading ? (
+                    <div className={styles.inlineHint}>正在读取结构信息...</div>
+                  ) : !schemaData || schemaData.collections.length === 0 ? (
+                    <div className={styles.emptyStateCompact}>
+                      <strong>还没有读取到结构数据</strong>
+                      <span>请确认实例内已有表，并尝试刷新结构。</span>
+                    </div>
+                  ) : (
+                    <div className={styles.collectionList}>
+                      {schemaData.collections.map((collection: DatabaseCollectionInfo) => (
+                        <button
+                          key={collection.name}
+                          type="button"
+                          className={`${styles.collectionItem} ${selectedCollection === collection.name ? styles.selected : ''}`}
+                          onClick={() => {
+                            setSelectedCollection(collection.name);
+                            setQueryText(getDefaultQuery(activeInstance.type, collection.name));
+                            setQueryResult(null);
+                          }}
+                        >
+                          <div className={styles.collectionName}>{collection.name}</div>
+                          <div className={styles.collectionDetail}>{`${collection.columns?.length || 0} 个字段`}</div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
-              <div className={`${styles.panelBody} ${styles.schemaBody}`}>
-                {schemaLoading ? (
-                  <div className={styles.inlineHint}>正在读取结构信息...</div>
-                ) : !schemaData || schemaData.collections.length === 0 ? (
-                  <div className={styles.emptyStateCompact}>
-                    <strong>还没有读取到结构数据</strong>
-                    <span>请确认实例内已有表或 Redis Key，并尝试刷新结构。</span>
-                  </div>
-                ) : (
-                  <div className={styles.collectionList}>
-                    {schemaData.collections.map((collection: DatabaseCollectionInfo) => (
-                      <button
-                        key={collection.name}
-                        type="button"
-                        className={`${styles.collectionItem} ${selectedCollection === collection.name ? styles.selected : ''}`}
-                        onClick={() => {
-                          setSelectedCollection(collection.name);
-                          setQueryText(getDefaultQuery(activeInstance.type, collection.name));
-                          setQueryResult(null);
-                        }}
-                      >
-                        <div className={styles.collectionName}>{collection.name}</div>
-                        <div className={styles.collectionDetail}>
-                          {collection.category === 'table'
-                            ? `${collection.columns?.length || 0} 个字段`
-                            : collection.detail || 'Redis Key'}
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
+            )}
 
             <div className={styles.consoleStack}>
               {activeInstance.type !== 'redis' && (

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { ApiClientConfig, KeyValuePair } from '@/lib/types';
+import { ApiClientConfig, ApiClientSummary, KeyValuePair } from '@/lib/types';
 import { resolveVariables } from '@/lib/utils';
 import KeyValueEditor from '@/components/KeyValueEditor';
 import ApiParamEditor from '@/components/ApiParamEditor';
@@ -15,8 +15,9 @@ const HTTP_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD'
 type TabKey = 'params' | 'headers' | 'body';
 
 export default function ApiClientPage() {
-  const [clients, setClients] = useState<ApiClientConfig[]>([]);
+  const [clients, setClients] = useState<ApiClientSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   
   // 当前编辑器状态
@@ -92,26 +93,36 @@ export default function ApiClientPage() {
     setViewMode('design');
   };
 
-  const handleSelectClient = (client: ApiClientConfig) => {
-    setActiveClient(client);
-    setIsEditingNew(false);
-    setName(client.name);
-    setApiGroup(client.apiGroup || '未分组');
-    setUrl(client.url);
-    setMethod(client.method);
-    setDescription(client.description || '');
-    setRequestHeaders(client.requestHeaders || []);
-    setRequestParams(client.requestParams || []);
-    setRequestBody(client.requestBody || '{\n  \n}');
-    setResponse(null);
-    
-    // 初始化运行参数
-    const initialRunParams: Record<string, string> = {};
-    (client.requestParams || []).forEach(p => {
-      if (p.key) initialRunParams[p.key] = p.value || '';
-    });
-    setRunParams(initialRunParams);
-    setViewMode('run');
+  const handleSelectClient = async (client: ApiClientSummary) => {
+    setDetailLoading(true);
+    try {
+      const res = await fetch(`/api/api-client/${client.id}`);
+      if (!res.ok) throw new Error('Failed to load detail');
+      const detail: ApiClientConfig = await res.json();
+      setActiveClient(detail);
+      setIsEditingNew(false);
+      setName(detail.name);
+      setApiGroup(detail.apiGroup || '未分组');
+      setUrl(detail.url);
+      setMethod(detail.method);
+      setDescription(detail.description || '');
+      setRequestHeaders(detail.requestHeaders || []);
+      setRequestParams(detail.requestParams || []);
+      setRequestBody(detail.requestBody || '{\n  \n}');
+      setResponse(null);
+      // 初始化运行参数
+      const initialRunParams: Record<string, string> = {};
+      (detail.requestParams || []).forEach(p => {
+        if (p.key) initialRunParams[p.key] = p.value || '';
+      });
+      setRunParams(initialRunParams);
+      setViewMode('run');
+    } catch (error) {
+      console.error('Failed to load api-client detail:', error);
+      showToast('加载接口详情失败', 'error');
+    } finally {
+      setDetailLoading(false);
+    }
   };
 
   const handleSave = async () => {
@@ -265,7 +276,7 @@ export default function ApiClientPage() {
   );
 
   const groupedClients = useMemo(() => {
-    const groups: Record<string, ApiClientConfig[]> = {};
+    const groups: Record<string, ApiClientSummary[]> = {};
     filteredClients.forEach(c => {
       const g = c.apiGroup || '未分组';
       if (!groups[g]) groups[g] = [];

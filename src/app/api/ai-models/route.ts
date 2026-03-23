@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { createAIModelProfile, getAllAIModelProfiles } from '@/lib/db';
+import { createAIModelProfile, getAllAIModelProfilesSummary } from '@/lib/db';
 import {
   sanitizeAIModelProfileInput,
   validateAIModelProfileInput,
@@ -8,7 +8,7 @@ import { CreateAIModelProfile } from '@/lib/types';
 
 export async function GET() {
   try {
-    return NextResponse.json(getAllAIModelProfiles());
+    return NextResponse.json(getAllAIModelProfilesSummary());
   } catch (error) {
     console.error('Failed to get AI model profiles:', error);
     return NextResponse.json({ error: '获取模型配置失败' }, { status: 500 });

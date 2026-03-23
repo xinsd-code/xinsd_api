@@ -32,6 +32,21 @@ export interface MockAPI {
 export type CreateMockAPI = Omit<MockAPI, 'id' | 'createdAt' | 'updatedAt'>;
 export type UpdateMockAPI = Partial<CreateMockAPI>;
 
+/** 列表接口轻量类型（不含大字段） */
+export interface MockAPISummary {
+  id: string;
+  name: string;
+  path: string;
+  method: string;
+  description: string;
+  enabled: boolean;
+  isStream: boolean;
+  responseDelay: number;
+  apiGroup?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ApiClientConfig {
   id: string;
   name: string;
@@ -49,6 +64,18 @@ export interface ApiClientConfig {
 export type CreateApiClientConfig = Omit<ApiClientConfig, 'id' | 'createdAt' | 'updatedAt'>;
 export type UpdateApiClientConfig = Partial<CreateApiClientConfig>;
 
+/** 列表接口轻量类型（不含大字段） */
+export interface ApiClientSummary {
+  id: string;
+  name: string;
+  url: string;
+  method: string;
+  description: string;
+  apiGroup?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface CustomParamDef {
   key: string;
   type: 'string' | 'integer' | 'boolean' | 'number' | 'array';
@@ -60,6 +87,13 @@ export interface ParamBinding {
   targetParamKey: string;     // The param key expected by the underlying API
   customParamKey?: string;    // The param key defined by the forward's customParams
   staticValue?: string;       // Or a static value if mapped statically instead of passing from custom param
+}
+
+export interface RedisCacheConfig {
+  enabled: boolean;
+  instanceId?: string;
+  keyRule?: string;
+  expireSeconds?: number;
 }
 
 export interface ApiForwardConfig {
@@ -79,12 +113,26 @@ export interface ApiForwardConfig {
 
   orchestration?: OrchestrationConfig;  // Advanced response orchestration
 
+  redisConfig?: RedisCacheConfig;       // Redis caching rules
+
   createdAt: string;
   updatedAt: string;
 }
 
 export type CreateApiForwardConfig = Omit<ApiForwardConfig, 'id' | 'createdAt' | 'updatedAt'>;
 export type UpdateApiForwardConfig = Partial<CreateApiForwardConfig>;
+
+/** 列表接口轻量类型（不含大字段） */
+export interface ApiForwardSummary {
+  id: string;
+  name: string;
+  method: string;
+  path: string;
+  apiGroup?: string;
+  description: string;
+  createdAt: string;
+  updatedAt: string;
+}
 
 export type AIModelAuthType = 'none' | 'bearer' | 'custom-header';
 
@@ -104,6 +152,8 @@ export interface AIModelProfile {
 
 export type CreateAIModelProfile = Omit<AIModelProfile, 'id' | 'createdAt' | 'updatedAt'>;
 export type UpdateAIModelProfile = Partial<CreateAIModelProfile>;
+
+export interface AIModelProfileSummary extends Omit<AIModelProfile, 'authToken' | 'authHeaderName'> {}
 
 export interface AIModelSelection {
   profileId: string;
@@ -128,6 +178,8 @@ export interface DatabaseInstance {
   createdAt: string;
   updatedAt: string;
 }
+
+export interface DatabaseInstanceSummary extends Omit<DatabaseInstance, 'username' | 'password'> {}
 
 export type CreateDatabaseInstance = Omit<DatabaseInstance, 'id' | 'createdAt' | 'updatedAt'>;
 export type UpdateDatabaseInstance = Partial<CreateDatabaseInstance>;

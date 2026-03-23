@@ -1,10 +1,10 @@
 import { NextResponse } from 'next/server';
-import { getAllApiClients, createApiClient } from '@/lib/db';
+import { getAllApiClientsSummary, createApiClient } from '@/lib/db';
 import { CreateApiClientConfig } from '@/lib/types';
 
 export async function GET() {
   try {
-    const clients = getAllApiClients();
+    const clients = getAllApiClientsSummary();
     return NextResponse.json(clients);
   } catch (error) {
     console.error('Failed to get api clients:', error);

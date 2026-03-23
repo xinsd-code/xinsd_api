@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { ApiForwardConfig, KeyValuePair } from '@/lib/types';
 import { applyOrchestration } from '@/lib/orchestration-engine';
 import { getMockById, getApiClientById } from '@/lib/db';
+import { writeRedisCacheValue } from '@/lib/redis-cache';
 import { resolveVariables } from '@/lib/utils';
 import { getGroupVariables } from '@/lib/db';
 
@@ -140,6 +141,13 @@ export async function POST(request: Request) {
       }
     }
 
+    const cacheResult = await writeRedisCacheValue(
+      forwardConfig.id,
+      forwardConfig.redisConfig,
+      runParams,
+      finalData
+    );
+
     // 9. Return result back to our platform UI
     return NextResponse.json({
       _meta: {
@@ -147,6 +155,7 @@ export async function POST(request: Request) {
         forwardUrl: urlObj.toString(),
         forwardHeaders: Object.fromEntries(headers.entries()),
         orchestrationApplied: !!(forwardConfig.orchestration?.nodes?.length),
+        cache: cacheResult,
       },
       status: responseStatus,
       headers: responseHeaders,

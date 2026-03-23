@@ -479,6 +479,10 @@
   min-height: 0;
 }
 
+.consoleOnly {
+  min-height: 0;
+}
+
 .schemaBody {
   min-height: 460px;
 }

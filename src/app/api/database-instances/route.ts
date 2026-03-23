@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { createDatabaseInstance, getAllDatabaseInstances } from '@/lib/db';
+import { createDatabaseInstance, getAllDatabaseInstancesSummary } from '@/lib/db';
 import {
   sanitizeDatabaseInstanceInput,
   validateDatabaseInstanceInput,
@@ -12,7 +12,7 @@ export const dynamic = 'force-dynamic';
 
 export async function GET() {
   try {
-    return NextResponse.json(getAllDatabaseInstances());
+    return NextResponse.json(getAllDatabaseInstancesSummary());
   } catch (error) {
     console.error('Failed to get database instances:', error);
     return NextResponse.json({ error: '获取数据库实例失败' }, { status: 500 });

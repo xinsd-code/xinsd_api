@@ -1,16 +1,17 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { MockAPI } from '@/lib/types';
+import { MockAPI, MockAPISummary } from '@/lib/types';
 import MockEditor from '@/components/MockEditor';
 import GroupVarsModal from '@/components/GroupVarsModal';
 import { Icons } from '@/components/Icons';
 
 export default function Home() {
-  const [mocks, setMocks] = useState<MockAPI[]>([]);
+  const [mocks, setMocks] = useState<MockAPISummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [showEditor, setShowEditor] = useState(false);
   const [editingMock, setEditingMock] = useState<MockAPI | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [methodFilter, setMethodFilter] = useState<string>('ALL');
   const [groupFilter, setGroupFilter] = useState<string>('ALL');
@@ -44,9 +45,20 @@ export default function Home() {
     setShowEditor(true);
   };
 
-  const handleEdit = (mock: MockAPI) => {
-    setEditingMock(mock);
-    setShowEditor(true);
+  const handleEdit = async (mock: MockAPISummary) => {
+    setDetailLoading(true);
+    try {
+      const res = await fetch(`/api/mocks/${mock.id}`);
+      if (!res.ok) throw new Error('Failed to load detail');
+      const detail: MockAPI = await res.json();
+      setEditingMock(detail);
+      setShowEditor(true);
+    } catch (error) {
+      console.error('Failed to load mock detail:', error);
+      showToast('加载接口详情失败', 'error');
+    } finally {
+      setDetailLoading(false);
+    }
   };
 
   const handleSave = async (data: Partial<MockAPI>) => {
@@ -294,8 +306,8 @@ export default function Home() {
                 </div>
               </div>
               <div className="mock-item-actions">
-                <button className="btn btn-secondary btn-sm" onClick={() => handleEdit(mock)}>
-                  <Icons.Edit size={14} />
+                <button className="btn btn-secondary btn-sm" onClick={() => handleEdit(mock)} disabled={detailLoading}>
+                  {detailLoading ? <div style={{ width: 12, height: 12, border: '2px solid currentColor', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 1s linear infinite', display: 'inline-block' }} /> : <Icons.Edit size={14} />}
                   编辑
                 </button>
                 <button

@@ -1,10 +1,11 @@
 'use client';
 
 import { useState, useEffect, useMemo, useCallback } from 'react';
-import { ApiForwardConfig, CustomParamDef, ParamBinding, MockAPI, ApiClientConfig, KeyValuePair, OrchestrationConfig } from '@/lib/types';
+import { ApiForwardConfig, ApiForwardSummary, MockAPISummary, ApiClientSummary, CustomParamDef, ParamBinding, KeyValuePair, OrchestrationConfig, DatabaseInstanceSummary, RedisCacheConfig } from '@/lib/types';
 import JsonEditor from '@/components/JsonEditor';
 import OrchestrationEditor from '@/components/OrchestrationEditor';
 import { Icons } from '@/components/Icons';
+import { sanitizeRedisCacheConfig, validateRedisCacheConfig } from '@/lib/redis-cache-config';
 import styles from './page.module.css';
 
 function CustomParamEditor({
@@ -183,11 +184,13 @@ function ParamBindingEditor({
 }
 
 export default function ApiForwardPage() {
-  const [forwards, setForwards] = useState<ApiForwardConfig[]>([]);
-  const [mocks, setMocks] = useState<MockAPI[]>([]);
-  const [apiClients, setApiClients] = useState<ApiClientConfig[]>([]);
+  const [forwards, setForwards] = useState<ApiForwardSummary[]>([]);
+  const [mocks, setMocks] = useState<MockAPISummary[]>([]);
+  const [apiClients, setApiClients] = useState<ApiClientSummary[]>([]);
+  const [redisInstances, setRedisInstances] = useState<DatabaseInstanceSummary[]>([]);
   
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [activeForwardDetail, setActiveForwardDetail] = useState<ApiForwardConfig | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   
   // 编辑器状态
@@ -200,8 +203,10 @@ export default function ApiForwardPage() {
   const [customParams, setCustomParams] = useState<CustomParamDef[]>([]);
   const [targetType, setTargetType] = useState<'mock' | 'api-client'>('api-client');
   const [targetId, setTargetId] = useState<string>('');
+  const [targetParams, setTargetParams] = useState<KeyValuePair[]>([]);
   const [paramBindings, setParamBindings] = useState<ParamBinding[]>([]);
   const [orchestration, setOrchestration] = useState<OrchestrationConfig>({ nodes: [] });
+  const [redisConfig, setRedisConfig] = useState<RedisCacheConfig>({ enabled: false });
 
   const [viewMode, setViewMode] = useState<'design' | 'run'>('design');
   const [runParams, setRunParams] = useState<Record<string, string>>({});
@@ -210,6 +215,7 @@ export default function ApiForwardPage() {
   const [runTime, setRunTime] = useState<number>(0);
   const [isLoading, setIsLoading] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const hasRedisSources = redisInstances.length > 0;
 
   const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
     setToast({ message, type });
@@ -233,20 +239,54 @@ export default function ApiForwardPage() {
     }
   };
 
+  const fetchForwardDetail = async (id: string) => {
+    try {
+      const res = await fetch(`/api/forwards/${id}`);
+      if (!res.ok) throw new Error('Failed to load detail');
+      const detail: ApiForwardConfig = await res.json();
+      setActiveForwardDetail(detail);
+    } catch (e) {
+      console.error('Failed to fetch forward detail', e);
+    }
+  };
+
   const fetchTargets = async () => {
     try {
-      const [mockRes, clientRes] = await Promise.all([
+      const [mockRes, clientRes, dbRes] = await Promise.all([
         fetch('/api/mocks'),
-        fetch('/api/api-client')
+        fetch('/api/api-client'),
+        fetch('/api/database-instances')
       ]);
       if (mockRes.ok) setMocks(await mockRes.json());
       if (clientRes.ok) setApiClients(await clientRes.json());
+      if (dbRes.ok) {
+        const dbs: DatabaseInstanceSummary[] = await dbRes.json();
+        setRedisInstances(dbs.filter(db => db.type === 'redis'));
+      }
     } catch (e) {
       console.error('Failed to fetch targets', e);
     }
   };
 
-  const activeForward = useMemo(() => forwards.find(f => f.id === activeId), [forwards, activeId]);
+  // 当目标接口变更时，异步获取该目标的 requestParams
+  useEffect(() => {
+    if (!targetId) {
+      setTargetParams([]);
+      return;
+    }
+    const endpoint = targetType === 'mock'
+      ? `/api/mocks/${targetId}`
+      : `/api/api-client/${targetId}`;
+    fetch(endpoint)
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        if (data) setTargetParams(data.requestParams || []);
+        else setTargetParams([]);
+      })
+      .catch(() => setTargetParams([]));
+  }, [targetId, targetType]);
+
+  const activeForward = activeForwardDetail;
 
   useEffect(() => {
     if (activeForward) {
@@ -260,6 +300,7 @@ export default function ApiForwardPage() {
       setTargetId(activeForward.targetId);
       setParamBindings(activeForward.paramBindings || []);
       setOrchestration(activeForward.orchestration || { nodes: [] });
+      setRedisConfig(sanitizeRedisCacheConfig(activeForward.redisConfig));
       setViewMode('design');
       setRunResult(null);
       setRunStatus(null);
@@ -274,6 +315,7 @@ export default function ApiForwardPage() {
 
   const handleCreateNew = () => {
     setActiveId(null);
+    setActiveForwardDetail(null);
     setName('新建转发接口');
     setApiGroup('未分组');
     setDescription('');
@@ -284,6 +326,7 @@ export default function ApiForwardPage() {
     setTargetId('');
     setParamBindings([]);
     setOrchestration({ nodes: [] });
+    setRedisConfig(sanitizeRedisCacheConfig());
     setViewMode('design');
     setRunResult(null);
   };
@@ -292,6 +335,15 @@ export default function ApiForwardPage() {
     const orchestrationToSave = nextOrchestration && 'nodes' in nextOrchestration
       ? nextOrchestration
       : orchestration;
+    const nextRedisConfig = sanitizeRedisCacheConfig(redisConfig);
+    const redisValidationError = validateRedisCacheConfig(nextRedisConfig, {
+      hasRedisSource: hasRedisSources,
+    });
+    if (redisValidationError) {
+      showToast(redisValidationError, 'error');
+      return;
+    }
+
     const payload = {
       name,
       apiGroup,
@@ -303,6 +355,7 @@ export default function ApiForwardPage() {
       targetId,
       paramBindings,
       orchestration: orchestrationToSave,
+      redisConfig: nextRedisConfig,
     };
 
     try {
@@ -319,11 +372,12 @@ export default function ApiForwardPage() {
           });
 
       if (res.ok) {
-        const saved = await res.json();
+        const saved: ApiForwardConfig = await res.json();
         await fetchForwards();
         if (!activeId) {
           setActiveId(saved.id);
         }
+        setActiveForwardDetail(saved);
         showToast('配置已保存');
       } else {
         showToast('保存失败', 'error');
@@ -340,6 +394,7 @@ export default function ApiForwardPage() {
       const res = await fetch(`/api/forwards/${activeId}`, { method: 'DELETE' });
       if (res.ok) {
         setActiveId(null);
+        setActiveForwardDetail(null);
         showToast('接口已删除');
         fetchForwards();
       }
@@ -361,6 +416,7 @@ export default function ApiForwardPage() {
       targetId,
       paramBindings,
       orchestration,
+      redisConfig: sanitizeRedisCacheConfig(redisConfig),
       createdAt: '',
       updatedAt: ''
     };
@@ -419,18 +475,15 @@ export default function ApiForwardPage() {
     if (!acc[group]) acc[group] = [];
     acc[group].push(current);
     return acc;
-  }, {} as Record<string, ApiForwardConfig[]>);
+  }, {} as Record<string, ApiForwardSummary[]>);
+
+  const redisStatusText = useMemo(() => {
+    if (!hasRedisSources) return '未接入 Redis 数据源';
+    if (!redisConfig.enabled) return '默认关闭';
+    return '缓存已开启';
+  }, [hasRedisSources, redisConfig.enabled]);
 
   const renderDesignMode = () => {
-    let targetParams: KeyValuePair[] = [];
-    if (targetType === 'mock') {
-      const t = mocks.find(m => m.id === targetId);
-      if (t) targetParams = t.requestParams;
-    } else {
-      const t = apiClients.find(c => c.id === targetId);
-      if (t) targetParams = t.requestParams;
-    }
-
     return (
       <div className={styles.configPanel}>
         <div className={styles.panelContent} style={{ padding: 24 }}>
@@ -483,6 +536,97 @@ export default function ApiForwardPage() {
                 bindings={paramBindings}
                 onChange={setParamBindings} 
               />
+            )}
+          </div>
+
+          <div className="card" style={{ padding: '24px', marginBottom: 24 }}>
+            <div className={styles.redisHeader}>
+              <div className={styles.redisHeaderMain}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Icons.Database size={18} />
+                  <h3 className="section-title">Redis 结果缓存</h3>
+                </div>
+                <p className={styles.redisHeaderDescription}>
+                  写入结果使用 <code>接口ID:规则</code> 作为最终 Key，规则中的 <code>{'{{参数}}'}</code> 会按接口入参实时解析。
+                </p>
+              </div>
+              <label className={styles.redisToggle}>
+                <span className={`${styles.redisStatusBadge} ${redisConfig.enabled ? styles.redisStatusEnabled : styles.redisStatusDisabled}`}>
+                  {redisStatusText}
+                </span>
+                <input 
+                  type="checkbox" 
+                  checked={redisConfig.enabled}
+                  disabled={!hasRedisSources}
+                  onChange={(e) => {
+                    if (e.target.checked && !hasRedisSources) {
+                      showToast('暂无 Redis 数据源，请先前往「数据库实例」配置', 'error');
+                      return;
+                    }
+                    setRedisConfig(sanitizeRedisCacheConfig({ ...redisConfig, enabled: e.target.checked }));
+                  }}
+                  style={{ width: 16, height: 16 }}
+                />
+              </label>
+            </div>
+
+            {!hasRedisSources && (
+              <div className={styles.redisEmptyState}>
+                <div className={styles.redisEmptyIcon}>
+                  <Icons.Info size={16} />
+                </div>
+                <div className={styles.redisEmptyContent}>
+                  <strong>请先接入 Redis 数据源</strong>
+                  <span>当前没有可用的 Redis 实例，因此暂时不能开启结果缓存。</span>
+                </div>
+              </div>
+            )}
+            
+            {redisConfig.enabled && (
+              <div className={styles.redisConfigGrid}>
+                <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                  <label className="form-label">选择 Redis 数据源</label>
+                  <select 
+                    className="form-select" 
+                    value={redisConfig.instanceId || ''}
+                    onChange={(e) => setRedisConfig(sanitizeRedisCacheConfig({ ...redisConfig, instanceId: e.target.value }))}
+                  >
+                    <option value="">-- 请选择数据源 --</option>
+                    {redisInstances.map(r => (
+                      <option key={r.id} value={r.id}>{r.name} · {r.connectionUri}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Redis Key 规则</label>
+                  <textarea
+                    className={`${styles.redisRuleEditor} form-input`}
+                    placeholder={'如: profile:{{userId}}\n或: order:{{$.order.id}}:{{items[0].sku}}'}
+                    value={redisConfig.keyRule || ''}
+                    onChange={(e) => setRedisConfig(sanitizeRedisCacheConfig({ ...redisConfig, keyRule: e.target.value }))}
+                  />
+                  <div className={styles.redisRuleHints}>
+                    <span><code>{'{{userId}}'}</code> 读取普通参数</span>
+                    <span><code>{'{{user.id}}'}</code> / <code>{'{{$.user.id}}'}</code> 读取 JSON 入参</span>
+                    <span>最终写入 Key：<code>{`${activeId || 'temp_id'}:${redisConfig.keyRule || '...'}`}</code></span>
+                  </div>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">过期时间 (秒)</label>
+                  <input 
+                    type="number" 
+                    className="form-input" 
+                    placeholder="如: 3600 (一小时)"
+                    value={redisConfig.expireSeconds || ''}
+                    min={1}
+                    onChange={(e) => setRedisConfig(sanitizeRedisCacheConfig({
+                      ...redisConfig,
+                      expireSeconds: e.target.value ? parseInt(e.target.value, 10) : undefined,
+                    }))}
+                  />
+                  <div className={styles.redisExpireHint}>留空表示不过期；写入失败不会中断真实接口调用。</div>
+                </div>
+              </div>
             )}
           </div>
 
@@ -596,7 +740,7 @@ export default function ApiForwardPage() {
                     <div
                       key={f.id}
                       className={`${styles.apiItem} ${activeId === f.id ? styles.active : ''}`}
-                      onClick={() => setActiveId(f.id)}
+                      onClick={() => { setActiveId(f.id); fetchForwardDetail(f.id); }}
                       style={{ padding: '10px 16px', cursor: 'pointer', borderBottom: '1px solid var(--color-bg-subtle)' }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>

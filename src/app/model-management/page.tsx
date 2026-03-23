@@ -7,7 +7,7 @@ import {
   sanitizeAIModelProfileInput,
   validateAIModelProfileInput,
 } from '@/lib/ai-models';
-import { AIModelAuthType, AIModelProfile, CreateAIModelProfile } from '@/lib/types';
+import { AIModelAuthType, AIModelProfile, AIModelProfileSummary, CreateAIModelProfile } from '@/lib/types';
 import { Icons } from '@/components/Icons';
 import styles from './page.module.css';
 
@@ -51,11 +51,12 @@ function toEditableProfile(profile: AIModelProfile): EditableProfile {
 }
 
 export default function ModelManagementPage() {
-  const [profiles, setProfiles] = useState<AIModelProfile[]>([]);
+  const [profiles, setProfiles] = useState<AIModelProfileSummary[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [panelMode, setPanelMode] = useState<PanelMode>('overview');
   const [draft, setDraft] = useState<EditableProfile>(createEmptyDraft);
   const [modelIdInput, setModelIdInput] = useState('');
+  const [detailLoading, setDetailLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [addingModelId, setAddingModelId] = useState(false);
@@ -98,7 +99,7 @@ export default function ModelManagementPage() {
       if (!res.ok) {
         throw new Error('获取模型配置失败');
       }
-      const data = await res.json() as AIModelProfile[];
+      const data = await res.json() as AIModelProfileSummary[];
       setProfiles(data);
       return data;
     } catch (error) {
@@ -194,8 +195,20 @@ export default function ModelManagementPage() {
     resetEditorState('create');
   };
 
-  const handleSelectProfile = (profile: AIModelProfile) => {
-    resetEditorState('edit', profile);
+  const handleSelectProfile = async (profile: AIModelProfileSummary) => {
+    setActiveId(profile.id);
+    setPanelMode('edit');
+    setDetailLoading(true);
+    try {
+      const res = await fetch(`/api/ai-models/${profile.id}`);
+      if (!res.ok) throw new Error('读取详情失败');
+      const detail = await res.json();
+      resetEditorState('edit', detail);
+    } catch (e) {
+      showToast('获取模型详情失败', 'error');
+    } finally {
+      setDetailLoading(false);
+    }
   };
 
   const validateDraft = (): string | null => {
@@ -231,9 +244,8 @@ export default function ModelManagementPage() {
       }
       const profilesData = await fetchProfiles();
       if (profilesData) {
-        const savedProfile = profilesData.find((item) => item.id === (data.id || activeId)) || null;
-        if (savedProfile) {
-          resetEditorState('edit', savedProfile);
+        if (activeId) {
+          resetEditorState('edit', data);
         } else {
           resetEditorState('overview');
         }
@@ -431,6 +443,13 @@ export default function ModelManagementPage() {
               </div>
 
               <div className={styles.panelBody}>
+                {detailLoading ? (
+                  <div className={styles.emptyState} style={{ padding: '120px 0' }}>
+                    <Icons.Activity size={32} className="spin" />
+                    <span style={{ marginTop: 16 }}>正在读取模型配置详情...</span>
+                  </div>
+                ) : (
+                  <>
             <div className={styles.formGrid}>
               <label className={styles.formSpan2}>
                 <div className="form-label">模型名称</div>
@@ -612,7 +631,9 @@ export default function ModelManagementPage() {
                 </button>
               )}
             </div>
-          </div>
+                  </>
+                )}
+              </div>
             </>
           )}
         </div>

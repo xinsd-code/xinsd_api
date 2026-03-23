@@ -1,10 +1,10 @@
 import { NextResponse } from 'next/server';
-import { getAllMocks, createMock, toggleMock } from '@/lib/db';
+import { getAllMocksSummary, createMock, toggleMock } from '@/lib/db';
 import { CreateMockAPI } from '@/lib/types';
 
 export async function GET() {
   try {
-    const mocks = getAllMocks();
+    const mocks = getAllMocksSummary();
     return NextResponse.json(mocks);
   } catch (error) {
     console.error('Failed to get mocks:', error);

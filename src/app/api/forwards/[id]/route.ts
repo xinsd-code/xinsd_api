@@ -1,9 +1,10 @@
 import { NextResponse } from 'next/server';
-import { getApiForwardById, updateApiForward, deleteApiForward } from '@/lib/db';
+import { getApiForwardById, updateApiForward, deleteApiForward, getDatabaseInstanceById } from '@/lib/db';
+import { sanitizeRedisCacheConfig, validateRedisCacheConfig } from '@/lib/redis-cache-config';
 import { UpdateApiForwardConfig } from '@/lib/types';
 
 export async function GET(
-  request: Request,
+  _request: Request,
   { params }: { params: Promise<{ id: string }> | { id: string } }
 ) {
   try {
@@ -26,8 +27,26 @@ export async function PUT(
   try {
     const resolvedParams = await params;
     const data: UpdateApiForwardConfig = await request.json();
+    let redisConfig = data.redisConfig;
+
+    if (data.redisConfig !== undefined) {
+      redisConfig = sanitizeRedisCacheConfig(data.redisConfig);
+      const redisValidationError = validateRedisCacheConfig(redisConfig);
+      if (redisValidationError) {
+        return NextResponse.json({ error: redisValidationError }, { status: 400 });
+      }
+      if (redisConfig.enabled) {
+        const redisInstance = getDatabaseInstanceById(redisConfig.instanceId!);
+        if (!redisInstance || redisInstance.type !== 'redis') {
+          return NextResponse.json({ error: '请选择有效的 Redis 数据源' }, { status: 400 });
+        }
+      }
+    }
     
-    const forward = updateApiForward(resolvedParams.id, data);
+    const forward = updateApiForward(resolvedParams.id, {
+      ...data,
+      redisConfig,
+    });
     
     if (!forward) {
       return NextResponse.json({ error: 'API Forward not found' }, { status: 404 });
@@ -41,7 +60,7 @@ export async function PUT(
 }
 
 export async function DELETE(
-  request: Request,
+  _request: Request,
   { params }: { params: Promise<{ id: string }> | { id: string } }
 ) {
   try {

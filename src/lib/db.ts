@@ -2,20 +2,25 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import {
   MockAPI,
+  MockAPISummary,
   CreateMockAPI,
   UpdateMockAPI,
   ApiClientConfig,
+  ApiClientSummary,
   CreateApiClientConfig,
   UpdateApiClientConfig,
   KeyValuePair,
   ApiForwardConfig,
+  ApiForwardSummary,
   CreateApiForwardConfig,
   UpdateApiForwardConfig,
   OrchestrationConfig,
   AIModelProfile,
+  AIModelProfileSummary,
   CreateAIModelProfile,
   UpdateAIModelProfile,
   DatabaseInstance,
+  DatabaseInstanceSummary,
   CreateDatabaseInstance,
   UpdateDatabaseInstance,
 } from './types';
@@ -157,6 +162,15 @@ function initializeDb(database: Database.Database) {
       console.error('Migration error api_forwards:', err);
     }
   }
+
+  // Migration for api_forwards redis_config column
+  try {
+    database.exec(`ALTER TABLE api_forwards ADD COLUMN redis_config TEXT DEFAULT NULL;`);
+  } catch (err) {
+    if (err instanceof Error && !err.message.includes('duplicate column name')) {
+      console.error('Migration error api_forwards redis_config:', err);
+    }
+  }
 }
 
 function rowToMockAPI(row: Record<string, unknown>): MockAPI {
@@ -185,6 +199,29 @@ export function getAllMocks(): MockAPI[] {
   const db = getDb();
   const rows = db.prepare('SELECT * FROM mock_apis ORDER BY created_at DESC').all();
   return rows.map((row) => rowToMockAPI(row as Record<string, unknown>));
+}
+
+export function getAllMocksSummary(): MockAPISummary[] {
+  const db = getDb();
+  const rows = db.prepare(
+    'SELECT id, name, path, method, description, enabled, is_stream, response_delay, api_group, created_at, updated_at FROM mock_apis ORDER BY created_at DESC'
+  ).all();
+  return rows.map((row) => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      name: r.name as string,
+      path: r.path as string,
+      method: r.method as string,
+      description: (r.description as string) || '',
+      enabled: (r.enabled as number) === 1,
+      isStream: (r.is_stream as number) === 1,
+      responseDelay: r.response_delay as number,
+      apiGroup: (r.api_group as string) || '未分组',
+      createdAt: r.created_at as string,
+      updatedAt: r.updated_at as string,
+    };
+  });
 }
 
 export function getMockById(id: string): MockAPI | null {
@@ -298,6 +335,26 @@ export function getAllApiClients(): ApiClientConfig[] {
   return rows.map((row) => rowToApiClientConfig(row as Record<string, unknown>));
 }
 
+export function getAllApiClientsSummary(): ApiClientSummary[] {
+  const db = getDb();
+  const rows = db.prepare(
+    'SELECT id, name, url, method, description, api_group, created_at, updated_at FROM api_clients ORDER BY created_at DESC'
+  ).all();
+  return rows.map((row) => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      name: r.name as string,
+      url: r.url as string,
+      method: r.method as string,
+      description: (r.description as string) || '',
+      apiGroup: (r.api_group as string) || '未分组',
+      createdAt: r.created_at as string,
+      updatedAt: r.updated_at as string,
+    };
+  });
+}
+
 export function getApiClientById(id: string): ApiClientConfig | null {
   const db = getDb();
   const row = db.prepare('SELECT * FROM api_clients WHERE id = ?').get(id);
@@ -395,6 +452,13 @@ function rowToApiForwardConfig(row: Record<string, unknown>): ApiForwardConfig {
     }
   } catch { /* ignore parse errors */ }
 
+  let redisConfig: any;
+  try {
+    if (row.redis_config) {
+      redisConfig = JSON.parse(row.redis_config as string);
+    }
+  } catch { /* ignore parse errors */ }
+
   return {
     id: row.id as string,
     name: row.name as string,
@@ -407,6 +471,7 @@ function rowToApiForwardConfig(row: Record<string, unknown>): ApiForwardConfig {
     targetId: row.target_id as string,
     paramBindings: JSON.parse(row.param_bindings as string),
     orchestration,
+    redisConfig,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
   };
@@ -416,6 +481,26 @@ export function getAllApiForwards(): ApiForwardConfig[] {
   const db = getDb();
   const rows = db.prepare('SELECT * FROM api_forwards ORDER BY created_at DESC').all();
   return rows.map((row) => rowToApiForwardConfig(row as Record<string, unknown>));
+}
+
+export function getAllApiForwardsSummary(): ApiForwardSummary[] {
+  const db = getDb();
+  const rows = db.prepare(
+    'SELECT id, name, method, path, api_group, description, created_at, updated_at FROM api_forwards ORDER BY created_at DESC'
+  ).all();
+  return rows.map((row) => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      name: r.name as string,
+      method: r.method as string,
+      path: r.path as string,
+      apiGroup: (r.api_group as string) || '未分组',
+      description: (r.description as string) || '',
+      createdAt: r.created_at as string,
+      updatedAt: r.updated_at as string,
+    };
+  });
 }
 
 export function getApiForwardById(id: string): ApiForwardConfig | null {
@@ -431,8 +516,8 @@ export function createApiForward(data: CreateApiForwardConfig): ApiForwardConfig
 
   db.prepare(`
     INSERT INTO api_forwards (id, name, api_group, description, method, path,
-      custom_params, target_type, target_id, param_bindings, orchestration, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      custom_params, target_type, target_id, param_bindings, orchestration, redis_config, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     data.name,
@@ -445,6 +530,7 @@ export function createApiForward(data: CreateApiForwardConfig): ApiForwardConfig
     data.targetId,
     JSON.stringify(data.paramBindings || []),
     JSON.stringify(data.orchestration || {}),
+    data.redisConfig ? JSON.stringify(data.redisConfig) : null,
     now,
     now,
   );
@@ -471,6 +557,7 @@ export function updateApiForward(id: string, data: UpdateApiForwardConfig): ApiF
   if (data.targetId !== undefined) { updates.push('target_id = ?'); values.push(data.targetId); }
   if (data.paramBindings !== undefined) { updates.push('param_bindings = ?'); values.push(JSON.stringify(data.paramBindings)); }
   if (data.orchestration !== undefined) { updates.push('orchestration = ?'); values.push(JSON.stringify(data.orchestration)); }
+  if (data.redisConfig !== undefined) { updates.push('redis_config = ?'); values.push(data.redisConfig ? JSON.stringify(data.redisConfig) : null); }
 
   updates.push('updated_at = ?');
   values.push(now);
@@ -511,6 +598,27 @@ export function getAllAIModelProfiles(): AIModelProfile[] {
   `).all();
 
   return rows.map((row) => rowToAIModelProfile(row as Record<string, unknown>));
+}
+
+export function getAllAIModelProfilesSummary(): AIModelProfileSummary[] {
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT id, name, base_url, auth_type, model_ids, default_model_id, is_default, created_at, updated_at
+    FROM ai_model_profiles
+    ORDER BY is_default DESC, updated_at DESC, created_at DESC
+  `).all();
+
+  return rows.map((row: any) => ({
+    id: row.id,
+    name: row.name,
+    baseUrl: row.base_url,
+    authType: row.auth_type,
+    modelIds: JSON.parse((row.model_ids as string) || '[]'),
+    defaultModelId: (row.default_model_id as string) || '',
+    isDefault: (row.is_default as number) === 1,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  }));
 }
 
 export function getAIModelProfileById(id: string): AIModelProfile | null {
@@ -634,6 +742,24 @@ export function getAllDatabaseInstances(): DatabaseInstance[] {
     ORDER BY updated_at DESC, created_at DESC
   `).all();
   return rows.map((row) => rowToDatabaseInstance(row as Record<string, unknown>));
+}
+
+export function getAllDatabaseInstancesSummary(): DatabaseInstanceSummary[] {
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT id, name, type, connection_uri, created_at, updated_at
+    FROM database_instances
+    ORDER BY updated_at DESC, created_at DESC
+  `).all();
+
+  return rows.map((row: any) => ({
+    id: row.id,
+    name: row.name,
+    type: row.type,
+    connectionUri: row.connection_uri,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
 }
 
 export function getDatabaseInstanceById(id: string): DatabaseInstance | null {
