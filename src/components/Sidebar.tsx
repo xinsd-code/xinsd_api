@@ -30,6 +30,11 @@ export default function Sidebar() {
       path: '/model-management',
       icon: <Icons.Sparkles size={18} />,
     },
+    {
+      name: '数据库实例',
+      path: '/database-instances',
+      icon: <Icons.Database size={18} />,
+    },
   ];
 
   return (
@@ -56,7 +61,7 @@ export default function Sidebar() {
       <div className="sidebar-bottom">
         <div className="sidebar-nav sidebar-nav-bottom">
           <div style={{ padding: '0 14px 12px', fontSize: 11, fontWeight: 700, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-            AI 配置
+            系统配置
           </div>
           {bottomNavItems.map((item) => {
             const isActive = pathname === item.path;

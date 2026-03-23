@@ -116,6 +116,57 @@ export interface AIModelSelection {
   isDefault?: boolean;
 }
 
+export type DatabaseInstanceType = 'mysql' | 'pgsql' | 'redis';
+
+export interface DatabaseInstance {
+  id: string;
+  name: string;
+  type: DatabaseInstanceType;
+  connectionUri: string;
+  username?: string;
+  password?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type CreateDatabaseInstance = Omit<DatabaseInstance, 'id' | 'createdAt' | 'updatedAt'>;
+export type UpdateDatabaseInstance = Partial<CreateDatabaseInstance>;
+
+export interface DatabaseCollectionInfo {
+  name: string;
+  category: 'table' | 'key';
+  detail?: string;
+  columns?: Array<{
+    name: string;
+    type: string;
+    nullable?: boolean;
+    defaultValue?: string | null;
+    isPrimary?: boolean;
+    extra?: string;
+  }>;
+}
+
+export interface DatabaseSchemaPayload {
+  engine: DatabaseInstanceType;
+  collections: DatabaseCollectionInfo[];
+}
+
+export interface DatabasePreviewPayload {
+  engine: DatabaseInstanceType;
+  name: string;
+  category: 'table' | 'key';
+  columns: string[];
+  rows: Record<string, unknown>[];
+  summary?: string;
+}
+
+export interface DatabaseQueryPayload {
+  engine: DatabaseInstanceType;
+  columns: string[];
+  rows: Record<string, unknown>[];
+  summary?: string;
+}
+
 // --- Orchestration Types ---
 
 export interface FilterNodeConfig {

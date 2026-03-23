@@ -15,6 +15,9 @@ import {
   AIModelProfile,
   CreateAIModelProfile,
   UpdateAIModelProfile,
+  DatabaseInstance,
+  CreateDatabaseInstance,
+  UpdateDatabaseInstance,
 } from './types';
 import { nanoid } from 'nanoid';
 import { sanitizeAIModelProfileInput } from './ai-models';
@@ -128,6 +131,19 @@ function initializeDb(database: Database.Database) {
       model_ids TEXT DEFAULT '[]',
       default_model_id TEXT DEFAULT '',
       is_default INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS database_instances (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      connection_uri TEXT NOT NULL,
+      username TEXT DEFAULT '',
+      password TEXT DEFAULT '',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -594,5 +610,98 @@ export function updateAIModelProfile(id: string, input: UpdateAIModelProfile): A
 export function deleteAIModelProfile(id: string): boolean {
   const db = getDb();
   const result = db.prepare('DELETE FROM ai_model_profiles WHERE id = ?').run(id);
+  return result.changes > 0;
+}
+
+function rowToDatabaseInstance(row: Record<string, unknown>): DatabaseInstance {
+  return {
+    id: row.id as string,
+    name: row.name as string,
+    type: row.type as DatabaseInstance['type'],
+    connectionUri: row.connection_uri as string,
+    username: (row.username as string) || '',
+    password: (row.password as string) || '',
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  };
+}
+
+export function getAllDatabaseInstances(): DatabaseInstance[] {
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT *
+    FROM database_instances
+    ORDER BY updated_at DESC, created_at DESC
+  `).all();
+  return rows.map((row) => rowToDatabaseInstance(row as Record<string, unknown>));
+}
+
+export function getDatabaseInstanceById(id: string): DatabaseInstance | null {
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM database_instances WHERE id = ?').get(id);
+  return row ? rowToDatabaseInstance(row as Record<string, unknown>) : null;
+}
+
+export function createDatabaseInstance(input: CreateDatabaseInstance): DatabaseInstance {
+  const db = getDb();
+  const id = nanoid(12);
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO database_instances (
+      id, name, type, connection_uri, username, password, created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    input.name,
+    input.type,
+    input.connectionUri,
+    input.username || '',
+    input.password || '',
+    now,
+    now
+  );
+
+  return getDatabaseInstanceById(id)!;
+}
+
+export function updateDatabaseInstance(id: string, input: UpdateDatabaseInstance): DatabaseInstance | null {
+  const db = getDb();
+  const existing = getDatabaseInstanceById(id);
+  if (!existing) return null;
+
+  const now = new Date().toISOString();
+  const next = {
+    ...existing,
+    ...input,
+  };
+
+  db.prepare(`
+    UPDATE database_instances
+    SET
+      name = ?,
+      type = ?,
+      connection_uri = ?,
+      username = ?,
+      password = ?,
+      updated_at = ?
+    WHERE id = ?
+  `).run(
+    next.name,
+    next.type,
+    next.connectionUri,
+    next.username || '',
+    next.password || '',
+    now,
+    id
+  );
+
+  return getDatabaseInstanceById(id);
+}
+
+export function deleteDatabaseInstance(id: string): boolean {
+  const db = getDb();
+  const result = db.prepare('DELETE FROM database_instances WHERE id = ?').run(id);
   return result.changes > 0;
 }
