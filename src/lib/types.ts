@@ -86,8 +86,16 @@ export interface CustomParamDef {
 
 export interface ParamBinding {
   targetParamKey: string;     // The param key expected by the underlying API
+  targetLocation?: 'query' | 'body';
   customParamKey?: string;    // The param key defined by the forward's customParams
   staticValue?: string;       // Or a static value if mapped statically instead of passing from custom param
+}
+
+export interface ForwardTargetParamOption {
+  key: string;
+  value?: string;
+  location: 'query' | 'body';
+  valueType?: string;
 }
 
 export interface RedisCacheConfig {

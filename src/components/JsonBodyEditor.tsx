@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import JsonEditor from './JsonEditor';
 import { Icons } from './Icons';
 import {
@@ -11,6 +11,10 @@ import {
   flattenJsonBody,
   parseJsonBody,
 } from '@/lib/json-body';
+
+interface JsonBodyDraftField extends JsonBodyField {
+  id: string;
+}
 
 interface JsonBodyEditorProps {
   value: string;
@@ -33,6 +37,14 @@ function createEmptyField(): JsonBodyField {
   };
 }
 
+function toPersistedFields(fields: JsonBodyDraftField[]): JsonBodyField[] {
+  return fields.map((field) => ({
+    path: field.path,
+    type: field.type,
+    value: field.value,
+  }));
+}
+
 export default function JsonBodyEditor({
   value,
   onChange,
@@ -44,16 +56,64 @@ export default function JsonBodyEditor({
   height = 280,
 }: JsonBodyEditorProps) {
   const [activeView, setActiveView] = useState<'form' | 'raw'>('form');
+  const [lastSyncedValue, setLastSyncedValue] = useState(value);
+  const [lastSerializedValue, setLastSerializedValue] = useState<string | null>(null);
+  const [draftFields, setDraftFields] = useState<JsonBodyDraftField[]>(() => {
+    const parsed = parseJsonBody(value);
+    if (parsed.error || parsed.data === null) {
+      return [];
+    }
+    return flattenJsonBody(parsed.data).map((field, index) => ({
+      id: `json-body-field-${index}`,
+      ...createEmptyField(),
+      ...field,
+    }));
+  });
+  const nextFieldIdRef = useRef(draftFields.length);
+
+  const createDraftField = (field?: Partial<JsonBodyField>): JsonBodyDraftField => {
+    const nextId = nextFieldIdRef.current;
+    nextFieldIdRef.current += 1;
+    return {
+      id: `json-body-field-${nextId}`,
+      ...createEmptyField(),
+      ...field,
+    };
+  };
+
+  const buildDraftFieldsFromValue = (rawValue: string): JsonBodyDraftField[] | null => {
+    const parsed = parseJsonBody(rawValue);
+    if (parsed.error || parsed.data === null) {
+      return null;
+    }
+    return flattenJsonBody(parsed.data).map((field, index) => ({
+      id: `json-body-sync-${index}`,
+      ...createEmptyField(),
+      ...field,
+    }));
+  };
 
   const parsedJson = useMemo(() => parseJsonBody(value), [value]);
-  const fields = useMemo(
-    () => (parsedJson.error || parsedJson.data === null ? [] : flattenJsonBody(parsedJson.data)),
-    [parsedJson]
-  );
 
-  const applyFields = (nextFields: JsonBodyField[]) => {
+  if (value !== lastSyncedValue) {
+    setLastSyncedValue(value);
+    if (lastSerializedValue === value) {
+      setLastSerializedValue(null);
+    } else {
+    const nextDraftFields = buildDraftFieldsFromValue(value);
+    if (nextDraftFields) {
+      setDraftFields(nextDraftFields);
+    }
+    }
+  }
+
+  const applyFields = (nextFields: JsonBodyDraftField[]) => {
+    setDraftFields(nextFields);
+    nextFieldIdRef.current = Math.max(nextFieldIdRef.current, nextFields.length);
     try {
-      const nextBody = JSON.stringify(buildJsonBodyFromFields(nextFields), null, 2);
+      const nextBody = JSON.stringify(buildJsonBodyFromFields(toPersistedFields(nextFields)), null, 2);
+      setLastSerializedValue(nextBody);
+      setLastSyncedValue(nextBody);
       onChange(nextBody);
     } catch {
       // 忽略字段构建中的临时无效输入，等待用户继续编辑
@@ -61,21 +121,18 @@ export default function JsonBodyEditor({
   };
 
   const handleFieldChange = (index: number, patch: Partial<JsonBodyField>) => {
-    const nextFields = fields.map((field, fieldIndex) =>
+    const nextFields = draftFields.map((field, fieldIndex) =>
       fieldIndex === index ? { ...field, ...patch } : field
     );
     applyFields(nextFields);
   };
 
   const handleAddField = () => {
-    const nextIndex = fields.length + 1;
-    const nextField = createEmptyField();
-    nextField.path = `field${nextIndex}`;
-    applyFields([...fields, nextField]);
+    applyFields([...draftFields, createDraftField()]);
   };
 
   const handleRemoveField = (index: number) => {
-    const nextFields = fields.filter((_, fieldIndex) => fieldIndex !== index);
+    const nextFields = draftFields.filter((_, fieldIndex) => fieldIndex !== index);
     applyFields(nextFields);
   };
 
@@ -84,7 +141,7 @@ export default function JsonBodyEditor({
     onChange(JSON.stringify(parsedJson.data, null, 2));
   };
 
-  const fieldCountLabel = parsedJson.error ? '原始 JSON 待修复' : `${fields.length} 个字段`;
+  const fieldCountLabel = parsedJson.error ? '原始 JSON 待修复' : `${draftFields.length} 个字段`;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14, height: '100%' }}>
@@ -172,7 +229,7 @@ export default function JsonBodyEditor({
           </div>
 
           <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {fields.length === 0 ? (
+            {draftFields.length === 0 ? (
               <div
                 style={{
                   border: '1px dashed var(--color-border)',
@@ -188,11 +245,11 @@ export default function JsonBodyEditor({
                 {emptyHint}
               </div>
             ) : (
-              fields.map((field, index) => {
+              draftFields.map((field, index) => {
                 const isStructuredValue = field.type === 'object' || field.type === 'array';
                 return (
                   <div
-                    key={`${field.path}-${index}`}
+                    key={field.id}
                     style={{
                       display: 'grid',
                       gridTemplateColumns: 'minmax(160px, 1.2fr) 120px minmax(180px, 1fr) 44px',

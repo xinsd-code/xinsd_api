@@ -1,11 +1,12 @@
 'use client';
 
 import { useState, useEffect, useMemo, useCallback } from 'react';
-import { ApiForwardConfig, ApiForwardSummary, MockAPISummary, ApiClientSummary, CustomParamDef, ParamBinding, KeyValuePair, OrchestrationConfig, DatabaseInstanceSummary, RedisCacheConfig } from '@/lib/types';
+import { ApiForwardConfig, ApiForwardSummary, MockAPISummary, ApiClientSummary, CustomParamDef, ParamBinding, ForwardTargetParamOption, OrchestrationConfig, DatabaseInstanceSummary, RedisCacheConfig } from '@/lib/types';
 import JsonEditor from '@/components/JsonEditor';
 import OrchestrationEditor from '@/components/OrchestrationEditor';
 import { Icons } from '@/components/Icons';
 import { sanitizeRedisCacheConfig, validateRedisCacheConfig } from '@/lib/redis-cache-config';
+import { extractForwardTargetParams } from '@/lib/forward-target-params';
 import styles from './page.module.css';
 
 function CustomParamEditor({
@@ -102,18 +103,34 @@ function ParamBindingEditor({
   bindings,
   onChange,
 }: {
-  targetParams: KeyValuePair[];
+  targetParams: ForwardTargetParamOption[];
   customParams: CustomParamDef[];
   bindings: ParamBinding[];
   onChange: (bindings: ParamBinding[]) => void;
 }) {
-  const getBindingFor = (targetKey: string) => {
-    return bindings.find(b => b.targetParamKey === targetKey);
+  const getBindingFor = (targetKey: string, targetLocation: 'query' | 'body') => {
+    return bindings.find(b => b.targetParamKey === targetKey && (b.targetLocation || 'query') === targetLocation);
   };
 
-  const handleUpdate = (targetKey: string, customKey: string, staticVal: string) => {
-    const newBindings = bindings.filter(b => b.targetParamKey !== targetKey);
-    newBindings.push({ targetParamKey: targetKey, customParamKey: customKey || undefined, staticValue: staticVal || undefined });
+  const handleUpdate = (
+    targetKey: string,
+    targetLocation: 'query' | 'body',
+    mode: 'none' | 'custom' | 'static',
+    customKey = '',
+    staticVal = ''
+  ) => {
+    const newBindings = bindings.filter(
+      b => !(b.targetParamKey === targetKey && (b.targetLocation || 'query') === targetLocation)
+    );
+
+    if (mode !== 'none') {
+      newBindings.push({
+        targetParamKey: targetKey,
+        targetLocation,
+        customParamKey: mode === 'custom' ? customKey || undefined : undefined,
+        staticValue: mode === 'static' ? staticVal : undefined,
+      });
+    }
     onChange(newBindings);
   };
 
@@ -127,16 +144,37 @@ function ParamBindingEditor({
         <Icons.Refresh size={16} />
         <h3 style={{ fontSize: 15, fontWeight: 800 }}>参数映射绑定</h3>
       </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {targetParams.map((tp, i) => {
-          const binding = getBindingFor(tp.key);
-          const isMappingStatic = !!binding?.staticValue;
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {targetParams.map((tp, i) => {
+          const binding = getBindingFor(tp.key, tp.location);
+          const isMappingStatic = !!binding && binding.customParamKey === undefined && binding.staticValue !== undefined;
           
           return (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '12px 16px', background: 'white', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)' }}>
               <div style={{ flex: 1 }}>
-                <div style={{ fontSize: '13px', fontWeight: 700 }}>{tp.key}</div>
-                <div style={{ fontSize: '11px', color: 'var(--color-text-muted)' }}>目标接口参数</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <div style={{ fontSize: '13px', fontWeight: 700 }}>{tp.key}</div>
+                  <span
+                    style={{
+                      fontSize: 10,
+                      fontWeight: 800,
+                      padding: '2px 8px',
+                      borderRadius: 999,
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.04em',
+                      background: tp.location === 'body' ? 'color-mix(in srgb, var(--color-primary) 10%, white)' : 'var(--color-bg-hover)',
+                      color: tp.location === 'body' ? 'var(--color-primary)' : 'var(--color-text-muted)',
+                    }}
+                  >
+                    {tp.location === 'body' ? 'Body' : 'Query'}
+                  </span>
+                  {tp.valueType && (
+                    <span style={{ fontSize: 10, color: 'var(--color-text-muted)' }}>{tp.valueType}</span>
+                  )}
+                </div>
+                <div style={{ fontSize: '11px', color: 'var(--color-text-muted)' }}>
+                  {tp.location === 'body' ? '目标接口请求体字段' : '目标接口查询参数'}
+                </div>
               </div>
               
               <Icons.ChevronRight size={16} style={{ color: 'var(--color-text-muted)' }} />
@@ -148,11 +186,11 @@ function ParamBindingEditor({
                   onChange={(e) => {
                     const val = e.target.value;
                     if (val === '__static__') {
-                      handleUpdate(tp.key, '', binding?.staticValue || '');
+                      handleUpdate(tp.key, tp.location, 'static', '', binding?.staticValue ?? '');
                     } else if (val) {
-                      handleUpdate(tp.key, val, '');
+                      handleUpdate(tp.key, tp.location, 'custom', val, '');
                     } else {
-                      handleUpdate(tp.key, '', '');
+                      handleUpdate(tp.key, tp.location, 'none');
                     }
                   }}
                 >
@@ -171,7 +209,7 @@ function ParamBindingEditor({
                     placeholder="输入固定值" 
                     className="form-input" style={{ flex: 1, height: 36, fontSize: 13 }}
                     value={binding?.staticValue || ''}
-                    onChange={(e) => handleUpdate(tp.key, '', e.target.value)}
+                    onChange={(e) => handleUpdate(tp.key, tp.location, 'static', '', e.target.value)}
                   />
                 )}
               </div>
@@ -203,7 +241,7 @@ export default function ApiForwardPage() {
   const [customParams, setCustomParams] = useState<CustomParamDef[]>([]);
   const [targetType, setTargetType] = useState<'mock' | 'api-client'>('api-client');
   const [targetId, setTargetId] = useState<string>('');
-  const [targetParams, setTargetParams] = useState<KeyValuePair[]>([]);
+  const [targetParams, setTargetParams] = useState<ForwardTargetParamOption[]>([]);
   const [paramBindings, setParamBindings] = useState<ParamBinding[]>([]);
   const [orchestration, setOrchestration] = useState<OrchestrationConfig>({ nodes: [] });
   const [redisConfig, setRedisConfig] = useState<RedisCacheConfig>({ enabled: false });
@@ -280,7 +318,9 @@ export default function ApiForwardPage() {
     fetch(endpoint)
       .then(res => res.ok ? res.json() : null)
       .then(data => {
-        if (data) setTargetParams(data.requestParams || []);
+        if (data) {
+          setTargetParams(extractForwardTargetParams(data.requestParams || [], data.requestBody || ''));
+        }
         else setTargetParams([]);
       })
       .catch(() => setTargetParams([]));

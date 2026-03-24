@@ -5,6 +5,7 @@ import { getMockById, getApiClientById } from '@/lib/db';
 import { writeRedisCacheValue } from '@/lib/redis-cache';
 import { resolveVariables } from '@/lib/utils';
 import { getGroupVariables } from '@/lib/db';
+import { JsonBodyField, buildJsonBodyFromFields, flattenJsonBody, parseJsonBody } from '@/lib/json-body';
 
 export async function POST(request: Request) {
   try {
@@ -28,6 +29,7 @@ export async function POST(request: Request) {
       targetMethod = mock.method;
       targetHeaders = mock.requestHeaders || [];
       targetParams = mock.requestParams || [];
+      targetBody = mock.requestBody || '';
       apiGroup = mock.apiGroup || '';
     } else {
       const client = getApiClientById(forwardConfig.targetId);
@@ -46,20 +48,52 @@ export async function POST(request: Request) {
     // 3. Map custom parameters -> target parameters using bindings
     // Deep clone target params to override values
     const finalParams = [...targetParams].map(p => ({ ...p }));
+    const resolvedTargetBodyTemplate = resolveVariables(targetBody, groupVars);
+    const parsedTargetBody = parseJsonBody(resolvedTargetBodyTemplate);
+    const finalBodyFields: JsonBodyField[] =
+      parsedTargetBody.error || parsedTargetBody.data === null
+        ? []
+        : flattenJsonBody(parsedTargetBody.data).map(field => ({ ...field }));
+
+    const upsertBodyField = (path: string, value: string) => {
+      const existingField = finalBodyFields.find(field => field.path === path);
+      if (existingField) {
+        existingField.value = value;
+        return;
+      }
+
+      finalBodyFields.push({
+        path,
+        type: 'string',
+        value,
+      });
+    };
     
     for (const binding of forwardConfig.paramBindings || []) {
+      let nextValue: string | undefined;
+      if (binding.staticValue !== undefined) {
+        nextValue = binding.staticValue;
+      } else if (binding.customParamKey) {
+        nextValue = runParams[binding.customParamKey];
+      }
+
+      if (nextValue === undefined) {
+        continue;
+      }
+
+      if (binding.targetLocation === 'body') {
+        upsertBodyField(binding.targetParamKey, nextValue);
+        continue;
+      }
+
       const targetParamIndex = finalParams.findIndex(p => p.key === binding.targetParamKey);
       if (targetParamIndex !== -1) {
-        if (binding.staticValue !== undefined) {
-          // Use static value
-          finalParams[targetParamIndex].value = binding.staticValue;
-        } else if (binding.customParamKey) {
-          // Map from custom param
-          const val = runParams[binding.customParamKey];
-          if (val !== undefined) {
-            finalParams[targetParamIndex].value = val;
-          }
-        }
+        finalParams[targetParamIndex].value = nextValue;
+      } else {
+        finalParams.push({
+          key: binding.targetParamKey,
+          value: nextValue,
+        });
       }
     }
 
@@ -91,8 +125,12 @@ export async function POST(request: Request) {
 
     // 6. Construct Body (if applicable)
     let bodyPayload: BodyInit | null = null;
-    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(targetMethod) && targetBody) {
-      bodyPayload = resolveVariables(targetBody, groupVars);
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(targetMethod) && (resolvedTargetBodyTemplate || finalBodyFields.length > 0)) {
+      if (finalBodyFields.length > 0 || (!parsedTargetBody.error && parsedTargetBody.data !== null)) {
+        bodyPayload = JSON.stringify(buildJsonBodyFromFields(finalBodyFields));
+      } else {
+        bodyPayload = resolvedTargetBodyTemplate;
+      }
     }
 
     // 7. Make the actual proxy fetch call!
