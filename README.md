@@ -255,6 +255,20 @@ Mock 接口定义 -> API 接入调试 -> API 转发绑定 -> DB API SQL 封装 -
 - 截图时尽量保留完整 Header 和 Sidebar，强化“工作台”感。
 - 示例数据尽量使用真实字段名，例如 `userId`、`price`、`status`、`data[].age`。
 
+### 素材目录
+
+- 所有 README 配套截图统一存放在 `docs/screenshots/`
+- 当前已补齐 Mock、API Client、API Forward、高级编排、模型管理、数据库实例与 DB API 的核心展示图
+
+### 预览示例
+
+| 模块 | 预览 |
+| --- | --- |
+| Mock 工作台 | ![Mock Dashboard](docs/screenshots/mock-dashboard.png) |
+| API 转发编排输出 | ![Orchestration Output](docs/screenshots/orchestration-output.png) |
+| 模型管理 | ![Model Management](docs/screenshots/model-management-overview.png) |
+| DB API 调试台 | ![DB API Workbench](docs/screenshots/db-api-workbench.png) |
+
 ## 🛠 技术栈
 
 ### Frontend
