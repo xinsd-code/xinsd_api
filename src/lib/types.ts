@@ -143,6 +143,43 @@ export interface ApiForwardSummary {
   updatedAt: string;
 }
 
+export interface SqlVariableBinding {
+  variableKey: string;
+  customParamKey?: string;
+  staticValue?: string;
+}
+
+export interface DbApiConfig {
+  id: string;
+  name: string;
+  apiGroup?: string;
+  description: string;
+  method: string;
+  path: string;
+  customParams: CustomParamDef[];
+  databaseInstanceId: string;
+  sqlTemplate: string;
+  paramBindings: SqlVariableBinding[];
+  redisConfig?: RedisCacheConfig;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type CreateDbApiConfig = Omit<DbApiConfig, 'id' | 'createdAt' | 'updatedAt'>;
+export type UpdateDbApiConfig = Partial<CreateDbApiConfig>;
+
+export interface DbApiSummary {
+  id: string;
+  name: string;
+  method: string;
+  path: string;
+  apiGroup?: string;
+  description: string;
+  databaseInstanceId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type AIModelAuthType = 'none' | 'bearer' | 'custom-header';
 
 export interface AIModelProfile {
@@ -162,7 +199,7 @@ export interface AIModelProfile {
 export type CreateAIModelProfile = Omit<AIModelProfile, 'id' | 'createdAt' | 'updatedAt'>;
 export type UpdateAIModelProfile = Partial<CreateAIModelProfile>;
 
-export interface AIModelProfileSummary extends Omit<AIModelProfile, 'authToken' | 'authHeaderName'> {}
+export type AIModelProfileSummary = Omit<AIModelProfile, 'authToken' | 'authHeaderName'>;
 
 export interface AIModelSelection {
   profileId: string;
@@ -188,7 +225,7 @@ export interface DatabaseInstance {
   updatedAt: string;
 }
 
-export interface DatabaseInstanceSummary extends Omit<DatabaseInstance, 'username' | 'password'> {}
+export type DatabaseInstanceSummary = Omit<DatabaseInstance, 'username' | 'password'>;
 
 export type CreateDatabaseInstance = Omit<DatabaseInstance, 'id' | 'createdAt' | 'updatedAt'>;
 export type UpdateDatabaseInstance = Partial<CreateDatabaseInstance>;

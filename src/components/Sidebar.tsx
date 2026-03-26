@@ -23,6 +23,11 @@ export default function Sidebar() {
       path: '/api-forward',
       icon: <Icons.Refresh size={18} />,
     },
+    {
+      name: 'DB API',
+      path: '/db-api',
+      icon: <Icons.Database size={18} />,
+    },
   ];
   const bottomNavItems = [
     {

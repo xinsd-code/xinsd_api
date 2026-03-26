@@ -120,7 +120,7 @@ function quoteSqlIdentifier(type: DatabaseInstanceType, name: string): string {
     .join('.');
 }
 
-function ensureSqlQueryIsReadonly(query: string): void {
+export function ensureSqlQueryIsReadonly(query: string): void {
   const normalized = query.trim().replace(/;+\s*$/, '').toLowerCase();
   if (!normalized) {
     throw new Error('请输入 SQL 语句');
@@ -398,10 +398,18 @@ export async function getDatabaseCollectionPreview(instance: DatabaseInstance, n
 }
 
 export async function executeDatabaseQuery(instance: DatabaseInstance, query: string): Promise<DatabaseQueryPayload> {
+  return executeParameterizedDatabaseQuery(instance, query, []);
+}
+
+export async function executeParameterizedDatabaseQuery(
+  instance: DatabaseInstance,
+  query: string,
+  values: unknown[] = []
+): Promise<DatabaseQueryPayload> {
   if (instance.type === 'mysql') {
     ensureSqlQueryIsReadonly(query);
     return withMySql(instance, async (connection) => {
-      const [rows, fields] = await connection.query(query);
+      const [rows, fields] = await connection.query(query, values);
       const payloadRows = rowsToPayloadRows(rows as Array<Record<string, unknown>>);
       const columns = payloadRows[0]
         ? Object.keys(payloadRows[0])
@@ -420,7 +428,7 @@ export async function executeDatabaseQuery(instance: DatabaseInstance, query: st
   if (instance.type === 'pgsql') {
     ensureSqlQueryIsReadonly(query);
     return withPg(instance, async (client) => {
-      const result = await client.query(query);
+      const result = await client.query(query, values);
       const payloadRows = rowsToPayloadRows(result.rows as Array<Record<string, unknown>>);
       const columns = payloadRows[0]
         ? Object.keys(payloadRows[0])
