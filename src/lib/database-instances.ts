@@ -1,4 +1,10 @@
-import { CreateDatabaseInstance, DatabaseInstanceType } from './types';
+import {
+  CreateDatabaseInstance,
+  DatabaseFieldMetricMapping,
+  DatabaseInstanceType,
+  DatabaseMetricMappings,
+  DatabaseTableMetricMapping,
+} from './types';
 
 interface ResolvedConnection {
   host: string;
@@ -99,4 +105,69 @@ export function getDatabaseInstanceValidationSignature(input: CreateDatabaseInst
     username: input.username || '',
     password: input.password || '',
   });
+}
+
+function sanitizeMetricMapping(value: unknown): DatabaseFieldMetricMapping | null {
+  if (!value || typeof value !== 'object') return null;
+  const input = value as Record<string, unknown>;
+
+  const metricName = typeof input.metricName === 'string' ? input.metricName.trim() : '';
+  const description = typeof input.description === 'string' ? input.description.trim() : '';
+  const metricType = typeof input.metricType === 'string' ? input.metricType.trim() : '';
+  const calcMode = typeof input.calcMode === 'string' ? input.calcMode.trim() : '';
+
+  if (!metricName && !description && !metricType && !calcMode) {
+    return null;
+  }
+
+  return {
+    ...(metricName ? { metricName } : {}),
+    ...(description ? { description } : {}),
+    ...(metricType ? { metricType } : {}),
+    ...(calcMode ? { calcMode } : {}),
+  };
+}
+
+function sanitizeTableMetricMapping(value: unknown): DatabaseTableMetricMapping | null {
+  if (!value || typeof value !== 'object') return null;
+  const input = value as Record<string, unknown>;
+
+  const tableDescription = typeof input.description === 'string' ? input.description.trim() : '';
+  const rawFields = input.fields && typeof input.fields === 'object'
+    ? input.fields as Record<string, unknown>
+    : input;
+
+  const nextFields: Record<string, DatabaseFieldMetricMapping> = {};
+  Object.entries(rawFields).forEach(([columnName, mappingValue]) => {
+    if (!columnName.trim() || columnName === 'description' || columnName === 'fields') return;
+    const mapping = sanitizeMetricMapping(mappingValue);
+    if (mapping) {
+      nextFields[columnName] = mapping;
+    }
+  });
+
+  if (!tableDescription && Object.keys(nextFields).length === 0) {
+    return null;
+  }
+
+  return {
+    ...(tableDescription ? { description: tableDescription } : {}),
+    fields: nextFields,
+  };
+}
+
+export function sanitizeDatabaseMetricMappings(input: unknown): DatabaseMetricMappings {
+  if (!input || typeof input !== 'object') return {};
+
+  const nextMappings: DatabaseMetricMappings = {};
+
+  Object.entries(input as Record<string, unknown>).forEach(([tableName, tableValue]) => {
+    if (!tableName.trim()) return;
+    const mapping = sanitizeTableMetricMapping(tableValue);
+    if (mapping) {
+      nextMappings[tableName] = mapping;
+    }
+  });
+
+  return nextMappings;
 }

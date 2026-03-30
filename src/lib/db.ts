@@ -14,11 +14,6 @@ import {
   ApiForwardSummary,
   CreateApiForwardConfig,
   UpdateApiForwardConfig,
-  RedisCacheConfig,
-  DbApiConfig,
-  DbApiSummary,
-  CreateDbApiConfig,
-  UpdateDbApiConfig,
   OrchestrationConfig,
   AIModelProfile,
   AIModelProfileSummary,
@@ -28,6 +23,10 @@ import {
   DatabaseInstanceSummary,
   CreateDatabaseInstance,
   UpdateDatabaseInstance,
+  DbApiConfig,
+  DbApiSummary,
+  CreateDbApiConfig,
+  UpdateDbApiConfig,
 } from './types';
 import { nanoid } from 'nanoid';
 import { sanitizeAIModelProfileInput } from './ai-models';
@@ -56,7 +55,6 @@ function initializeDb(database: Database.Database) {
       enabled INTEGER NOT NULL DEFAULT 1,
       request_headers TEXT DEFAULT '[]',
       request_params TEXT DEFAULT '[]',
-      request_body TEXT DEFAULT '{}',
       response_status INTEGER NOT NULL DEFAULT 200,
       response_headers TEXT DEFAULT '[]',
       response_body TEXT DEFAULT '{}',
@@ -77,14 +75,6 @@ function initializeDb(database: Database.Database) {
   } catch (err) {
     if (err instanceof Error && !err.message.includes('duplicate column name')) {
       console.error('Migration error mock_apis:', err);
-    }
-  }
-
-  try {
-    database.exec(`ALTER TABLE mock_apis ADD COLUMN request_body TEXT DEFAULT '{}';`);
-  } catch (err) {
-    if (err instanceof Error && !err.message.includes('duplicate column name')) {
-      console.error('Migration error mock_apis request_body:', err);
     }
   }
 
@@ -140,23 +130,6 @@ function initializeDb(database: Database.Database) {
   `);
 
   database.exec(`
-    CREATE TABLE IF NOT EXISTS db_apis (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      api_group TEXT DEFAULT '未分组',
-      description TEXT DEFAULT '',
-      method TEXT NOT NULL DEFAULT 'GET',
-      path TEXT NOT NULL,
-      custom_params TEXT DEFAULT '[]',
-      database_instance_id TEXT NOT NULL,
-      sql_template TEXT NOT NULL DEFAULT '',
-      param_bindings TEXT DEFAULT '[]',
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    );
-  `);
-
-  database.exec(`
     CREATE TABLE IF NOT EXISTS ai_model_profiles (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -185,6 +158,24 @@ function initializeDb(database: Database.Database) {
     );
   `);
 
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS db_apis (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      api_group TEXT DEFAULT '未分组',
+      description TEXT DEFAULT '',
+      method TEXT NOT NULL DEFAULT 'GET',
+      path TEXT NOT NULL,
+      custom_params TEXT DEFAULT '[]',
+      database_instance_id TEXT NOT NULL,
+      sql_template TEXT DEFAULT '',
+      param_bindings TEXT DEFAULT '[]',
+      redis_config TEXT DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+
   // Migration for api_forwards orchestration column
   try {
     database.exec(`ALTER TABLE api_forwards ADD COLUMN orchestration TEXT DEFAULT '{}';`);
@@ -194,20 +185,19 @@ function initializeDb(database: Database.Database) {
     }
   }
 
-  // Migration for api_forwards redis_config column
   try {
-    database.exec(`ALTER TABLE api_forwards ADD COLUMN redis_config TEXT DEFAULT NULL;`);
+    database.exec(`ALTER TABLE database_instances ADD COLUMN metric_mappings TEXT DEFAULT NULL;`);
   } catch (err) {
     if (err instanceof Error && !err.message.includes('duplicate column name')) {
-      console.error('Migration error api_forwards redis_config:', err);
+      console.error('Migration error database_instances.metric_mappings:', err);
     }
   }
 
   try {
-    database.exec(`ALTER TABLE db_apis ADD COLUMN redis_config TEXT DEFAULT NULL;`);
+    database.exec(`ALTER TABLE db_apis ADD COLUMN redis_config TEXT DEFAULT '{}';`);
   } catch (err) {
     if (err instanceof Error && !err.message.includes('duplicate column name')) {
-      console.error('Migration error db_apis redis_config:', err);
+      console.error('Migration error db_apis.redis_config:', err);
     }
   }
 }
@@ -222,7 +212,6 @@ function rowToMockAPI(row: Record<string, unknown>): MockAPI {
     enabled: (row.enabled as number) === 1,
     requestHeaders: JSON.parse(row.request_headers as string),
     requestParams: JSON.parse(row.request_params as string),
-    requestBody: (row.request_body as string) || '{}',
     responseStatus: row.response_status as number,
     responseHeaders: JSON.parse(row.response_headers as string),
     responseBody: row.response_body as string,
@@ -283,9 +272,9 @@ export function createMock(data: CreateMockAPI): MockAPI {
 
   db.prepare(`
     INSERT INTO mock_apis (id, name, path, method, description, enabled,
-      request_headers, request_params, request_body, response_status, response_headers,
+      request_headers, request_params, response_status, response_headers,
       response_body, response_delay, is_stream, stream_config, api_group, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     data.name,
@@ -295,7 +284,6 @@ export function createMock(data: CreateMockAPI): MockAPI {
     data.enabled ? 1 : 0,
     JSON.stringify(data.requestHeaders || []),
     JSON.stringify(data.requestParams || []),
-    data.requestBody || '{}',
     data.responseStatus || 200,
     JSON.stringify(data.responseHeaders || []),
     data.responseBody || '{}',
@@ -326,7 +314,6 @@ export function updateMock(id: string, data: UpdateMockAPI): MockAPI | null {
   if (data.enabled !== undefined) { updates.push('enabled = ?'); values.push(data.enabled ? 1 : 0); }
   if (data.requestHeaders !== undefined) { updates.push('request_headers = ?'); values.push(JSON.stringify(data.requestHeaders)); }
   if (data.requestParams !== undefined) { updates.push('request_params = ?'); values.push(JSON.stringify(data.requestParams)); }
-  if (data.requestBody !== undefined) { updates.push('request_body = ?'); values.push(data.requestBody); }
   if (data.responseStatus !== undefined) { updates.push('response_status = ?'); values.push(data.responseStatus); }
   if (data.responseHeaders !== undefined) { updates.push('response_headers = ?'); values.push(JSON.stringify(data.responseHeaders)); }
   if (data.responseBody !== undefined) { updates.push('response_body = ?'); values.push(data.responseBody); }
@@ -494,13 +481,6 @@ function rowToApiForwardConfig(row: Record<string, unknown>): ApiForwardConfig {
     }
   } catch { /* ignore parse errors */ }
 
-  let redisConfig: RedisCacheConfig | undefined;
-  try {
-    if (row.redis_config) {
-      redisConfig = JSON.parse(row.redis_config as string);
-    }
-  } catch { /* ignore parse errors */ }
-
   return {
     id: row.id as string,
     name: row.name as string,
@@ -513,7 +493,6 @@ function rowToApiForwardConfig(row: Record<string, unknown>): ApiForwardConfig {
     targetId: row.target_id as string,
     paramBindings: JSON.parse(row.param_bindings as string),
     orchestration,
-    redisConfig,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
   };
@@ -558,8 +537,8 @@ export function createApiForward(data: CreateApiForwardConfig): ApiForwardConfig
 
   db.prepare(`
     INSERT INTO api_forwards (id, name, api_group, description, method, path,
-      custom_params, target_type, target_id, param_bindings, orchestration, redis_config, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      custom_params, target_type, target_id, param_bindings, orchestration, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     data.name,
@@ -572,7 +551,6 @@ export function createApiForward(data: CreateApiForwardConfig): ApiForwardConfig
     data.targetId,
     JSON.stringify(data.paramBindings || []),
     JSON.stringify(data.orchestration || {}),
-    data.redisConfig ? JSON.stringify(data.redisConfig) : null,
     now,
     now,
   );
@@ -599,7 +577,6 @@ export function updateApiForward(id: string, data: UpdateApiForwardConfig): ApiF
   if (data.targetId !== undefined) { updates.push('target_id = ?'); values.push(data.targetId); }
   if (data.paramBindings !== undefined) { updates.push('param_bindings = ?'); values.push(JSON.stringify(data.paramBindings)); }
   if (data.orchestration !== undefined) { updates.push('orchestration = ?'); values.push(JSON.stringify(data.orchestration)); }
-  if (data.redisConfig !== undefined) { updates.push('redis_config = ?'); values.push(data.redisConfig ? JSON.stringify(data.redisConfig) : null); }
 
   updates.push('updated_at = ?');
   values.push(now);
@@ -616,15 +593,6 @@ export function deleteApiForward(id: string): boolean {
 }
 
 function rowToDbApiConfig(row: Record<string, unknown>): DbApiConfig {
-  let redisConfig: RedisCacheConfig | undefined;
-  try {
-    if (row.redis_config) {
-      redisConfig = JSON.parse(row.redis_config as string) as RedisCacheConfig;
-    }
-  } catch {
-    redisConfig = undefined;
-  }
-
   return {
     id: row.id as string,
     name: row.name as string,
@@ -636,7 +604,7 @@ function rowToDbApiConfig(row: Record<string, unknown>): DbApiConfig {
     databaseInstanceId: row.database_instance_id as string,
     sqlTemplate: (row.sql_template as string) || '',
     paramBindings: JSON.parse((row.param_bindings as string) || '[]'),
-    redisConfig,
+    redisConfig: JSON.parse((row.redis_config as string) || '{}'),
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
   };
@@ -650,19 +618,21 @@ export function getAllDbApis(): DbApiConfig[] {
 
 export function getAllDbApisSummary(): DbApiSummary[] {
   const db = getDb();
-  const rows = db.prepare(
-    'SELECT id, name, method, path, api_group, description, database_instance_id, created_at, updated_at FROM db_apis ORDER BY created_at DESC'
-  ).all();
+  const rows = db.prepare(`
+    SELECT id, name, api_group, description, method, path, database_instance_id, created_at, updated_at
+    FROM db_apis
+    ORDER BY created_at DESC
+  `).all();
 
   return rows.map((row) => {
     const record = row as Record<string, unknown>;
     return {
       id: record.id as string,
       name: record.name as string,
-      method: record.method as string,
-      path: record.path as string,
       apiGroup: (record.api_group as string) || '未分组',
       description: (record.description as string) || '',
+      method: record.method as string,
+      path: record.path as string,
       databaseInstanceId: record.database_instance_id as string,
       createdAt: record.created_at as string,
       updatedAt: record.updated_at as string,
@@ -676,29 +646,29 @@ export function getDbApiById(id: string): DbApiConfig | null {
   return row ? rowToDbApiConfig(row as Record<string, unknown>) : null;
 }
 
-export function createDbApi(data: CreateDbApiConfig): DbApiConfig {
+export function createDbApi(input: CreateDbApiConfig): DbApiConfig {
   const db = getDb();
   const id = nanoid(12);
   const now = new Date().toISOString();
 
   db.prepare(`
     INSERT INTO db_apis (
-      id, name, api_group, description, method, path,
-      custom_params, database_instance_id, sql_template, param_bindings, redis_config, created_at, updated_at
+      id, name, api_group, description, method, path, custom_params,
+      database_instance_id, sql_template, param_bindings, redis_config, created_at, updated_at
     )
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
-    data.name,
-    data.apiGroup || '未分组',
-    data.description || '',
-    data.method.toUpperCase(),
-    data.path,
-    JSON.stringify(data.customParams || []),
-    data.databaseInstanceId,
-    data.sqlTemplate || '',
-    JSON.stringify(data.paramBindings || []),
-    data.redisConfig ? JSON.stringify(data.redisConfig) : null,
+    input.name,
+    input.apiGroup || '未分组',
+    input.description || '',
+    input.method.toUpperCase(),
+    input.path,
+    JSON.stringify(input.customParams || []),
+    input.databaseInstanceId,
+    input.sqlTemplate || '',
+    JSON.stringify(input.paramBindings || []),
+    JSON.stringify(input.redisConfig || { enabled: false }),
     now,
     now
   );
@@ -706,31 +676,47 @@ export function createDbApi(data: CreateDbApiConfig): DbApiConfig {
   return getDbApiById(id)!;
 }
 
-export function updateDbApi(id: string, data: UpdateDbApiConfig): DbApiConfig | null {
+export function updateDbApi(id: string, input: UpdateDbApiConfig): DbApiConfig | null {
   const db = getDb();
   const existing = getDbApiById(id);
   if (!existing) return null;
 
+  const next = {
+    ...existing,
+    ...input,
+  };
   const now = new Date().toISOString();
-  const updates: string[] = [];
-  const values: unknown[] = [];
 
-  if (data.name !== undefined) { updates.push('name = ?'); values.push(data.name); }
-  if (data.apiGroup !== undefined) { updates.push('api_group = ?'); values.push(data.apiGroup); }
-  if (data.description !== undefined) { updates.push('description = ?'); values.push(data.description); }
-  if (data.method !== undefined) { updates.push('method = ?'); values.push(data.method.toUpperCase()); }
-  if (data.path !== undefined) { updates.push('path = ?'); values.push(data.path); }
-  if (data.customParams !== undefined) { updates.push('custom_params = ?'); values.push(JSON.stringify(data.customParams)); }
-  if (data.databaseInstanceId !== undefined) { updates.push('database_instance_id = ?'); values.push(data.databaseInstanceId); }
-  if (data.sqlTemplate !== undefined) { updates.push('sql_template = ?'); values.push(data.sqlTemplate); }
-  if (data.paramBindings !== undefined) { updates.push('param_bindings = ?'); values.push(JSON.stringify(data.paramBindings)); }
-  if (data.redisConfig !== undefined) { updates.push('redis_config = ?'); values.push(data.redisConfig ? JSON.stringify(data.redisConfig) : null); }
+  db.prepare(`
+    UPDATE db_apis
+    SET
+      name = ?,
+      api_group = ?,
+      description = ?,
+      method = ?,
+      path = ?,
+      custom_params = ?,
+      database_instance_id = ?,
+      sql_template = ?,
+      param_bindings = ?,
+      redis_config = ?,
+      updated_at = ?
+    WHERE id = ?
+  `).run(
+    next.name,
+    next.apiGroup || '未分组',
+    next.description || '',
+    next.method.toUpperCase(),
+    next.path,
+    JSON.stringify(next.customParams || []),
+    next.databaseInstanceId,
+    next.sqlTemplate || '',
+    JSON.stringify(next.paramBindings || []),
+    JSON.stringify(next.redisConfig || { enabled: false }),
+    now,
+    id
+  );
 
-  updates.push('updated_at = ?');
-  values.push(now);
-  values.push(id);
-
-  db.prepare(`UPDATE db_apis SET ${updates.join(', ')} WHERE id = ?`).run(...values);
   return getDbApiById(id);
 }
 
@@ -775,20 +761,17 @@ export function getAllAIModelProfilesSummary(): AIModelProfileSummary[] {
     ORDER BY is_default DESC, updated_at DESC, created_at DESC
   `).all();
 
-  return rows.map((row) => {
-    const record = row as Record<string, unknown>;
-    return {
-      id: record.id as string,
-      name: record.name as string,
-      baseUrl: record.base_url as string,
-      authType: record.auth_type as AIModelProfileSummary['authType'],
-      modelIds: JSON.parse((record.model_ids as string) || '[]'),
-      defaultModelId: (record.default_model_id as string) || '',
-      isDefault: (record.is_default as number) === 1,
-      createdAt: record.created_at as string,
-      updatedAt: record.updated_at as string,
-    };
-  });
+  return rows.map((row: any) => ({
+    id: row.id,
+    name: row.name,
+    baseUrl: row.base_url,
+    authType: row.auth_type,
+    modelIds: JSON.parse((row.model_ids as string) || '[]'),
+    defaultModelId: (row.default_model_id as string) || '',
+    isDefault: (row.is_default as number) === 1,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  }));
 }
 
 export function getAIModelProfileById(id: string): AIModelProfile | null {
@@ -892,6 +875,15 @@ export function deleteAIModelProfile(id: string): boolean {
 }
 
 function rowToDatabaseInstance(row: Record<string, unknown>): DatabaseInstance {
+  let metricMappings: DatabaseInstance['metricMappings'];
+  try {
+    if (row.metric_mappings) {
+      metricMappings = JSON.parse(row.metric_mappings as string) as DatabaseInstance['metricMappings'];
+    }
+  } catch {
+    metricMappings = undefined;
+  }
+
   return {
     id: row.id as string,
     name: row.name as string,
@@ -899,6 +891,7 @@ function rowToDatabaseInstance(row: Record<string, unknown>): DatabaseInstance {
     connectionUri: row.connection_uri as string,
     username: (row.username as string) || '',
     password: (row.password as string) || '',
+    metricMappings,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
   };
@@ -948,9 +941,9 @@ export function createDatabaseInstance(input: CreateDatabaseInstance): DatabaseI
 
   db.prepare(`
     INSERT INTO database_instances (
-      id, name, type, connection_uri, username, password, created_at, updated_at
+      id, name, type, connection_uri, username, password, metric_mappings, created_at, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     input.name,
@@ -958,6 +951,7 @@ export function createDatabaseInstance(input: CreateDatabaseInstance): DatabaseI
     input.connectionUri,
     input.username || '',
     input.password || '',
+    input.metricMappings ? JSON.stringify(input.metricMappings) : null,
     now,
     now
   );
@@ -984,6 +978,7 @@ export function updateDatabaseInstance(id: string, input: UpdateDatabaseInstance
       connection_uri = ?,
       username = ?,
       password = ?,
+      metric_mappings = ?,
       updated_at = ?
     WHERE id = ?
   `).run(
@@ -992,6 +987,28 @@ export function updateDatabaseInstance(id: string, input: UpdateDatabaseInstance
     next.connectionUri,
     next.username || '',
     next.password || '',
+    next.metricMappings ? JSON.stringify(next.metricMappings) : null,
+    now,
+    id
+  );
+
+  return getDatabaseInstanceById(id);
+}
+
+export function updateDatabaseInstanceMetricMappings(id: string, metricMappings: DatabaseInstance['metricMappings']): DatabaseInstance | null {
+  const db = getDb();
+  const existing = getDatabaseInstanceById(id);
+  if (!existing) return null;
+
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE database_instances
+    SET
+      metric_mappings = ?,
+      updated_at = ?
+    WHERE id = ?
+  `).run(
+    metricMappings ? JSON.stringify(metricMappings) : null,
     now,
     id
   );

@@ -11,7 +11,7 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [showEditor, setShowEditor] = useState(false);
   const [editingMock, setEditingMock] = useState<MockAPI | null>(null);
-  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailLoadingId, setDetailLoadingId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [methodFilter, setMethodFilter] = useState<string>('ALL');
   const [groupFilter, setGroupFilter] = useState<string>('ALL');
@@ -46,7 +46,7 @@ export default function Home() {
   };
 
   const handleEdit = async (mock: MockAPISummary) => {
-    setDetailLoading(true);
+    setDetailLoadingId(mock.id);
     try {
       const res = await fetch(`/api/mocks/${mock.id}`);
       if (!res.ok) throw new Error('Failed to load detail');
@@ -57,7 +57,7 @@ export default function Home() {
       console.error('Failed to load mock detail:', error);
       showToast('加载接口详情失败', 'error');
     } finally {
-      setDetailLoading(false);
+      setDetailLoadingId(null);
     }
   };
 
@@ -306,8 +306,8 @@ export default function Home() {
                 </div>
               </div>
               <div className="mock-item-actions">
-                <button className="btn btn-secondary btn-sm" onClick={() => handleEdit(mock)} disabled={detailLoading}>
-                  {detailLoading ? <div style={{ width: 12, height: 12, border: '2px solid currentColor', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 1s linear infinite', display: 'inline-block' }} /> : <Icons.Edit size={14} />}
+                <button className="btn btn-secondary btn-sm" onClick={() => handleEdit(mock)} disabled={detailLoadingId !== null}>
+                  {detailLoadingId === mock.id ? <div style={{ width: 12, height: 12, border: '2px solid currentColor', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 1s linear infinite', display: 'inline-block' }} /> : <Icons.Edit size={14} />}
                   编辑
                 </button>
                 <button

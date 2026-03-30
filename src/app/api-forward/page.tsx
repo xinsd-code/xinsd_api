@@ -1,12 +1,12 @@
 'use client';
 
 import { useState, useEffect, useMemo, useCallback } from 'react';
-import { ApiForwardConfig, ApiForwardSummary, MockAPISummary, ApiClientSummary, CustomParamDef, ParamBinding, ForwardTargetParamOption, OrchestrationConfig, DatabaseInstanceSummary, RedisCacheConfig } from '@/lib/types';
+import UnsavedChangesDialog from '@/components/UnsavedChangesDialog';
+import { ApiForwardConfig, ApiForwardSummary, MockAPISummary, ApiClientSummary, CustomParamDef, ParamBinding, KeyValuePair, OrchestrationConfig } from '@/lib/types';
 import JsonEditor from '@/components/JsonEditor';
 import OrchestrationEditor from '@/components/OrchestrationEditor';
 import { Icons } from '@/components/Icons';
-import { sanitizeRedisCacheConfig, validateRedisCacheConfig } from '@/lib/redis-cache-config';
-import { extractForwardTargetParams } from '@/lib/forward-target-params';
+import { useUnsavedChangesGuard } from '@/hooks/use-unsaved-changes-guard';
 import styles from './page.module.css';
 
 function CustomParamEditor({
@@ -42,7 +42,7 @@ function CustomParamEditor({
           添加参数
         </button>
       </div>
-      
+
       {params.length > 0 ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {params.map((p, i) => (
@@ -103,34 +103,18 @@ function ParamBindingEditor({
   bindings,
   onChange,
 }: {
-  targetParams: ForwardTargetParamOption[];
+  targetParams: KeyValuePair[];
   customParams: CustomParamDef[];
   bindings: ParamBinding[];
   onChange: (bindings: ParamBinding[]) => void;
 }) {
-  const getBindingFor = (targetKey: string, targetLocation: 'query' | 'body') => {
-    return bindings.find(b => b.targetParamKey === targetKey && (b.targetLocation || 'query') === targetLocation);
+  const getBindingFor = (targetKey: string) => {
+    return bindings.find(b => b.targetParamKey === targetKey);
   };
 
-  const handleUpdate = (
-    targetKey: string,
-    targetLocation: 'query' | 'body',
-    mode: 'none' | 'custom' | 'static',
-    customKey = '',
-    staticVal = ''
-  ) => {
-    const newBindings = bindings.filter(
-      b => !(b.targetParamKey === targetKey && (b.targetLocation || 'query') === targetLocation)
-    );
-
-    if (mode !== 'none') {
-      newBindings.push({
-        targetParamKey: targetKey,
-        targetLocation,
-        customParamKey: mode === 'custom' ? customKey || undefined : undefined,
-        staticValue: mode === 'static' ? staticVal : undefined,
-      });
-    }
+  const handleUpdate = (targetKey: string, customKey: string, staticVal: string) => {
+    const newBindings = bindings.filter(b => b.targetParamKey !== targetKey);
+    newBindings.push({ targetParamKey: targetKey, customParamKey: customKey || undefined, staticValue: staticVal || undefined });
     onChange(newBindings);
   };
 
@@ -144,53 +128,32 @@ function ParamBindingEditor({
         <Icons.Refresh size={16} />
         <h3 style={{ fontSize: 15, fontWeight: 800 }}>参数映射绑定</h3>
       </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {targetParams.map((tp, i) => {
-          const binding = getBindingFor(tp.key, tp.location);
-          const isMappingStatic = !!binding && binding.customParamKey === undefined && binding.staticValue !== undefined;
-          
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {targetParams.map((tp, i) => {
+          const binding = getBindingFor(tp.key);
+          const isMappingStatic = !!binding?.staticValue;
+
           return (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '12px 16px', background: 'white', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)' }}>
               <div style={{ flex: 1 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                  <div style={{ fontSize: '13px', fontWeight: 700 }}>{tp.key}</div>
-                  <span
-                    style={{
-                      fontSize: 10,
-                      fontWeight: 800,
-                      padding: '2px 8px',
-                      borderRadius: 999,
-                      textTransform: 'uppercase',
-                      letterSpacing: '0.04em',
-                      background: tp.location === 'body' ? 'color-mix(in srgb, var(--color-primary) 10%, white)' : 'var(--color-bg-hover)',
-                      color: tp.location === 'body' ? 'var(--color-primary)' : 'var(--color-text-muted)',
-                    }}
-                  >
-                    {tp.location === 'body' ? 'Body' : 'Query'}
-                  </span>
-                  {tp.valueType && (
-                    <span style={{ fontSize: 10, color: 'var(--color-text-muted)' }}>{tp.valueType}</span>
-                  )}
-                </div>
-                <div style={{ fontSize: '11px', color: 'var(--color-text-muted)' }}>
-                  {tp.location === 'body' ? '目标接口请求体字段' : '目标接口查询参数'}
-                </div>
+                <div style={{ fontSize: '13px', fontWeight: 700 }}>{tp.key}</div>
+                <div style={{ fontSize: '11px', color: 'var(--color-text-muted)' }}>目标接口参数</div>
               </div>
-              
+
               <Icons.ChevronRight size={16} style={{ color: 'var(--color-text-muted)' }} />
-              
+
               <div style={{ flex: 2, display: 'flex', gap: 8 }}>
-                <select 
+                <select
                   className="form-select" style={{ flex: 1, height: 36, fontSize: 13, minWidth: '140px' }}
                   value={isMappingStatic ? '__static__' : (binding?.customParamKey || '')}
                   onChange={(e) => {
                     const val = e.target.value;
                     if (val === '__static__') {
-                      handleUpdate(tp.key, tp.location, 'static', '', binding?.staticValue ?? '');
+                      handleUpdate(tp.key, '', binding?.staticValue || '');
                     } else if (val) {
-                      handleUpdate(tp.key, tp.location, 'custom', val, '');
+                      handleUpdate(tp.key, val, '');
                     } else {
-                      handleUpdate(tp.key, tp.location, 'none');
+                      handleUpdate(tp.key, '', '');
                     }
                   }}
                 >
@@ -202,14 +165,14 @@ function ParamBindingEditor({
                   </optgroup>
                   <option value="__static__">固定静态值</option>
                 </select>
-                
+
                 {isMappingStatic && (
-                  <input 
-                    type="text" 
-                    placeholder="输入固定值" 
+                  <input
+                    type="text"
+                    placeholder="输入固定值"
                     className="form-input" style={{ flex: 1, height: 36, fontSize: 13 }}
                     value={binding?.staticValue || ''}
-                    onChange={(e) => handleUpdate(tp.key, tp.location, 'static', '', e.target.value)}
+                    onChange={(e) => handleUpdate(tp.key, '', e.target.value)}
                   />
                 )}
               </div>
@@ -225,26 +188,24 @@ export default function ApiForwardPage() {
   const [forwards, setForwards] = useState<ApiForwardSummary[]>([]);
   const [mocks, setMocks] = useState<MockAPISummary[]>([]);
   const [apiClients, setApiClients] = useState<ApiClientSummary[]>([]);
-  const [redisInstances, setRedisInstances] = useState<DatabaseInstanceSummary[]>([]);
-  
+
   const [activeId, setActiveId] = useState<string | null>(null);
   const [activeForwardDetail, setActiveForwardDetail] = useState<ApiForwardConfig | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
-  
+
   // 编辑器状态
   const [name, setName] = useState('');
   const [apiGroup, setApiGroup] = useState('未分组');
   const [description, setDescription] = useState('');
   const [method, setMethod] = useState('');
   const [path, setPath] = useState('');
-  
+
   const [customParams, setCustomParams] = useState<CustomParamDef[]>([]);
   const [targetType, setTargetType] = useState<'mock' | 'api-client'>('api-client');
   const [targetId, setTargetId] = useState<string>('');
-  const [targetParams, setTargetParams] = useState<ForwardTargetParamOption[]>([]);
+  const [targetParams, setTargetParams] = useState<KeyValuePair[]>([]);
   const [paramBindings, setParamBindings] = useState<ParamBinding[]>([]);
   const [orchestration, setOrchestration] = useState<OrchestrationConfig>({ nodes: [] });
-  const [redisConfig, setRedisConfig] = useState<RedisCacheConfig>({ enabled: false });
 
   const [viewMode, setViewMode] = useState<'design' | 'run'>('design');
   const [runParams, setRunParams] = useState<Record<string, string>>({});
@@ -253,7 +214,31 @@ export default function ApiForwardPage() {
   const [runTime, setRunTime] = useState<number>(0);
   const [isLoading, setIsLoading] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
-  const hasRedisSources = redisInstances.length > 0;
+  const [baselineSignature, setBaselineSignature] = useState(() => JSON.stringify({
+    name: '',
+    apiGroup: '未分组',
+    description: '',
+    method: '',
+    path: '',
+    customParams: [],
+    targetType: 'api-client',
+    targetId: '',
+    paramBindings: [],
+    orchestration: { nodes: [] },
+  }));
+  const currentSignature = useMemo(() => JSON.stringify({
+    name,
+    apiGroup,
+    description,
+    method,
+    path,
+    customParams,
+    targetType,
+    targetId,
+    paramBindings,
+    orchestration,
+  }), [apiGroup, customParams, description, method, name, orchestration, paramBindings, path, targetId, targetType]);
+  const isDirty = currentSignature !== baselineSignature;
 
   const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
     setToast({ message, type });
@@ -290,17 +275,12 @@ export default function ApiForwardPage() {
 
   const fetchTargets = async () => {
     try {
-      const [mockRes, clientRes, dbRes] = await Promise.all([
+      const [mockRes, clientRes] = await Promise.all([
         fetch('/api/mocks'),
-        fetch('/api/api-client'),
-        fetch('/api/database-instances')
+        fetch('/api/api-client')
       ]);
       if (mockRes.ok) setMocks(await mockRes.json());
       if (clientRes.ok) setApiClients(await clientRes.json());
-      if (dbRes.ok) {
-        const dbs: DatabaseInstanceSummary[] = await dbRes.json();
-        setRedisInstances(dbs.filter(db => db.type === 'redis'));
-      }
     } catch (e) {
       console.error('Failed to fetch targets', e);
     }
@@ -318,9 +298,7 @@ export default function ApiForwardPage() {
     fetch(endpoint)
       .then(res => res.ok ? res.json() : null)
       .then(data => {
-        if (data) {
-          setTargetParams(extractForwardTargetParams(data.requestParams || [], data.requestBody || ''));
-        }
+        if (data) setTargetParams(data.requestParams || []);
         else setTargetParams([]);
       })
       .catch(() => setTargetParams([]));
@@ -340,50 +318,64 @@ export default function ApiForwardPage() {
       setTargetId(activeForward.targetId);
       setParamBindings(activeForward.paramBindings || []);
       setOrchestration(activeForward.orchestration || { nodes: [] });
-      setRedisConfig(sanitizeRedisCacheConfig(activeForward.redisConfig));
       setViewMode('design');
       setRunResult(null);
       setRunStatus(null);
-      
+
       const initialRunParams: Record<string, string> = {};
       (activeForward.customParams || []).forEach(p => {
         initialRunParams[p.key] = p.defaultValue || '';
       });
       setRunParams(initialRunParams);
+      setBaselineSignature(JSON.stringify({
+        name: activeForward.name,
+        apiGroup: activeForward.apiGroup || '未分组',
+        description: activeForward.description || '',
+        method: activeForward.method,
+        path: activeForward.path,
+        customParams: activeForward.customParams || [],
+        targetType: activeForward.targetType,
+        targetId: activeForward.targetId,
+        paramBindings: activeForward.paramBindings || [],
+        orchestration: activeForward.orchestration || { nodes: [] },
+      }));
     }
   }, [activeId, activeForward]);
 
-  const handleCreateNew = () => {
+  const applyNewDraft = useCallback(() => {
+    const nextPath = '/forward/' + Math.random().toString(36).substring(7);
     setActiveId(null);
     setActiveForwardDetail(null);
     setName('新建转发接口');
     setApiGroup('未分组');
     setDescription('');
     setMethod('POST');
-    setPath('/forward/' + Math.random().toString(36).substring(7));
+    setPath(nextPath);
     setCustomParams([]);
     setTargetType('api-client');
     setTargetId('');
     setParamBindings([]);
     setOrchestration({ nodes: [] });
-    setRedisConfig(sanitizeRedisCacheConfig());
     setViewMode('design');
     setRunResult(null);
-  };
+    setBaselineSignature(JSON.stringify({
+      name: '新建转发接口',
+      apiGroup: '未分组',
+      description: '',
+      method: 'POST',
+      path: nextPath,
+      customParams: [],
+      targetType: 'api-client',
+      targetId: '',
+      paramBindings: [],
+      orchestration: { nodes: [] },
+    }));
+  }, []);
 
-  const handleSave = async (nextOrchestration?: OrchestrationConfig | React.MouseEvent<HTMLButtonElement>) => {
+  const saveCurrent = useCallback(async (nextOrchestration?: OrchestrationConfig | React.MouseEvent<HTMLButtonElement>): Promise<boolean> => {
     const orchestrationToSave = nextOrchestration && 'nodes' in nextOrchestration
       ? nextOrchestration
       : orchestration;
-    const nextRedisConfig = sanitizeRedisCacheConfig(redisConfig);
-    const redisValidationError = validateRedisCacheConfig(nextRedisConfig, {
-      hasRedisSource: hasRedisSources,
-    });
-    if (redisValidationError) {
-      showToast(redisValidationError, 'error');
-      return;
-    }
-
     const payload = {
       name,
       apiGroup,
@@ -395,21 +387,20 @@ export default function ApiForwardPage() {
       targetId,
       paramBindings,
       orchestration: orchestrationToSave,
-      redisConfig: nextRedisConfig,
     };
 
     try {
-      const res = activeId 
+      const res = activeId
         ? await fetch(`/api/forwards/${activeId}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-          })
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        })
         : await fetch('/api/forwards', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-          });
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
 
       if (res.ok) {
         const saved: ApiForwardConfig = await res.json();
@@ -419,14 +410,33 @@ export default function ApiForwardPage() {
         }
         setActiveForwardDetail(saved);
         showToast('配置已保存');
+        return true;
       } else {
         showToast('保存失败', 'error');
+        return false;
       }
     } catch (e) {
       console.error(e);
       showToast('保存时发生错误', 'error');
+      return false;
     }
-  };
+  }, [activeId, apiGroup, customParams, description, method, name, orchestration, paramBindings, path, showToast, targetId, targetType]);
+
+  const handleSave = useCallback((nextOrchestration?: OrchestrationConfig | React.MouseEvent<HTMLButtonElement>) => {
+    void saveCurrent(nextOrchestration);
+  }, [saveCurrent]);
+
+  const unsavedGuard = useUnsavedChangesGuard({
+    enabled: true,
+    isDirty,
+    onSave: () => saveCurrent(),
+  });
+
+  const handleCreateNew = useCallback(() => {
+    unsavedGuard.confirmAction(() => {
+      applyNewDraft();
+    });
+  }, [applyNewDraft, unsavedGuard]);
 
   const handleDelete = async () => {
     if (!activeId || !confirm('确定要删除这个转发接口吗？')) return;
@@ -456,7 +466,6 @@ export default function ApiForwardPage() {
       targetId,
       paramBindings,
       orchestration,
-      redisConfig: sanitizeRedisCacheConfig(redisConfig),
       createdAt: '',
       updatedAt: ''
     };
@@ -464,11 +473,11 @@ export default function ApiForwardPage() {
     setIsLoading(true);
     setRunResult(null);
     setRunStatus(null);
-    
-    const target = targetType === 'mock' 
+
+    const target = targetType === 'mock'
       ? mocks.find(m => m.id === targetId)
       : apiClients.find(c => c.id === targetId);
-      
+
     if (!target) {
       showToast('未找到目标接口', 'error');
       setIsLoading(false);
@@ -487,10 +496,10 @@ export default function ApiForwardPage() {
           runParams: runParams
         })
       });
-      
+
       setRunTime(Date.now() - startTime);
       setRunStatus(res.status);
-      
+
       const text = await res.text();
       try {
         setRunResult(JSON.parse(text));
@@ -505,8 +514,8 @@ export default function ApiForwardPage() {
     }
   };
 
-  const filteredForwards = forwards.filter(f => 
-    f.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
+  const filteredForwards = forwards.filter(f =>
+    f.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
     f.path.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
@@ -516,12 +525,6 @@ export default function ApiForwardPage() {
     acc[group].push(current);
     return acc;
   }, {} as Record<string, ApiForwardSummary[]>);
-
-  const redisStatusText = useMemo(() => {
-    if (!hasRedisSources) return '未接入 Redis 数据源';
-    if (!redisConfig.enabled) return '默认关闭';
-    return '缓存已开启';
-  }, [hasRedisSources, redisConfig.enabled]);
 
   const renderDesignMode = () => {
     return (
@@ -561,112 +564,21 @@ export default function ApiForwardPage() {
                   className="form-select"
                 >
                   <option value="">-- 选择目标端点 --</option>
-                  {targetType === 'mock' 
+                  {targetType === 'mock'
                     ? mocks.map(m => <option key={m.id} value={m.id}>[{m.apiGroup}] {m.name}</option>)
                     : apiClients.map(c => <option key={c.id} value={c.id}>[{c.apiGroup}] {c.name}</option>)
                   }
                 </select>
               </div>
             </div>
-            
+
             {targetId && (
-              <ParamBindingEditor 
-                targetParams={targetParams} 
-                customParams={customParams} 
+              <ParamBindingEditor
+                targetParams={targetParams}
+                customParams={customParams}
                 bindings={paramBindings}
-                onChange={setParamBindings} 
+                onChange={setParamBindings}
               />
-            )}
-          </div>
-
-          <div className="card" style={{ padding: '24px', marginBottom: 24 }}>
-            <div className={styles.redisHeader}>
-              <div className={styles.redisHeaderMain}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <Icons.Database size={18} />
-                  <h3 className="section-title">Redis 结果缓存</h3>
-                </div>
-                <p className={styles.redisHeaderDescription}>
-                  写入结果使用 <code>接口ID:规则</code> 作为最终 Key，规则中的 <code>{'{{参数}}'}</code> 会按接口入参实时解析。
-                </p>
-              </div>
-              <label className={styles.redisToggle}>
-                <span className={`${styles.redisStatusBadge} ${redisConfig.enabled ? styles.redisStatusEnabled : styles.redisStatusDisabled}`}>
-                  {redisStatusText}
-                </span>
-                <input 
-                  type="checkbox" 
-                  checked={redisConfig.enabled}
-                  disabled={!hasRedisSources}
-                  onChange={(e) => {
-                    if (e.target.checked && !hasRedisSources) {
-                      showToast('暂无 Redis 数据源，请先前往「数据库实例」配置', 'error');
-                      return;
-                    }
-                    setRedisConfig(sanitizeRedisCacheConfig({ ...redisConfig, enabled: e.target.checked }));
-                  }}
-                  style={{ width: 16, height: 16 }}
-                />
-              </label>
-            </div>
-
-            {!hasRedisSources && (
-              <div className={styles.redisEmptyState}>
-                <div className={styles.redisEmptyIcon}>
-                  <Icons.Info size={16} />
-                </div>
-                <div className={styles.redisEmptyContent}>
-                  <strong>请先接入 Redis 数据源</strong>
-                  <span>当前没有可用的 Redis 实例，因此暂时不能开启结果缓存。</span>
-                </div>
-              </div>
-            )}
-            
-            {redisConfig.enabled && (
-              <div className={styles.redisConfigGrid}>
-                <div className="form-group" style={{ gridColumn: '1 / -1' }}>
-                  <label className="form-label">选择 Redis 数据源</label>
-                  <select 
-                    className="form-select" 
-                    value={redisConfig.instanceId || ''}
-                    onChange={(e) => setRedisConfig(sanitizeRedisCacheConfig({ ...redisConfig, instanceId: e.target.value }))}
-                  >
-                    <option value="">-- 请选择数据源 --</option>
-                    {redisInstances.map(r => (
-                      <option key={r.id} value={r.id}>{r.name} · {r.connectionUri}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="form-group">
-                  <label className="form-label">Redis Key 规则</label>
-                  <textarea
-                    className={`${styles.redisRuleEditor} form-input`}
-                    placeholder={'如: profile:{{userId}}\n或: order:{{$.order.id}}:{{items[0].sku}}'}
-                    value={redisConfig.keyRule || ''}
-                    onChange={(e) => setRedisConfig(sanitizeRedisCacheConfig({ ...redisConfig, keyRule: e.target.value }))}
-                  />
-                  <div className={styles.redisRuleHints}>
-                    <span><code>{'{{userId}}'}</code> 读取普通参数</span>
-                    <span><code>{'{{user.id}}'}</code> / <code>{'{{$.user.id}}'}</code> 读取 JSON 入参</span>
-                    <span>最终写入 Key：<code>{`${activeId || 'temp_id'}:${redisConfig.keyRule || '...'}`}</code></span>
-                  </div>
-                </div>
-                <div className="form-group">
-                  <label className="form-label">过期时间 (秒)</label>
-                  <input 
-                    type="number" 
-                    className="form-input" 
-                    placeholder="如: 3600 (一小时)"
-                    value={redisConfig.expireSeconds || ''}
-                    min={1}
-                    onChange={(e) => setRedisConfig(sanitizeRedisCacheConfig({
-                      ...redisConfig,
-                      expireSeconds: e.target.value ? parseInt(e.target.value, 10) : undefined,
-                    }))}
-                  />
-                  <div className={styles.redisExpireHint}>留空表示不过期；写入失败不会中断真实接口调用。</div>
-                </div>
-              </div>
             )}
           </div>
 
@@ -752,7 +664,7 @@ export default function ApiForwardPage() {
             />
           </div>
         </div>
-        
+
         <div className={styles.apiList}>
           {Object.keys(groupedForwards).length === 0 ? (
             <div style={{ padding: 40, textAlign: 'center', color: 'var(--color-text-muted)' }}>
@@ -762,12 +674,12 @@ export default function ApiForwardPage() {
           ) : (
             Object.entries(groupedForwards).map(([group, list]) => (
               <div key={group} className={styles.apiGroupContainer}>
-                <div style={{ 
-                  padding: '8px 12px', 
-                  fontSize: 11, 
-                  fontWeight: 800, 
-                  color: 'var(--color-text-muted)', 
-                  background: 'var(--color-bg-subtle)', 
+                <div style={{
+                  padding: '8px 12px',
+                  fontSize: 11,
+                  fontWeight: 800,
+                  color: 'var(--color-text-muted)',
+                  background: 'var(--color-bg-subtle)',
                   textTransform: 'uppercase',
                   letterSpacing: '0.05em',
                   margin: '2px 4px',
@@ -780,7 +692,12 @@ export default function ApiForwardPage() {
                     <div
                       key={f.id}
                       className={`${styles.apiItem} ${activeId === f.id ? styles.active : ''}`}
-                      onClick={() => { setActiveId(f.id); fetchForwardDetail(f.id); }}
+                      onClick={() => {
+                        unsavedGuard.confirmAction(async () => {
+                          setActiveId(f.id);
+                          await fetchForwardDetail(f.id);
+                        });
+                      }}
                       style={{ padding: '10px 16px', cursor: 'pointer', borderBottom: '1px solid var(--color-bg-subtle)' }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
@@ -800,14 +717,14 @@ export default function ApiForwardPage() {
       <main className={styles.mainPanel}>
         {!activeId && !name ? (
           <div className={styles.emptyCenter}>
-            <div style={{ 
-              width: 80, 
-              height: 80, 
-              background: 'var(--color-bg-subtle)', 
-              borderRadius: 'var(--radius-xl)', 
-              display: 'flex', 
-              alignItems: 'center', 
-              justifyContent: 'center', 
+            <div style={{
+              width: 80,
+              height: 80,
+              background: 'var(--color-bg-subtle)',
+              borderRadius: 'var(--radius-xl)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
               marginBottom: 24,
               color: 'var(--color-text-muted)'
             }}>
@@ -845,16 +762,16 @@ export default function ApiForwardPage() {
                     />
                   </div>
                 </div>
-                
+
                 <div className="tabs" style={{ margin: 0, height: 40, width: 240 }}>
-                  <button 
-                    className={`tab ${viewMode === 'design' ? 'active' : ''}`} 
+                  <button
+                    className={`tab ${viewMode === 'design' ? 'active' : ''}`}
                     onClick={() => setViewMode('design')}
                   >
                     配置设计
                   </button>
-                  <button 
-                    className={`tab ${viewMode === 'run' ? 'active' : ''}`} 
+                  <button
+                    className={`tab ${viewMode === 'run' ? 'active' : ''}`}
                     onClick={() => setViewMode('run')}
                   >
                     运行调试
@@ -898,8 +815,8 @@ export default function ApiForwardPage() {
                       placeholder="/api/v1/forward/endpoint"
                     />
                   </div>
-                  <button 
-                    className="btn btn-primary" 
+                  <button
+                    className="btn btn-primary"
                     onClick={handleRun}
                     disabled={isLoading}
                     style={{ width: 120, height: 42 }}
@@ -914,16 +831,16 @@ export default function ApiForwardPage() {
                 <div style={{ flex: 1, overflowY: 'auto', borderRight: '1px solid var(--color-border)' }}>
                   {viewMode === 'design' ? renderDesignMode() : renderRunMode()}
                 </div>
-                
+
                 {runResult !== null && (
                   <div style={{ flex: 1, background: 'var(--color-bg-subtle)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
                     <div style={{ padding: '16px 24px', borderBottom: '1px solid var(--color-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'white' }}>
                       <div style={{ display: 'flex', gap: 16 }}>
                         <div style={{ display: 'flex', flexDirection: 'column' }}>
                           <span style={{ fontSize: 10, fontWeight: 800, color: 'var(--color-text-muted)', textTransform: 'uppercase', marginBottom: 2 }}>响应状态</span>
-                          <span style={{ 
-                            fontSize: 14, 
-                            fontWeight: 800, 
+                          <span style={{
+                            fontSize: 14,
+                            fontWeight: 800,
                             color: runStatus && runStatus >= 200 && runStatus < 300 ? 'var(--color-success)' : 'var(--color-danger)',
                             display: 'flex',
                             alignItems: 'center',
@@ -939,12 +856,12 @@ export default function ApiForwardPage() {
                           <span style={{ fontSize: 14, fontWeight: 800 }}>{runTime} ms</span>
                         </div>
                       </div>
-                      
+
                       <button className="btn btn-secondary btn-sm" onClick={() => setRunResult(null)}>
                         清除结果
                       </button>
                     </div>
-                    
+
                     <div style={{ flex: 1, padding: 24, overflowY: 'auto' }}>
                       <div className="card" style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
                         <div style={{ padding: '8px 16px', background: 'var(--color-bg-subtle)', borderBottom: '1px solid var(--color-border)', fontSize: 11, fontWeight: 700, color: 'var(--color-text-muted)', textTransform: 'uppercase' }}>
@@ -952,7 +869,7 @@ export default function ApiForwardPage() {
                         </div>
                         <JsonEditor
                           value={typeof runResult === 'string' ? runResult : JSON.stringify(runResult, null, 2)}
-                          onChange={() => {}}
+                          onChange={() => { }}
                           height={400}
                         />
                       </div>
@@ -971,8 +888,17 @@ export default function ApiForwardPage() {
           {toast.message}
         </div>
       )}
-      
-      <style dangerouslySetInnerHTML={{ __html: `
+
+      <UnsavedChangesDialog
+        open={unsavedGuard.dialogOpen}
+        saving={unsavedGuard.saving}
+        onCancel={unsavedGuard.closeDialog}
+        onDiscard={() => void unsavedGuard.handleDiscard()}
+        onSaveAndContinue={() => void unsavedGuard.handleSaveAndContinue()}
+      />
+
+      <style dangerouslySetInnerHTML={{
+        __html: `
         @keyframes spin { to { transform: rotate(360deg); } }
       `}} />
     </div>

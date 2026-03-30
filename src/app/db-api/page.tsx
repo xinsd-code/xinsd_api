@@ -2,6 +2,7 @@
 
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import UnsavedChangesDialog from '@/components/UnsavedChangesDialog';
 import { Icons } from '@/components/Icons';
 import {
   CustomParamDef,
@@ -21,6 +22,7 @@ import {
   readDbApiDraft,
   writeDbApiDraft,
 } from '@/lib/db-api-draft';
+import { useUnsavedChangesGuard } from '@/hooks/use-unsaved-changes-guard';
 import styles from '../api-forward/page.module.css';
 
 type ViewMode = 'design' | 'run';
@@ -571,6 +573,7 @@ export default function DbApiPage() {
   const [runTime, setRunTime] = useState<number | null>(null);
   const [previewLimit, setPreviewLimit] = useState('10');
   const [isRunning, setIsRunning] = useState(false);
+  const [baselineSignature, setBaselineSignature] = useState('');
   const [navigationState, setNavigationState] = useState<{ editId: string | null; draftKey: string | null }>({
     editId: null,
     draftKey: null,
@@ -636,6 +639,7 @@ export default function DbApiPage() {
       }, {});
     });
     setActiveDraftKey(options?.draftKey || null);
+    setBaselineSignature(JSON.stringify(detail));
   }, []);
 
   const fetchDbApis = useCallback(async () => {
@@ -718,6 +722,7 @@ export default function DbApiPage() {
   }, [customParams]);
 
   const resetEditor = useCallback(() => {
+    const nextPath = `/query/${Math.random().toString(36).slice(2, 8)}`;
     if (activeDraftKey) {
       clearDbApiDraft(activeDraftKey);
     }
@@ -729,7 +734,7 @@ export default function DbApiPage() {
     setApiGroup('未分组');
     setDescription('');
     setMethod('GET');
-    setPath(`/query/${Math.random().toString(36).slice(2, 8)}`);
+    setPath(nextPath);
     setCustomParams([]);
     setDatabaseInstanceId(sqlInstances[0]?.id || '');
     setSqlTemplate('');
@@ -738,6 +743,21 @@ export default function DbApiPage() {
     setRunParams({});
     setRunResult(null);
     setRunTime(null);
+    setBaselineSignature(JSON.stringify({
+      id: 'temp-db-api',
+      name: '',
+      apiGroup: '未分组',
+      description: '',
+      method: 'GET',
+      path: nextPath,
+      customParams: [],
+      databaseInstanceId: sqlInstances[0]?.id || '',
+      sqlTemplate: '',
+      paramBindings: [],
+      redisConfig: { enabled: false },
+      createdAt: '',
+      updatedAt: '',
+    }));
     router.replace('/db-api');
   }, [activeDraftKey, router, sqlInstances]);
 
@@ -759,8 +779,10 @@ export default function DbApiPage() {
     }),
     [activeId, apiGroup, customParams, databaseInstanceId, description, method, name, paramBindings, path, redisConfig, sqlTemplate]
   );
+  const currentSignature = useMemo(() => JSON.stringify(currentConfig), [currentConfig]);
+  const isDirty = Boolean(isDraftOpen) && currentSignature !== baselineSignature;
 
-  const handleOpenSqlEditor = useCallback(() => {
+  const openSqlEditor = useCallback(() => {
     if (!databaseInstanceId) {
       showToast('请先选择数据库数据源，再进入 SQL 编辑页', 'error');
       return;
@@ -779,7 +801,7 @@ export default function DbApiPage() {
     router.push(`/db-api/editor/${activeId || 'draft'}?${query.toString()}`);
   }, [activeDraftKey, activeId, currentConfig, databaseInstanceId, router, showToast]);
 
-  const handleSave = async () => {
+  const saveCurrent = useCallback(async (): Promise<boolean> => {
     try {
       const response = await fetch(activeId ? `/api/db-apis/${activeId}` : '/api/db-apis', {
         method: activeId ? 'PUT' : 'POST',
@@ -789,7 +811,7 @@ export default function DbApiPage() {
       const payload = await response.json();
       if (!response.ok) {
         showToast(payload.error || '保存失败', 'error');
-        return;
+        return false;
       }
 
       await fetchDbApis();
@@ -800,11 +822,37 @@ export default function DbApiPage() {
       applyConfig(payload, { draftKey: null });
       router.replace(`/db-api?edit=${payload.id}`);
       showToast(activeId ? 'DB API 已更新' : 'DB API 已创建');
+      return true;
     } catch (error) {
       console.error(error);
       showToast('保存 DB API 失败', 'error');
+      return false;
     }
-  };
+  }, [activeDraftKey, activeId, applyConfig, currentConfig, fetchDbApis, router, showToast]);
+
+  const handleSave = useCallback(() => {
+    void saveCurrent();
+  }, [saveCurrent]);
+
+  const unsavedGuard = useUnsavedChangesGuard({
+    enabled: true,
+    isDirty,
+    onSave: saveCurrent,
+  });
+
+  const handleOpenSqlEditor = useCallback(() => {
+    const nextDraftKey = activeDraftKey || createDbApiDraftKey(activeId);
+    const query = new URLSearchParams();
+    query.set('draft', nextDraftKey);
+    if (activeId) {
+      query.set('edit', activeId);
+    }
+    const nextHref = `/db-api/editor/${activeId || 'draft'}?${query.toString()}`;
+
+    unsavedGuard.confirmNavigation(nextHref, () => {
+      openSqlEditor();
+    });
+  }, [activeDraftKey, activeId, openSqlEditor, unsavedGuard]);
 
   const handleDelete = async () => {
     if (!activeId) return;
@@ -1043,6 +1091,8 @@ export default function DbApiPage() {
                   margin: 0,
                   whiteSpace: 'pre-wrap',
                   minHeight: 112,
+                  maxHeight: 220,
+                  overflow: 'auto',
                   borderRadius: 'var(--radius-lg)',
                   background: 'var(--color-bg-subtle)',
                   border: '1px solid var(--color-border)',
@@ -1520,7 +1570,7 @@ export default function DbApiPage() {
         <div className={styles.sidebarHeader}>
           <div className={styles.sidebarTitle}>
             <span>DB API 列表</span>
-            <button className="btn btn-icon btn-ghost" onClick={resetEditor} title="新建 DB API">
+            <button className="btn btn-icon btn-ghost" onClick={() => unsavedGuard.confirmAction(() => resetEditor())} title="新建 DB API">
               <Icons.Plus size={18} />
             </button>
           </div>
@@ -1567,12 +1617,14 @@ export default function DbApiPage() {
                     className={`${styles.apiItem} ${activeId === item.id ? styles.active : ''}`}
                     style={{ padding: '10px 16px', borderBottom: '1px solid var(--color-bg-subtle)' }}
                     onClick={() => {
-                      router.replace(`/db-api?edit=${item.id}`);
-                      clearDbApiDraft(activeDraftKey);
-                      setActiveDraftKey(null);
-                      fetchDetail(item.id).catch((error) => {
-                        console.error(error);
-                        showToast(error instanceof Error ? error.message : '读取 DB API 失败', 'error');
+                      unsavedGuard.confirmAction(async () => {
+                        router.replace(`/db-api?edit=${item.id}`);
+                        clearDbApiDraft(activeDraftKey);
+                        setActiveDraftKey(null);
+                        await fetchDetail(item.id).catch((error) => {
+                          console.error(error);
+                          showToast(error instanceof Error ? error.message : '读取 DB API 失败', 'error');
+                        });
                       });
                     }}
                   >
@@ -1634,7 +1686,7 @@ export default function DbApiPage() {
             <p style={{ color: 'var(--color-text-muted)', fontSize: 14, maxWidth: 460, textAlign: 'center' }}>
               主页面专注接口入参、数据源、运行调试和缓存配置；SQL 编写、预览与库表查看则进入独立编辑页处理。
             </p>
-            <button className="btn btn-primary" onClick={resetEditor}>
+            <button className="btn btn-primary" onClick={() => unsavedGuard.confirmAction(() => resetEditor())}>
               <Icons.Plus size={18} />
               新建 DB API
             </button>
@@ -1764,6 +1816,14 @@ export default function DbApiPage() {
           {toast.message}
         </div>
       )}
+
+      <UnsavedChangesDialog
+        open={unsavedGuard.dialogOpen}
+        saving={unsavedGuard.saving}
+        onCancel={unsavedGuard.closeDialog}
+        onDiscard={() => void unsavedGuard.handleDiscard()}
+        onSaveAndContinue={() => void unsavedGuard.handleSaveAndContinue()}
+      />
     </div>
   );
 }

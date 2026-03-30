@@ -1,6 +1,7 @@
 import {
   CreateDbApiConfig,
   CustomParamDef,
+  DatabaseQueryPayload,
   DatabaseInstance,
   DbApiConfig,
   SqlVariableBinding,
@@ -8,6 +9,7 @@ import {
 import { matchPath } from './matcher';
 import { executeParameterizedDatabaseQuery } from './database-instances-server';
 import { flattenJsonBody } from './json-body';
+import { normalizeSqlForExecution } from './sql-normalize';
 import { SQL_VARIABLE_PATTERN } from './sql-template';
 const ALLOWED_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
 
@@ -27,6 +29,16 @@ function normalizePreviewLimit(value?: number | null): number | null {
 
 function trimTrailingSemicolon(value: string): string {
   return value.trim().replace(/;+\s*$/, '');
+}
+
+function trimLeadingWithClause(value: string): string {
+  return value.trim().replace(/^with\b/i, '');
+}
+
+function buildPreviewSummary(rowCount: number, previewLimit: number): string {
+  return rowCount >= previewLimit
+    ? `预览已截断，展示前 ${previewLimit} 行`
+    : `共返回 ${rowCount} 行`;
 }
 
 function stringifyScalar(value: unknown): string {
@@ -185,7 +197,9 @@ function resolveBindingValue(
   }
 
   const customParam = customParams.find((item) => item.key === binding.customParamKey);
-  const rawValue = binding.customParamKey ? inputValues[binding.customParamKey] ?? customParam?.defaultValue : undefined;
+  const rawValue = binding.customParamKey
+    ? inputValues[binding.customParamKey] ?? inputValues[variableKey] ?? customParam?.defaultValue
+    : inputValues[variableKey];
   return {
     source: binding.customParamKey ? `入参 ${binding.customParamKey}` : `变量 ${variableKey}`,
     value: coerceInputValue(customParam, rawValue),
@@ -247,16 +261,51 @@ export async function executeDbApi(
   options?: { previewLimit?: number | null }
 ) {
   const compiled = compileDbApiSql(instance, config, inputValues);
+  const normalizedSql = normalizeSqlForExecution(instance.type, compiled.sql);
+  const normalizedPreviewSql = normalizeSqlForExecution(instance.type, compiled.previewSql);
   const previewLimit = normalizePreviewLimit(options?.previewLimit);
-  const baseSql = trimTrailingSemicolon(compiled.sql);
-  const basePreviewSql = trimTrailingSemicolon(compiled.previewSql);
+  const baseSql = trimTrailingSemicolon(normalizedSql);
+  const basePreviewSql = trimTrailingSemicolon(normalizedPreviewSql);
   const executableSql = previewLimit
     ? `SELECT * FROM (${baseSql}) AS __db_api_preview LIMIT ${previewLimit}`
-    : compiled.sql;
+    : normalizedSql;
   const previewSql = previewLimit
     ? `SELECT * FROM (${basePreviewSql}) AS __db_api_preview LIMIT ${previewLimit}`
-    : compiled.previewSql;
-  const result = await executeParameterizedDatabaseQuery(instance, executableSql, compiled.values);
+    : normalizedPreviewSql;
+  let result: DatabaseQueryPayload;
+  let usedFallbackPreview = false;
+
+  try {
+    result = await executeParameterizedDatabaseQuery(instance, executableSql, compiled.values);
+  } catch (error) {
+    if (!previewLimit) {
+      throw error;
+    }
+    const rawResult = await executeParameterizedDatabaseQuery(instance, normalizedSql, compiled.values);
+    result = {
+      ...rawResult,
+      rows: rawResult.rows.slice(0, previewLimit),
+      summary: buildPreviewSummary(rawResult.rows.length, previewLimit),
+    };
+    usedFallbackPreview = true;
+  }
+
+  if (previewLimit && result.rows.length === 0) {
+    const shouldFallback = /^with\b/i.test(baseSql) || /\{\{/.test(config.sqlTemplate) || trimLeadingWithClause(config.sqlTemplate) !== config.sqlTemplate;
+    if (shouldFallback) {
+      try {
+        const rawResult = await executeParameterizedDatabaseQuery(instance, normalizedSql, compiled.values);
+        result = {
+          ...rawResult,
+          rows: rawResult.rows.slice(0, previewLimit),
+          summary: buildPreviewSummary(rawResult.rows.length, previewLimit),
+        };
+        usedFallbackPreview = true;
+      } catch {
+        // Keep the wrapped preview result when the fallback query also fails.
+      }
+    }
+  }
 
   return {
     result,
@@ -268,6 +317,7 @@ export async function executeDbApi(
       values: compiled.values,
       resolvedBindings: compiled.resolvedBindings,
       previewLimit,
+      usedFallbackPreview,
     },
   };
 }

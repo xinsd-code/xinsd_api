@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import UnsavedChangesDialog from '@/components/UnsavedChangesDialog';
 import { ApiClientConfig, ApiClientSummary, KeyValuePair } from '@/lib/types';
 import { resolveVariables } from '@/lib/utils';
 import KeyValueEditor from '@/components/KeyValueEditor';
@@ -9,6 +10,7 @@ import JsonEditor from '@/components/JsonEditor';
 import JsonBodyEditor from '@/components/JsonBodyEditor';
 import GroupVarsModal from '@/components/GroupVarsModal';
 import { Icons } from '@/components/Icons';
+import { useUnsavedChangesGuard } from '@/hooks/use-unsaved-changes-guard';
 import { parseJsonBody } from '@/lib/json-body';
 import styles from './page.module.css';
 
@@ -57,6 +59,28 @@ export default function ApiClientPage() {
   } | null>(null);
 
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const [baselineSignature, setBaselineSignature] = useState(() => JSON.stringify({
+    name: '',
+    apiGroup: '未分组',
+    url: '',
+    method: 'GET',
+    description: '',
+    requestHeaders: [],
+    requestParams: [],
+    requestBody: '{\n  \n}',
+  }));
+
+  const currentSignature = useMemo(() => JSON.stringify({
+    name,
+    apiGroup,
+    url,
+    method,
+    description,
+    requestHeaders,
+    requestParams,
+    requestBody,
+  }), [apiGroup, description, method, name, requestBody, requestHeaders, requestParams, url]);
+  const isDirty = currentSignature !== baselineSignature;
 
   const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
     setToast({ message, type });
@@ -85,7 +109,17 @@ export default function ApiClientPage() {
     }
   }, [requestBody, viewMode]);
 
-  const handleCreateNew = () => {
+  const applyNewDraft = useCallback(() => {
+    const nextBaseline = JSON.stringify({
+      name: '未命名接口',
+      apiGroup: '未分组',
+      url: 'https://api.example.com/data',
+      method: 'GET',
+      description: '',
+      requestHeaders: [],
+      requestParams: [],
+      requestBody: '{\n  \n}',
+    });
     setActiveClient(null);
     setIsEditingNew(true);
     setName('未命名接口');
@@ -100,9 +134,10 @@ export default function ApiClientPage() {
     setResponse(null);
     setRunParams({});
     setViewMode('design');
-  };
+    setBaselineSignature(nextBaseline);
+  }, []);
 
-  const handleSelectClient = async (client: ApiClientSummary) => {
+  const loadClientDetail = useCallback(async (client: ApiClientSummary) => {
     try {
       const res = await fetch(`/api/api-client/${client.id}`);
       if (!res.ok) throw new Error('Failed to load detail');
@@ -126,16 +161,26 @@ export default function ApiClientPage() {
       });
       setRunParams(initialRunParams);
       setViewMode('run');
+      setBaselineSignature(JSON.stringify({
+        name: detail.name,
+        apiGroup: detail.apiGroup || '未分组',
+        url: detail.url,
+        method: detail.method,
+        description: detail.description || '',
+        requestHeaders: detail.requestHeaders || [],
+        requestParams: detail.requestParams || [],
+        requestBody: detail.requestBody || '{\n  \n}',
+      }));
     } catch (error) {
       console.error('Failed to load api-client detail:', error);
       showToast('加载接口详情失败', 'error');
     }
-  };
+  }, [showToast]);
 
-  const handleSave = async () => {
+  const saveCurrent = useCallback(async (): Promise<boolean> => {
     if (!name.trim() || !url.trim()) {
       showToast('接口名称和 URL 不能为空', 'error');
-      return;
+      return false;
     }
 
     if (!['GET', 'HEAD'].includes(method)) {
@@ -143,7 +188,7 @@ export default function ApiClientPage() {
       if (parsedRequestBody.error) {
         showToast('请求体 JSON 格式有误，请先修复后再保存', 'error');
         setActiveTab('body');
-        return;
+        return false;
       }
     }
 
@@ -166,6 +211,7 @@ export default function ApiClientPage() {
           body: JSON.stringify(payload),
         });
         if (!res.ok) throw new Error('Update failed');
+        setBaselineSignature(JSON.stringify(payload));
         showToast('配置保存成功');
       } else {
         const res = await fetch('/api/api-client', {
@@ -177,14 +223,39 @@ export default function ApiClientPage() {
         const newClient = await res.json();
         setActiveClient(newClient);
         setIsEditingNew(false);
+        setBaselineSignature(JSON.stringify(payload));
         showToast('接口创建成功');
       }
       fetchClients();
+      return true;
     } catch (error) {
       console.error(error);
       showToast('保存失败', 'error');
+      return false;
     }
-  };
+  }, [activeClient, apiGroup, description, fetchClients, isEditingNew, method, name, requestBody, requestHeaders, requestParams, showToast, url]);
+
+  const handleSave = useCallback(() => {
+    void saveCurrent();
+  }, [saveCurrent]);
+
+  const unsavedGuard = useUnsavedChangesGuard({
+    enabled: Boolean(activeClient || isEditingNew),
+    isDirty,
+    onSave: saveCurrent,
+  });
+
+  const handleCreateNew = useCallback(() => {
+    unsavedGuard.confirmAction(() => {
+      applyNewDraft();
+    });
+  }, [applyNewDraft, unsavedGuard]);
+
+  const handleSelectClient = useCallback((client: ApiClientSummary) => {
+    unsavedGuard.confirmAction(async () => {
+      await loadClientDetail(client);
+    });
+  }, [loadClientDetail, unsavedGuard]);
 
   const handleDelete = async () => {
     if (!activeClient) return;
@@ -709,6 +780,14 @@ export default function ApiClientPage() {
           {toast.message}
         </div>
       )}
+
+      <UnsavedChangesDialog
+        open={unsavedGuard.dialogOpen}
+        saving={unsavedGuard.saving}
+        onCancel={unsavedGuard.closeDialog}
+        onDiscard={() => void unsavedGuard.handleDiscard()}
+        onSaveAndContinue={() => void unsavedGuard.handleSaveAndContinue()}
+      />
 
       {showGroupVars && (
         <GroupVarsModal

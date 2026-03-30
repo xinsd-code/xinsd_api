@@ -267,6 +267,13 @@
   color: var(--color-text-secondary);
 }
 
+.panelHeaderActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .panelBody {
   padding: 22px;
   display: flex;
@@ -540,6 +547,252 @@
   border-radius: var(--radius-lg);
 }
 
+.metricIntro {
+  border: 1px solid color-mix(in oklab, var(--color-primary-accent) 10%, var(--color-border));
+  border-radius: var(--radius-lg);
+  padding: 16px 18px;
+  background:
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.08), transparent 42%),
+    linear-gradient(180deg, rgba(248, 250, 252, 0.88), rgba(255, 255, 255, 0.98));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.metricIntroTitle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--color-text);
+}
+
+.metricIntroText {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+}
+
+.metricBadgeRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.metricBadge,
+.metricBadgePending {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--color-border);
+  background: rgba(255, 255, 255, 0.84);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-text-secondary);
+}
+
+.metricBadgePending {
+  background: color-mix(in oklab, var(--color-warning-soft) 72%, white 28%);
+  border-color: color-mix(in oklab, var(--color-warning) 18%, white 82%);
+  color: #9a6700;
+}
+
+.metricActionCard {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px;
+  border-radius: var(--radius-lg);
+  border: 1px solid color-mix(in oklab, var(--color-primary-accent) 12%, var(--color-border));
+  background:
+    radial-gradient(circle at right top, rgba(59, 130, 246, 0.06), transparent 36%),
+    linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.96));
+}
+
+.metricActionMain {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.metricActionTitle {
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--color-text);
+}
+
+.metricActionDesc {
+  max-width: 720px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+}
+
+.metricStudio {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.metricStudioHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 250, 252, 0.92));
+}
+
+.metricStudioHeader strong {
+  display: block;
+  font-size: 14px;
+  margin-bottom: 4px;
+}
+
+.metricStudioHeader span {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+}
+
+.metricLegend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.metricLegendItem {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 10px;
+  border-radius: var(--radius-full);
+  background: var(--color-bg-subtle);
+  border: 1px solid var(--color-border);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-text-secondary);
+}
+
+.metricCardList {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 14px;
+}
+
+.metricCard {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  background:
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.05), transparent 36%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.96));
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+
+.metricCardActive {
+  border-color: color-mix(in oklab, var(--color-primary-accent) 20%, var(--color-border));
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.08), var(--shadow-sm);
+}
+
+.metricCardHeader {
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.8);
+}
+
+.metricFieldTitle {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.metricFieldNameRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.metricFieldNameRow code {
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--color-text);
+}
+
+.metricFieldType,
+.metricFieldPrimary,
+.metricFieldMapped {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 9px;
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  font-weight: 700;
+  border: 1px solid var(--color-border);
+}
+
+.metricFieldType {
+  background: var(--color-bg-subtle);
+  color: var(--color-text-secondary);
+}
+
+.metricFieldPrimary {
+  background: color-mix(in oklab, var(--color-warning-soft) 76%, white 24%);
+  color: #9a6700;
+}
+
+.metricFieldMapped {
+  background: color-mix(in oklab, var(--color-success-soft) 80%, white 20%);
+  color: #047857;
+}
+
+.metricFieldMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.metricFieldMeta span {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: var(--radius-md);
+  background: rgba(248, 250, 252, 0.88);
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+.metricCardBody {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 16px 18px 18px;
+}
+
+.metricFormField {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.metricFormField span {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.metricDescriptionField {
+  grid-column: 1 / -1;
+}
+
 .dataTable {
   width: 100%;
   border-collapse: collapse;
@@ -571,6 +824,15 @@
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--color-text);
+}
+
+.metricInput {
+  min-height: 38px;
+  font-size: 12px;
+}
+
+.metricSelect {
+  font-size: 12px;
 }
 
 .queryEditor {
@@ -664,9 +926,21 @@
     padding: 18px;
   }
 
+  .metricStudioHeader,
+  .metricCardBody,
+  .panelHeaderActions,
+  .metricActionCard,
   .validationBox,
   .footerActions,
   .footerMainActions {
     flex-direction: column;
+  }
+
+  .metricCardBody {
+    grid-template-columns: 1fr;
+  }
+
+  .metricDescriptionField {
+    grid-column: auto;
   }
 }

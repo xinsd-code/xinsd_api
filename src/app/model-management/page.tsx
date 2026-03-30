@@ -7,8 +7,10 @@ import {
   sanitizeAIModelProfileInput,
   validateAIModelProfileInput,
 } from '@/lib/ai-models';
+import UnsavedChangesDialog from '@/components/UnsavedChangesDialog';
 import { AIModelAuthType, AIModelProfile, AIModelProfileSummary, CreateAIModelProfile } from '@/lib/types';
 import { Icons } from '@/components/Icons';
+import { useUnsavedChangesGuard } from '@/hooks/use-unsaved-changes-guard';
 import styles from './page.module.css';
 
 interface EditableProfile {
@@ -61,6 +63,7 @@ export default function ModelManagementPage() {
   const [saving, setSaving] = useState(false);
   const [addingModelId, setAddingModelId] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const [baselineSignature, setBaselineSignature] = useState(() => JSON.stringify(sanitizeAIModelProfileInput(createEmptyDraft())));
 
   const totalModelCount = useMemo(
     () => profiles.reduce((sum, item) => sum + item.modelIds.length, 0),
@@ -80,15 +83,19 @@ export default function ModelManagementPage() {
     defaultModelId: draft.defaultModelId,
     isDefault: draft.isDefault,
   }), [draft]);
+  const currentSignature = useMemo(() => JSON.stringify(payload), [payload]);
+  const isDirty = currentSignature !== baselineSignature;
 
   const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
     setToast({ message, type });
   }, []);
 
   const resetEditorState = useCallback((mode: PanelMode, profile?: AIModelProfile | null) => {
+    const nextDraft = profile ? toEditableProfile(profile) : createEmptyDraft();
     setPanelMode(mode);
     setActiveId(profile?.id || null);
-    setDraft(profile ? toEditableProfile(profile) : createEmptyDraft());
+    setDraft(nextDraft);
+    setBaselineSignature(JSON.stringify(sanitizeAIModelProfileInput(nextDraft)));
     setModelIdInput('');
   }, []);
 
@@ -191,11 +198,11 @@ export default function ModelManagementPage() {
     }));
   };
 
-  const handleCreateNew = () => {
+  const applyCreateDraft = useCallback(() => {
     resetEditorState('create');
-  };
+  }, [resetEditorState]);
 
-  const handleSelectProfile = async (profile: AIModelProfileSummary) => {
+  const loadProfileDetail = useCallback(async (profile: AIModelProfileSummary) => {
     setActiveId(profile.id);
     setPanelMode('edit');
     setDetailLoading(true);
@@ -204,14 +211,14 @@ export default function ModelManagementPage() {
       if (!res.ok) throw new Error('读取详情失败');
       const detail = await res.json();
       resetEditorState('edit', detail);
-    } catch (e) {
+    } catch {
       showToast('获取模型详情失败', 'error');
     } finally {
       setDetailLoading(false);
     }
-  };
+  }, [resetEditorState, showToast]);
 
-  const validateDraft = (): string | null => {
+  const validateDraft = useCallback((): string | null => {
     if (!draft.name.trim()) return '请输入模型名称';
     if (!draft.baseUrl.trim()) return '请输入 Base URL';
     if (!draft.modelIds.length) return '请至少添加一个 Model ID';
@@ -222,13 +229,13 @@ export default function ModelManagementPage() {
       if (!draft.authToken.trim()) return '请输入鉴权 Header 值';
     }
     return null;
-  };
+  }, [draft]);
 
-  const handleSave = async () => {
+  const saveCurrent = useCallback(async (): Promise<boolean> => {
     const validationError = validateDraft();
     if (validationError) {
       showToast(validationError, 'error');
-      return;
+      return false;
     }
 
     setSaving(true);
@@ -251,12 +258,36 @@ export default function ModelManagementPage() {
         }
       }
       showToast(activeId ? '模型配置已更新' : '模型配置已创建');
+      return true;
     } catch (error) {
       showToast(error instanceof Error ? error.message : '保存模型配置失败', 'error');
+      return false;
     } finally {
       setSaving(false);
     }
-  };
+  }, [activeId, fetchProfiles, payload, resetEditorState, showToast, validateDraft]);
+
+  const handleSave = useCallback(() => {
+    void saveCurrent();
+  }, [saveCurrent]);
+
+  const unsavedGuard = useUnsavedChangesGuard({
+    enabled: panelMode === 'create' || panelMode === 'edit',
+    isDirty,
+    onSave: saveCurrent,
+  });
+
+  const handleCreateNew = useCallback(() => {
+    unsavedGuard.confirmAction(() => {
+      applyCreateDraft();
+    });
+  }, [applyCreateDraft, unsavedGuard]);
+
+  const handleSelectProfile = useCallback((profile: AIModelProfileSummary) => {
+    unsavedGuard.confirmAction(async () => {
+      await loadProfileDetail(profile);
+    });
+  }, [loadProfileDetail, unsavedGuard]);
 
   const handleDelete = async () => {
     if (!activeId) return;
@@ -620,7 +651,7 @@ export default function ModelManagementPage() {
                   <Icons.Check size={16} />
                   {saving ? '保存中...' : (panelMode === 'edit' ? '保存更新' : '创建模型配置')}
                 </button>
-                <button className="btn btn-secondary" type="button" onClick={() => resetEditorState('overview')}>
+                <button className="btn btn-secondary" type="button" onClick={() => unsavedGuard.confirmAction(() => resetEditorState('overview'))}>
                   <Icons.ChevronRight size={16} /> 返回概览
                 </button>
               </div>
@@ -640,6 +671,14 @@ export default function ModelManagementPage() {
       </section>
 
       {toast && <div className={`${styles.toast} ${toast.type === 'error' ? styles.error : ''}`}>{toast.message}</div>}
+
+      <UnsavedChangesDialog
+        open={unsavedGuard.dialogOpen}
+        saving={unsavedGuard.saving}
+        onCancel={unsavedGuard.closeDialog}
+        onDiscard={() => void unsavedGuard.handleDiscard()}
+        onSaveAndContinue={() => void unsavedGuard.handleSaveAndContinue()}
+      />
     </div>
   );
 }

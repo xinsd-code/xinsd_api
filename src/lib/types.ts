@@ -18,7 +18,7 @@ export interface MockAPI {
   enabled: boolean;
   requestHeaders: KeyValuePair[];
   requestParams: KeyValuePair[];
-  requestBody: string;
+  requestBody?: string;    // Optional JSON body matcher for mock request matching
   responseStatus: number;
   responseHeaders: KeyValuePair[];
   responseBody: string;   // JSON string
@@ -86,16 +86,16 @@ export interface CustomParamDef {
 
 export interface ParamBinding {
   targetParamKey: string;     // The param key expected by the underlying API
-  targetLocation?: 'query' | 'body';
+  targetLocation?: 'query' | 'body' | 'path' | 'header';
   customParamKey?: string;    // The param key defined by the forward's customParams
   staticValue?: string;       // Or a static value if mapped statically instead of passing from custom param
 }
 
 export interface ForwardTargetParamOption {
   key: string;
-  value?: string;
+  value: unknown;
   location: 'query' | 'body';
-  valueType?: string;
+  valueType: 'string' | 'number' | 'boolean' | 'array' | 'object' | 'null';
 }
 
 export interface RedisCacheConfig {
@@ -112,17 +112,16 @@ export interface ApiForwardConfig {
   description: string;
   method: string;             // GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD
   path: string;               // Virtual exposed endpoint, e.g. /forward/submit-order
-  
+
   customParams: CustomParamDef[];
 
   targetType: 'mock' | 'api-client';
   targetId: string;
-  
+
   paramBindings: ParamBinding[];  // Map how customParams/static values bind to target endpoint params
 
   orchestration?: OrchestrationConfig;  // Advanced response orchestration
-
-  redisConfig?: RedisCacheConfig;       // Redis caching rules
+  redisConfig?: RedisCacheConfig;
 
   createdAt: string;
   updatedAt: string;
@@ -139,43 +138,6 @@ export interface ApiForwardSummary {
   path: string;
   apiGroup?: string;
   description: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface SqlVariableBinding {
-  variableKey: string;
-  customParamKey?: string;
-  staticValue?: string;
-}
-
-export interface DbApiConfig {
-  id: string;
-  name: string;
-  apiGroup?: string;
-  description: string;
-  method: string;
-  path: string;
-  customParams: CustomParamDef[];
-  databaseInstanceId: string;
-  sqlTemplate: string;
-  paramBindings: SqlVariableBinding[];
-  redisConfig?: RedisCacheConfig;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export type CreateDbApiConfig = Omit<DbApiConfig, 'id' | 'createdAt' | 'updatedAt'>;
-export type UpdateDbApiConfig = Partial<CreateDbApiConfig>;
-
-export interface DbApiSummary {
-  id: string;
-  name: string;
-  method: string;
-  path: string;
-  apiGroup?: string;
-  description: string;
-  databaseInstanceId: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -199,7 +161,7 @@ export interface AIModelProfile {
 export type CreateAIModelProfile = Omit<AIModelProfile, 'id' | 'createdAt' | 'updatedAt'>;
 export type UpdateAIModelProfile = Partial<CreateAIModelProfile>;
 
-export type AIModelProfileSummary = Omit<AIModelProfile, 'authToken' | 'authHeaderName'>;
+export interface AIModelProfileSummary extends Omit<AIModelProfile, 'authToken' | 'authHeaderName'> { }
 
 export interface AIModelSelection {
   profileId: string;
@@ -221,11 +183,12 @@ export interface DatabaseInstance {
   connectionUri: string;
   username?: string;
   password?: string;
+  metricMappings?: DatabaseMetricMappings;
   createdAt: string;
   updatedAt: string;
 }
 
-export type DatabaseInstanceSummary = Omit<DatabaseInstance, 'username' | 'password'>;
+export interface DatabaseInstanceSummary extends Omit<DatabaseInstance, 'username' | 'password'> { }
 
 export type CreateDatabaseInstance = Omit<DatabaseInstance, 'id' | 'createdAt' | 'updatedAt'>;
 export type UpdateDatabaseInstance = Partial<CreateDatabaseInstance>;
@@ -303,4 +266,55 @@ export interface OrchestrationNode {
 
 export interface OrchestrationConfig {
   nodes: OrchestrationNode[];
+}
+
+export interface DatabaseFieldMetricMapping {
+  metricName?: string;
+  description?: string;
+  metricType?: string;
+  calcMode?: string;
+}
+
+export interface DatabaseTableMetricMapping {
+  description?: string;
+  fields: Record<string, DatabaseFieldMetricMapping>;
+}
+
+export type DatabaseMetricMappings = Record<string, DatabaseTableMetricMapping>;
+
+export interface SqlVariableBinding {
+  variableKey: string;
+  customParamKey?: string;
+  staticValue?: string;
+}
+
+export interface DbApiConfig {
+  id: string;
+  name: string;
+  apiGroup?: string;
+  description: string;
+  method: string;
+  path: string;
+  customParams: CustomParamDef[];
+  databaseInstanceId: string;
+  sqlTemplate: string;
+  paramBindings: SqlVariableBinding[];
+  redisConfig?: RedisCacheConfig;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type CreateDbApiConfig = Omit<DbApiConfig, 'id' | 'createdAt' | 'updatedAt'>;
+export type UpdateDbApiConfig = Partial<CreateDbApiConfig>;
+
+export interface DbApiSummary {
+  id: string;
+  name: string;
+  method: string;
+  path: string;
+  apiGroup?: string;
+  description: string;
+  databaseInstanceId: string;
+  createdAt: string;
+  updatedAt: string;
 }

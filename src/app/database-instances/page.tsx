@@ -1,8 +1,10 @@
 'use client';
 
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   getDatabaseInstanceValidationSignature,
+  sanitizeDatabaseMetricMappings,
   sanitizeDatabaseInstanceInput,
   validateDatabaseInstanceInput,
 } from '@/lib/database-instances';
@@ -16,6 +18,8 @@ import {
   DatabaseSchemaPayload,
 } from '@/lib/types';
 import { Icons } from '@/components/Icons';
+import UnsavedChangesDialog from '@/components/UnsavedChangesDialog';
+import { useUnsavedChangesGuard } from '@/hooks/use-unsaved-changes-guard';
 import styles from './page.module.css';
 
 type PanelMode = 'overview' | 'create' | 'edit' | 'detail';
@@ -147,9 +151,14 @@ function getStructurePanelSubtitle(
 }
 
 export default function DatabaseInstancesPage() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const detailInstanceId = searchParams.get('detail');
+  const detailCollectionName = searchParams.get('collection');
   const [instances, setInstances] = useState<DatabaseInstanceSummary[]>([]);
   const [panelMode, setPanelMode] = useState<PanelMode>('overview');
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [detailInstance, setDetailInstance] = useState<DatabaseInstance | null>(null);
   const [draft, setDraft] = useState<EditableInstance>(createEmptyDraft);
   const [detailLoading, setDetailLoading] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -162,14 +171,20 @@ export default function DatabaseInstancesPage() {
   const [schemaLoading, setSchemaLoading] = useState(false);
   const [schemaData, setSchemaData] = useState<DatabaseSchemaPayload | null>(null);
   const [selectedCollection, setSelectedCollection] = useState<string | null>(null);
+  const [isStructureCollapsed, setIsStructureCollapsed] = useState(false);
   const [queryText, setQueryText] = useState('');
   const [queryLoading, setQueryLoading] = useState(false);
   const [queryResult, setQueryResult] = useState<DatabaseQueryPayload | null>(null);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const [baselineSignature, setBaselineSignature] = useState(() => getDatabaseInstanceValidationSignature(sanitizeDatabaseInstanceInput(createEmptyDraft())));
 
   const activeInstance = useMemo(
     () => instances.find((item) => item.id === activeId) || null,
     [instances, activeId]
+  );
+  const activeDetail = useMemo(
+    () => (detailInstance && detailInstance.id === activeId ? detailInstance : null),
+    [detailInstance, activeId]
   );
   const engineCounts = useMemo(() => ({
     mysql: instances.filter((item) => item.type === 'mysql').length,
@@ -184,14 +199,32 @@ export default function DatabaseInstancesPage() {
     password: draft.password,
   }), [draft]);
   const payloadSignature = useMemo(() => getDatabaseInstanceValidationSignature(payload), [payload]);
+  const isDirty = payloadSignature !== baselineSignature;
   const isValidationFresh = validationState === 'success' && validatedSignature === payloadSignature;
   const selectedCollectionInfo = useMemo(
     () => schemaData?.collections.find((item) => item.name === selectedCollection) || null,
     [schemaData, selectedCollection]
   );
+  const sanitizedMetricMappings = useMemo(
+    () => sanitizeDatabaseMetricMappings(activeDetail?.metricMappings || {}),
+    [activeDetail]
+  );
+  const selectedMetricMappings = useMemo(
+    () => (selectedCollection ? sanitizedMetricMappings[selectedCollection]?.fields || {} : {}),
+    [sanitizedMetricMappings, selectedCollection]
+  );
+  const selectedMetricCount = useMemo(
+    () => Object.keys(selectedMetricMappings).length,
+    [selectedMetricMappings]
+  );
+  const selectedMetricTotal = selectedCollectionInfo?.columns?.length || 0;
 
   const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
     setToast({ message, type });
+  }, []);
+
+  const syncDetailState = useCallback((detail: DatabaseInstance | null) => {
+    setDetailInstance(detail);
   }, []);
 
   const resetExplorerState = useCallback(() => {
@@ -202,15 +235,18 @@ export default function DatabaseInstancesPage() {
   }, []);
 
   const resetEditorState = useCallback((mode: PanelMode, instance?: DatabaseInstance | null) => {
+    const nextDraft = instance ? toEditableInstance(instance) : createEmptyDraft();
     setPanelMode(mode);
     setActiveId(instance?.id || null);
-    setDraft(instance ? toEditableInstance(instance) : createEmptyDraft());
+    syncDetailState(instance || null);
+    setDraft(nextDraft);
+    setBaselineSignature(getDatabaseInstanceValidationSignature(sanitizeDatabaseInstanceInput(nextDraft)));
     setShowPassword(false);
     setValidationState('idle');
     setValidationMessage(getDefaultValidationMessage('idle'));
     setValidatedSignature(null);
     resetExplorerState();
-  }, [resetExplorerState]);
+  }, [resetExplorerState, syncDetailState]);
 
   const fetchInstances = useCallback(async () => {
     try {
@@ -231,12 +267,49 @@ export default function DatabaseInstancesPage() {
   }, [showToast]);
 
   useEffect(() => {
+    let cancelled = false;
+
     void (async () => {
       const data = await fetchInstances();
-      if (!data) return;
-      resetEditorState('overview');
+      if (!data || cancelled) return;
+
+      if (!detailInstanceId) {
+        resetEditorState('overview');
+        return;
+      }
+
+      const matched = data.find((item) => item.id === detailInstanceId);
+      if (!matched) {
+        resetEditorState('overview');
+        showToast('目标数据库实例不存在', 'error');
+        return;
+      }
+
+      setActiveId(detailInstanceId);
+      setDetailLoading(true);
+      try {
+        const res = await fetch(`/api/database-instances/${detailInstanceId}`);
+        if (!res.ok) throw new Error('读取详情失败');
+        const detail = await res.json() as DatabaseInstance;
+        if (!cancelled) {
+          resetEditorState('detail', detail);
+        }
+      } catch {
+        if (!cancelled) {
+          showToast('获取数据库实例详情失败', 'error');
+          resetEditorState('overview');
+        }
+      } finally {
+        if (!cancelled) {
+          setDetailLoading(false);
+        }
+      }
     })();
-  }, [fetchInstances, resetEditorState]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [detailInstanceId, fetchInstances, resetEditorState, showToast]);
 
   useEffect(() => {
     if (!toast) return;
@@ -264,27 +337,27 @@ export default function DatabaseInstancesPage() {
     }));
   };
 
-  const validateDraft = (): string | null => validateDatabaseInstanceInput(payload);
+  const validateDraft = useCallback((): string | null => validateDatabaseInstanceInput(payload), [payload]);
 
-  const handleCreateNew = () => {
+  const applyCreateNew = useCallback(() => {
     resetEditorState('create');
-  };
+  }, [resetEditorState]);
 
-  const handleSelectInstance = async (instance: DatabaseInstanceSummary) => {
+  const loadInstanceDetail = useCallback(async (instance: DatabaseInstanceSummary) => {
     setActiveId(instance.id);
     setPanelMode('edit');
     setDetailLoading(true);
     try {
       const res = await fetch(`/api/database-instances/${instance.id}`);
       if (!res.ok) throw new Error('读取详情失败');
-      const detail = await res.json();
+      const detail = await res.json() as DatabaseInstance;
       resetEditorState('edit', detail);
     } catch {
       showToast('获取数据库实例详情失败', 'error');
     } finally {
       setDetailLoading(false);
     }
-  };
+  }, [resetEditorState, showToast]);
 
   const handleTestConnection = async () => {
     const validationError = validateDraft();
@@ -330,7 +403,10 @@ export default function DatabaseInstancesPage() {
         throw new Error(getApiErrorMessage(data, '读取数据库结构失败'));
       }
       setSchemaData(data);
-      const firstCollection = data.collections?.[0]?.name || null;
+      const preferredCollection = detailCollectionName && data.collections.some((item) => item.name === detailCollectionName)
+        ? detailCollectionName
+        : null;
+      const firstCollection = preferredCollection || data.collections?.[0]?.name || null;
       setSelectedCollection(firstCollection);
       setQueryResult(null);
       if (activeInstance) {
@@ -343,7 +419,32 @@ export default function DatabaseInstancesPage() {
     } finally {
       setSchemaLoading(false);
     }
-  }, [activeInstance, showToast]);
+  }, [activeInstance, detailCollectionName, showToast]);
+
+  useEffect(() => {
+    if (!activeId || !panelMode || panelMode === 'overview' || panelMode === 'create') return;
+    if (activeDetail) return;
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const res = await fetch(`/api/database-instances/${activeId}`);
+        if (!res.ok) throw new Error('读取详情失败');
+        const detail = await res.json() as DatabaseInstance;
+        if (!cancelled) {
+          syncDetailState(detail);
+        }
+      } catch {
+        if (!cancelled) {
+          showToast('获取数据库实例详情失败', 'error');
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeDetail, activeId, panelMode, showToast, syncDetailState]);
 
   useEffect(() => {
     if (panelMode !== 'detail' || !activeId || !activeInstance) return;
@@ -357,11 +458,11 @@ export default function DatabaseInstancesPage() {
     void loadSchema(activeId);
   }, [panelMode, activeId, activeInstance, loadSchema]);
 
-  const handleSave = async () => {
+  const saveCurrent = useCallback(async (): Promise<boolean> => {
     const validationError = validateDraft();
     if (validationError) {
       showToast(validationError, 'error');
-      return;
+      return false;
     }
     if (!isValidationFresh) {
       const nextMessage = validatedSignature && validatedSignature !== payloadSignature
@@ -370,7 +471,7 @@ export default function DatabaseInstancesPage() {
       setValidationState('idle');
       setValidationMessage(nextMessage);
       showToast(nextMessage, 'error');
-      return;
+      return false;
     }
 
     setSaving(true);
@@ -394,12 +495,36 @@ export default function DatabaseInstancesPage() {
         }
       }
       showToast(activeId ? '数据库实例已更新' : '数据库实例已创建');
+      return true;
     } catch (error) {
       showToast(error instanceof Error ? error.message : '保存数据库实例失败', 'error');
+      return false;
     } finally {
       setSaving(false);
     }
-  };
+  }, [activeId, fetchInstances, isValidationFresh, payload, payloadSignature, resetEditorState, showToast, validateDraft, validatedSignature]);
+
+  const handleSave = useCallback(() => {
+    void saveCurrent();
+  }, [saveCurrent]);
+
+  const unsavedGuard = useUnsavedChangesGuard({
+    enabled: panelMode === 'create' || panelMode === 'edit',
+    isDirty,
+    onSave: saveCurrent,
+  });
+
+  const handleCreateNew = useCallback(() => {
+    unsavedGuard.confirmAction(() => {
+      applyCreateNew();
+    });
+  }, [applyCreateNew, unsavedGuard]);
+
+  const handleSelectInstance = useCallback((instance: DatabaseInstanceSummary) => {
+    unsavedGuard.confirmAction(async () => {
+      await loadInstanceDetail(instance);
+    });
+  }, [loadInstanceDetail, unsavedGuard]);
 
   const handleDelete = async () => {
     if (!activeId) return;
@@ -599,7 +724,7 @@ export default function DatabaseInstancesPage() {
                     <span>查看结构对象并直接执行只读查询，适合日常联调、排障和结果核对。</span>
                   </div>
                 <div className={styles.badgeRow}>
-                  <button className="btn btn-secondary btn-sm" type="button" onClick={() => setPanelMode('edit')}>
+                  <button className="btn btn-secondary btn-sm" type="button" onClick={() => unsavedGuard.confirmAction(() => setPanelMode('edit'))}>
                     <Icons.ChevronRight size={14} /> 返回编辑
                   </button>
                   <span className={`${styles.typeBadge} ${styles[activeInstance.type]}`}>{activeInstance.type.toUpperCase()}</span>
@@ -761,7 +886,7 @@ export default function DatabaseInstancesPage() {
                       <Icons.Check size={16} />
                       {saving ? '保存中...' : (panelMode === 'edit' ? '保存更新' : '创建实例')}
                     </button>
-                    <button className="btn btn-secondary" type="button" onClick={() => resetEditorState('overview')}>
+                    <button className="btn btn-secondary" type="button" onClick={() => unsavedGuard.confirmAction(() => resetEditorState('overview'))}>
                       <Icons.ChevronRight size={16} /> 返回总览
                     </button>
                     {panelMode === 'edit' && activeId && (
@@ -814,6 +939,7 @@ export default function DatabaseInstancesPage() {
                           className={`${styles.collectionItem} ${selectedCollection === collection.name ? styles.selected : ''}`}
                           onClick={() => {
                             setSelectedCollection(collection.name);
+                            setIsStructureCollapsed(false);
                             setQueryText(getDefaultQuery(activeInstance.type, collection.name));
                             setQueryResult(null);
                           }}
@@ -834,44 +960,75 @@ export default function DatabaseInstancesPage() {
                   <div className={styles.panelHeader}>
                     <div className={styles.panelTitle}>
                       <strong>表结构属性</strong>
-                      <span>{getStructurePanelSubtitle(activeInstance.type, selectedCollectionInfo, selectedCollection)}</span>
+                      <span>{`${getStructurePanelSubtitle(activeInstance.type, selectedCollectionInfo, selectedCollection)}${selectedMetricTotal ? ` · 已映射 ${selectedMetricCount}/${selectedMetricTotal} 个字段` : ''}`}</span>
+                    </div>
+                    <div className={styles.panelHeaderActions}>
+                      {selectedCollectionInfo?.category === 'table' && selectedMetricTotal > 0 && (
+                        <button
+                          className="btn btn-primary btn-sm"
+                          type="button"
+                          onClick={() => {
+                            if (!activeInstance || !selectedCollectionInfo) return;
+                            const nextHref = `/database-instances/metrics?instanceId=${activeInstance.id}&collection=${encodeURIComponent(selectedCollectionInfo.name)}`;
+                            unsavedGuard.confirmNavigation(nextHref, () => {
+                              router.push(nextHref);
+                            });
+                          }}
+                        >
+                          <Icons.Activity size={14} /> 指标配置
+                        </button>
+                      )}
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        type="button"
+                        onClick={() => setIsStructureCollapsed((prev) => !prev)}
+                        aria-expanded={!isStructureCollapsed}
+                      >
+                        <Icons.ChevronRight
+                          size={14}
+                          style={{ transform: isStructureCollapsed ? 'rotate(90deg)' : 'rotate(-90deg)' }}
+                        />
+                        {isStructureCollapsed ? '展开' : '折叠'}
+                      </button>
                     </div>
                   </div>
-                  <div className={styles.panelBody}>
-                    {selectedCollectionInfo?.category === 'table' && selectedCollectionInfo.columns && selectedCollectionInfo.columns.length > 0 ? (
-                      <div className={styles.tableShell}>
-                        <table className={styles.dataTable}>
-                          <thead>
-                            <tr>
-                              <th>字段名</th>
-                              <th>类型</th>
-                              <th>可空</th>
-                              <th>默认值</th>
-                              <th>主键</th>
-                              <th>附加属性</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {selectedCollectionInfo.columns.map((column) => (
-                              <tr key={column.name}>
-                                <td><pre>{column.name}</pre></td>
-                                <td><pre>{column.type}</pre></td>
-                                <td><pre>{column.nullable ? 'YES' : 'NO'}</pre></td>
-                                <td><pre>{column.defaultValue ?? '-'}</pre></td>
-                                <td><pre>{column.isPrimary ? 'YES' : '-'}</pre></td>
-                                <td><pre>{column.extra || '-'}</pre></td>
+                  {!isStructureCollapsed && (
+                    <div className={styles.panelBody}>
+                      {selectedCollectionInfo?.category === 'table' && selectedCollectionInfo.columns && selectedCollectionInfo.columns.length > 0 ? (
+                        <div className={styles.tableShell}>
+                          <table className={styles.dataTable}>
+                            <thead>
+                              <tr>
+                                <th>字段名</th>
+                                <th>类型</th>
+                                <th>可空</th>
+                                <th>默认值</th>
+                                <th>主键</th>
+                                <th>附加属性</th>
                               </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    ) : (
-                      <div className={styles.emptyStateCompact}>
-                        <strong>当前对象没有可展示的字段属性</strong>
-                        <span>请先从左侧选择一张表。</span>
-                      </div>
-                    )}
-                  </div>
+                            </thead>
+                            <tbody>
+                              {selectedCollectionInfo.columns.map((column) => (
+                                <tr key={column.name}>
+                                  <td><pre>{column.name}</pre></td>
+                                  <td><pre>{column.type}</pre></td>
+                                  <td><pre>{column.nullable ? 'YES' : 'NO'}</pre></td>
+                                  <td><pre>{column.defaultValue ?? '-'}</pre></td>
+                                  <td><pre>{column.isPrimary ? 'YES' : '-'}</pre></td>
+                                  <td><pre>{column.extra || '-'}</pre></td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : (
+                        <div className={styles.emptyStateCompact}>
+                          <strong>当前对象没有可展示的字段属性</strong>
+                          <span>请先从左侧选择一张表。</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -947,6 +1104,14 @@ export default function DatabaseInstancesPage() {
       </section>
 
       {toast && <div className={`${styles.toast} ${toast.type === 'error' ? styles.error : ''}`}>{toast.message}</div>}
+
+      <UnsavedChangesDialog
+        open={unsavedGuard.dialogOpen}
+        saving={unsavedGuard.saving}
+        onCancel={unsavedGuard.closeDialog}
+        onDiscard={() => void unsavedGuard.handleDiscard()}
+        onSaveAndContinue={() => void unsavedGuard.handleSaveAndContinue()}
+      />
     </div>
   );
 }
