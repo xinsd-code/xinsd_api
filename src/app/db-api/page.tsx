@@ -28,6 +28,27 @@ import styles from '../api-forward/page.module.css';
 type ViewMode = 'design' | 'run';
 type DebugPayload = ({ status?: number; error?: string; _meta?: Record<string, unknown> } & Partial<DatabaseQueryPayload>) | null;
 
+function normalizeDbApiConfig(config: Partial<DbApiConfig>, fallbackId?: string | null): DbApiConfig {
+  const sqlTemplate = config.sqlTemplate || '';
+  const sqlVariables = extractSqlVariables(sqlTemplate);
+
+  return {
+    id: config.id || fallbackId || 'temp-db-api',
+    name: config.name || '',
+    apiGroup: config.apiGroup || '未分组',
+    description: config.description || '',
+    method: config.method || 'GET',
+    path: config.path || '',
+    customParams: config.customParams || [],
+    databaseInstanceId: config.databaseInstanceId || '',
+    sqlTemplate,
+    paramBindings: (config.paramBindings || []).filter((binding) => sqlVariables.includes(binding.variableKey)),
+    redisConfig: sanitizeRedisCacheConfig(config.redisConfig),
+    createdAt: config.createdAt || '',
+    updatedAt: config.updatedAt || '',
+  };
+}
+
 function buildDebugDefaults(params: CustomParamDef[]): Record<string, string> {
   return params.reduce<Record<string, string>>((accumulator, item) => {
     accumulator[item.key] = item.defaultValue || '';
@@ -574,6 +595,7 @@ export default function DbApiPage() {
   const [previewLimit, setPreviewLimit] = useState('10');
   const [isRunning, setIsRunning] = useState(false);
   const [baselineSignature, setBaselineSignature] = useState('');
+  const [hasUserEdited, setHasUserEdited] = useState(false);
   const [navigationState, setNavigationState] = useState<{ editId: string | null; draftKey: string | null }>({
     editId: null,
     draftKey: null,
@@ -614,24 +636,25 @@ export default function DbApiPage() {
     };
   }, []);
 
-  const applyConfig = useCallback((detail: DbApiConfig, options?: { draftKey?: string | null }) => {
-    const nextSqlVariables = extractSqlVariables(detail.sqlTemplate || '');
+  const applyConfig = useCallback((detail: DbApiConfig, options?: { draftKey?: string | null; id?: string | null }) => {
+    const normalizedDetail = normalizeDbApiConfig(detail, options?.id || activeId);
     setIsDraftOpen(true);
+    setHasUserEdited(false);
     setViewMode('design');
-    setName(detail.name || '');
-    setApiGroup(detail.apiGroup || '未分组');
-    setDescription(detail.description || '');
-    setMethod(detail.method || 'GET');
-    setPath(detail.path || '');
-    setCustomParams(detail.customParams || []);
-    setDatabaseInstanceId(detail.databaseInstanceId || '');
-    setSqlTemplate(detail.sqlTemplate || '');
-    setParamBindings((detail.paramBindings || []).filter((binding) => nextSqlVariables.includes(binding.variableKey)));
-    setRedisConfig(sanitizeRedisCacheConfig(detail.redisConfig));
+    setName(normalizedDetail.name);
+    setApiGroup(normalizedDetail.apiGroup);
+    setDescription(normalizedDetail.description);
+    setMethod(normalizedDetail.method);
+    setPath(normalizedDetail.path);
+    setCustomParams(normalizedDetail.customParams);
+    setDatabaseInstanceId(normalizedDetail.databaseInstanceId);
+    setSqlTemplate(normalizedDetail.sqlTemplate);
+    setParamBindings(normalizedDetail.paramBindings);
+    setRedisConfig(normalizedDetail.redisConfig);
     setRunResult(null);
     setRunTime(null);
     setRunParams((current) => {
-      const defaults = buildDebugDefaults(detail.customParams || []);
+      const defaults = buildDebugDefaults(normalizedDetail.customParams);
       const next = { ...defaults, ...current };
       return Object.keys(defaults).reduce<Record<string, string>>((accumulator, key) => {
         accumulator[key] = next[key] ?? '';
@@ -639,8 +662,8 @@ export default function DbApiPage() {
       }, {});
     });
     setActiveDraftKey(options?.draftKey || null);
-    setBaselineSignature(JSON.stringify(detail));
-  }, []);
+    setBaselineSignature(JSON.stringify(normalizedDetail));
+  }, [activeId]);
 
   const fetchDbApis = useCallback(async () => {
     const response = await fetch('/api/db-apis');
@@ -662,7 +685,7 @@ export default function DbApiPage() {
         const detailError = (detail as { error?: string }).error;
         throw new Error(typeof detailError === 'string' ? detailError : '读取 DB API 详情失败');
       }
-      applyConfig(detail, options);
+      applyConfig(detail, { ...options, id });
       setActiveId(id);
     },
     [applyConfig]
@@ -693,7 +716,7 @@ export default function DbApiPage() {
         if (isDbApiDraftKey(queryDraftKey)) {
           const draft = readDbApiDraft(queryDraftKey);
           if (draft) {
-            applyConfig(draft, { draftKey: queryDraftKey });
+            applyConfig(draft, { draftKey: queryDraftKey, id: queryEditId || draft.id || null });
             const nextId = queryEditId || (draft.id && draft.id !== 'temp-db-api' ? draft.id : null);
             setActiveId(nextId);
             return;
@@ -729,6 +752,7 @@ export default function DbApiPage() {
     setActiveId(null);
     setActiveDraftKey(null);
     setIsDraftOpen(true);
+    setHasUserEdited(false);
     setViewMode('design');
     setName('');
     setApiGroup('未分组');
@@ -762,7 +786,7 @@ export default function DbApiPage() {
   }, [activeDraftKey, router, sqlInstances]);
 
   const currentConfig: DbApiConfig = useMemo(
-    () => ({
+    () => normalizeDbApiConfig({
       id: activeId || 'temp-db-api',
       name,
       apiGroup,
@@ -780,7 +804,7 @@ export default function DbApiPage() {
     [activeId, apiGroup, customParams, databaseInstanceId, description, method, name, paramBindings, path, redisConfig, sqlTemplate]
   );
   const currentSignature = useMemo(() => JSON.stringify(currentConfig), [currentConfig]);
-  const isDirty = Boolean(isDraftOpen) && currentSignature !== baselineSignature;
+  const isDirty = Boolean(isDraftOpen) && hasUserEdited && currentSignature !== baselineSignature;
 
   const openSqlEditor = useCallback(() => {
     if (!databaseInstanceId) {
@@ -819,6 +843,7 @@ export default function DbApiPage() {
         clearDbApiDraft(activeDraftKey);
       }
       setActiveId(payload.id);
+      setHasUserEdited(false);
       applyConfig(payload, { draftKey: null });
       router.replace(`/db-api?edit=${payload.id}`);
       showToast(activeId ? 'DB API 已更新' : 'DB API 已创建');
@@ -872,6 +897,7 @@ export default function DbApiPage() {
       setActiveId(null);
       setActiveDraftKey(null);
       setIsDraftOpen(false);
+      setHasUserEdited(false);
       setName('');
       setSqlTemplate('');
       setParamBindings([]);
@@ -1129,13 +1155,19 @@ export default function DbApiPage() {
           </div>
         </div>
 
-        <CustomParamEditor params={customParams} onChange={setCustomParams} />
+        <CustomParamEditor params={customParams} onChange={(next) => {
+          setHasUserEdited(true);
+          setCustomParams(next);
+        }} />
 
         <SqlBindingEditor
           sqlVariables={sqlVariables}
           customParams={customParams}
           bindings={paramBindings}
-          onChange={setParamBindings}
+          onChange={(next) => {
+            setHasUserEdited(true);
+            setParamBindings(next);
+          }}
         />
 
         <div className="card" style={{ padding: 24 }}>
@@ -1162,6 +1194,7 @@ export default function DbApiPage() {
                     showToast('暂无 Redis 数据源，请先前往「数据库实例」配置', 'error');
                     return;
                   }
+                  setHasUserEdited(true);
                   setRedisConfig(sanitizeRedisCacheConfig({ ...redisConfig, enabled: event.target.checked }));
                 }}
                 style={{ width: 16, height: 16 }}
@@ -1188,7 +1221,10 @@ export default function DbApiPage() {
                 <select
                   className="form-select"
                   value={redisConfig.instanceId || ''}
-                  onChange={(event) => setRedisConfig(sanitizeRedisCacheConfig({ ...redisConfig, instanceId: event.target.value }))}
+                  onChange={(event) => {
+                    setHasUserEdited(true);
+                    setRedisConfig(sanitizeRedisCacheConfig({ ...redisConfig, instanceId: event.target.value }));
+                  }}
                 >
                   <option value="">-- 请选择数据源 --</option>
                   {redisInstances.map((instance) => (
@@ -1205,7 +1241,10 @@ export default function DbApiPage() {
                   className={`${styles.redisRuleEditor} form-input`}
                   placeholder={'如: profile:{{userId}}\n或: order:{{$.order.id}}:{{items[0].sku}}'}
                   value={redisConfig.keyRule || ''}
-                  onChange={(event) => setRedisConfig(sanitizeRedisCacheConfig({ ...redisConfig, keyRule: event.target.value }))}
+                  onChange={(event) => {
+                    setHasUserEdited(true);
+                    setRedisConfig(sanitizeRedisCacheConfig({ ...redisConfig, keyRule: event.target.value }));
+                  }}
                 />
                 <div className={styles.redisRuleHints}>
                   <span><code>{'{{userId}}'}</code> 读取普通参数</span>
@@ -1222,14 +1261,15 @@ export default function DbApiPage() {
                   placeholder="如: 3600 (一小时)"
                   min={1}
                   value={redisConfig.expireSeconds || ''}
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    setHasUserEdited(true);
                     setRedisConfig(
                       sanitizeRedisCacheConfig({
                         ...redisConfig,
                         expireSeconds: event.target.value ? Number.parseInt(event.target.value, 10) : undefined,
                       })
-                    )
-                  }
+                    );
+                  }}
                 />
                 <div className={styles.redisExpireHint}>留空表示不过期；写入失败不会中断真实 DB API 返回。</div>
               </div>
@@ -1709,7 +1749,10 @@ export default function DbApiPage() {
                   <input
                     type="text"
                     value={name}
-                    onChange={(event) => setName(event.target.value)}
+                    onChange={(event) => {
+                      setHasUserEdited(true);
+                      setName(event.target.value);
+                    }}
                     className="form-input"
                     style={{ border: 'none', background: 'transparent', fontSize: 18, fontWeight: 800, padding: 0, height: 'auto', marginBottom: 2 }}
                     placeholder="请输入 DB API 名称"
@@ -1719,7 +1762,10 @@ export default function DbApiPage() {
                     <input
                       type="text"
                       value={apiGroup}
-                      onChange={(event) => setApiGroup(event.target.value)}
+                      onChange={(event) => {
+                        setHasUserEdited(true);
+                        setApiGroup(event.target.value);
+                      }}
                       className="form-input"
                       style={{ width: 160, height: 'auto', fontSize: 12, padding: 0, border: 'none', background: 'transparent', fontWeight: 600, color: 'var(--color-text-secondary)' }}
                       placeholder="分组名称..."
@@ -1768,7 +1814,10 @@ export default function DbApiPage() {
                 >
                   <select
                     value={method}
-                    onChange={(event) => setMethod(event.target.value)}
+                    onChange={(event) => {
+                      setHasUserEdited(true);
+                      setMethod(event.target.value);
+                    }}
                     className="form-select"
                     style={{ width: 110, border: 'none', borderRight: '1px solid var(--color-border)', borderRadius: 0, fontWeight: 700, fontSize: 13, height: 42 }}
                   >
@@ -1781,7 +1830,10 @@ export default function DbApiPage() {
                   <input
                     type="text"
                     value={path}
-                    onChange={(event) => setPath(event.target.value)}
+                    onChange={(event) => {
+                      setHasUserEdited(true);
+                      setPath(event.target.value);
+                    }}
                     className="form-input"
                     style={{ flex: 1, border: 'none', fontFamily: 'var(--font-mono)', fontSize: 13 }}
                     placeholder="/query/orders"
