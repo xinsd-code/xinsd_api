@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import UnsavedChangesDialog from '@/components/UnsavedChangesDialog';
 import { sanitizeDatabaseMetricMappings } from '@/lib/database-instances';
 import { useUnsavedChangesGuard } from '@/hooks/use-unsaved-changes-guard';
@@ -38,7 +38,7 @@ async function readApiJson<T>(response: Response, fallback: string): Promise<T> 
   }
 }
 
-export default function DatabaseMetricConfigPage() {
+function DatabaseMetricConfigPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const instanceId = searchParams.get('instanceId');
@@ -507,5 +507,13 @@ export default function DatabaseMetricConfigPage() {
         onSaveAndContinue={() => void unsavedGuard.handleSaveAndContinue()}
       />
     </div>
+  );
+}
+
+export default function DatabaseMetricConfigPage() {
+  return (
+    <Suspense fallback={null}>
+      <DatabaseMetricConfigPageContent />
+    </Suspense>
   );
 }

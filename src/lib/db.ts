@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3';
 import path from 'path';
+import fs from 'node:fs';
 import {
   MockAPI,
   MockAPISummary,
@@ -31,12 +32,32 @@ import {
 import { nanoid } from 'nanoid';
 import { sanitizeAIModelProfileInput } from './ai-models';
 
-const DB_PATH = path.join(process.cwd(), 'mock-data.db');
+const DEFAULT_DATA_DIR = path.join(process.cwd(), 'data');
+
+function resolveDbPath(): string {
+  const explicitPath = process.env.SQLITE_DB_PATH?.trim();
+  if (explicitPath) {
+    return path.isAbsolute(explicitPath)
+      ? explicitPath
+      : path.join(process.cwd(), explicitPath);
+  }
+
+  const dataDir = process.env.DATA_DIR?.trim()
+    ? (path.isAbsolute(process.env.DATA_DIR.trim())
+      ? process.env.DATA_DIR.trim()
+      : path.join(process.cwd(), process.env.DATA_DIR.trim()))
+    : DEFAULT_DATA_DIR;
+
+  return path.join(dataDir, 'mock-data.db');
+}
+
+const DB_PATH = resolveDbPath();
 
 let db: Database.Database;
 
 function getDb(): Database.Database {
   if (!db) {
+    fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
     db = new Database(DB_PATH);
     db.pragma('journal_mode = WAL');
     initializeDb(db);
@@ -57,8 +78,6 @@ function initializeDb(database: Database.Database) {
       request_params TEXT DEFAULT '[]',
       response_status INTEGER NOT NULL DEFAULT 200,
       response_headers TEXT DEFAULT '[]',
-      response_body TEXT DEFAULT '{}',
-      response_delay INTEGER NOT NULL DEFAULT 0,
       response_body TEXT DEFAULT '{}',
       response_delay INTEGER NOT NULL DEFAULT 0,
       is_stream INTEGER NOT NULL DEFAULT 0,

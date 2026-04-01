@@ -642,7 +642,7 @@ export default function DbApiPage() {
     setHasUserEdited(false);
     setViewMode('design');
     setName(normalizedDetail.name);
-    setApiGroup(normalizedDetail.apiGroup);
+    setApiGroup(normalizedDetail.apiGroup || '未分组');
     setDescription(normalizedDetail.description);
     setMethod(normalizedDetail.method);
     setPath(normalizedDetail.path);
@@ -650,7 +650,7 @@ export default function DbApiPage() {
     setDatabaseInstanceId(normalizedDetail.databaseInstanceId);
     setSqlTemplate(normalizedDetail.sqlTemplate);
     setParamBindings(normalizedDetail.paramBindings);
-    setRedisConfig(normalizedDetail.redisConfig);
+    setRedisConfig(normalizedDetail.redisConfig || { enabled: false });
     setRunResult(null);
     setRunTime(null);
     setRunParams((current) => {

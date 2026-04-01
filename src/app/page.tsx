@@ -26,10 +26,14 @@ export default function Home() {
   const fetchMocks = useCallback(async () => {
     try {
       const res = await fetch('/api/mocks');
+      if (!res.ok) {
+        throw new Error(`Failed to fetch mocks: ${res.status}`);
+      }
       const data = await res.json();
-      setMocks(data);
+      setMocks(Array.isArray(data) ? data : []);
     } catch (error) {
       console.error('Failed to fetch mocks:', error);
+      setMocks([]);
       showToast('获取接口列表失败', 'error');
     } finally {
       setLoading(false);

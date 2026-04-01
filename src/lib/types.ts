@@ -95,7 +95,7 @@ export interface ForwardTargetParamOption {
   key: string;
   value: unknown;
   location: 'query' | 'body';
-  valueType: 'string' | 'number' | 'boolean' | 'array' | 'object' | 'null';
+  valueType: 'string' | 'number' | 'integer' | 'boolean' | 'array' | 'object' | 'null';
 }
 
 export interface RedisCacheConfig {

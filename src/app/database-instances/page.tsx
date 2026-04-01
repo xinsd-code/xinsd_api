@@ -1,7 +1,7 @@
 'use client';
 
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   getDatabaseInstanceValidationSignature,
   sanitizeDatabaseMetricMappings,
@@ -150,7 +150,7 @@ function getStructurePanelSubtitle(
   return instanceType === 'redis' ? `当前 Key：${selectedName}` : `当前对象：${selectedName}`;
 }
 
-export default function DatabaseInstancesPage() {
+function DatabaseInstancesPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const detailInstanceId = searchParams.get('detail');
@@ -1113,5 +1113,13 @@ export default function DatabaseInstancesPage() {
         onSaveAndContinue={() => void unsavedGuard.handleSaveAndContinue()}
       />
     </div>
+  );
+}
+
+export default function DatabaseInstancesPage() {
+  return (
+    <Suspense fallback={null}>
+      <DatabaseInstancesPageContent />
+    </Suspense>
   );
 }
