@@ -28,6 +28,11 @@ export default function Sidebar() {
       path: '/db-api',
       icon: <Icons.Database size={18} />,
     },
+    {
+      name: 'NL2DATA',
+      path: '/nl2data',
+      icon: <Icons.MessageSquare size={18} />,
+    },
   ];
   const bottomNavItems = [
     {

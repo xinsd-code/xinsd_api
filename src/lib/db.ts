@@ -195,6 +195,25 @@ function initializeDb(database: Database.Database) {
     );
   `);
 
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS nl2data_session_history (
+      id TEXT PRIMARY KEY,
+      timestamp TEXT NOT NULL,
+      question TEXT DEFAULT '',
+      title TEXT DEFAULT '',
+      trigger TEXT NOT NULL,
+      sql TEXT NOT NULL,
+      summary TEXT DEFAULT '',
+      datasource TEXT DEFAULT '',
+      engine TEXT NOT NULL,
+      columns_json TEXT DEFAULT '[]',
+      rows_json TEXT DEFAULT '[]',
+      prompt TEXT DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+
   // Migration for api_forwards orchestration column
   try {
     database.exec(`ALTER TABLE api_forwards ADD COLUMN orchestration TEXT DEFAULT '{}';`);
@@ -219,6 +238,42 @@ function initializeDb(database: Database.Database) {
       console.error('Migration error db_apis.redis_config:', err);
     }
   }
+}
+
+export interface Nl2DataSessionHistoryRecord {
+  id: string;
+  timestamp: string;
+  question: string;
+  title: string;
+  trigger: 'ai' | 'manual';
+  sql: string;
+  summary?: string;
+  datasource: string;
+  engine: 'mysql' | 'pgsql';
+  columns: string[];
+  rows: Record<string, unknown>[];
+  prompt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+function rowToNl2DataSessionHistory(row: Record<string, unknown>): Nl2DataSessionHistoryRecord {
+  return {
+    id: row.id as string,
+    timestamp: row.timestamp as string,
+    question: (row.question as string) || '',
+    title: (row.title as string) || '',
+    trigger: row.trigger === 'manual' ? 'manual' : 'ai',
+    sql: (row.sql as string) || '',
+    summary: (row.summary as string) || '',
+    datasource: (row.datasource as string) || '',
+    engine: row.engine === 'pgsql' ? 'pgsql' : 'mysql',
+    columns: JSON.parse((row.columns_json as string) || '[]'),
+    rows: JSON.parse((row.rows_json as string) || '[]'),
+    prompt: (row.prompt as string) || '',
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  };
 }
 
 function rowToMockAPI(row: Record<string, unknown>): MockAPI {
@@ -508,7 +563,7 @@ function rowToApiForwardConfig(row: Record<string, unknown>): ApiForwardConfig {
     method: row.method as string,
     path: row.path as string,
     customParams: JSON.parse(row.custom_params as string),
-    targetType: row.target_type as 'mock' | 'api-client',
+    targetType: row.target_type as ApiForwardConfig['targetType'],
     targetId: row.target_id as string,
     paramBindings: JSON.parse(row.param_bindings as string),
     orchestration,
@@ -1038,5 +1093,66 @@ export function updateDatabaseInstanceMetricMappings(id: string, metricMappings:
 export function deleteDatabaseInstance(id: string): boolean {
   const db = getDb();
   const result = db.prepare('DELETE FROM database_instances WHERE id = ?').run(id);
+  return result.changes > 0;
+}
+
+export function getNl2DataSessionHistory(limit = 24): Nl2DataSessionHistoryRecord[] {
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT *
+    FROM nl2data_session_history
+    ORDER BY timestamp DESC, created_at DESC
+    LIMIT ?
+  `).all(limit);
+
+  return rows.map((row) => rowToNl2DataSessionHistory(row as Record<string, unknown>));
+}
+
+export function createNl2DataSessionHistory(
+  input: Omit<Nl2DataSessionHistoryRecord, 'createdAt' | 'updatedAt'>
+): Nl2DataSessionHistoryRecord {
+  const db = getDb();
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO nl2data_session_history (
+      id,
+      timestamp,
+      question,
+      title,
+      trigger,
+      sql,
+      summary,
+      datasource,
+      engine,
+      columns_json,
+      rows_json,
+      prompt,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    input.id,
+    input.timestamp,
+    input.question || '',
+    input.title || '',
+    input.trigger,
+    input.sql,
+    input.summary || '',
+    input.datasource || '',
+    input.engine,
+    JSON.stringify(input.columns || []),
+    JSON.stringify(input.rows || []),
+    input.prompt || '',
+    now,
+    now
+  );
+
+  return getNl2DataSessionHistory(1).find((item) => item.id === input.id)!;
+}
+
+export function deleteNl2DataSessionHistory(id: string): boolean {
+  const db = getDb();
+  const result = db.prepare('DELETE FROM nl2data_session_history WHERE id = ?').run(id);
   return result.changes > 0;
 }
