@@ -105,6 +105,8 @@ export interface RedisCacheConfig {
   expireSeconds?: number;
 }
 
+export type ApiForwardTargetType = 'mock' | 'api-client' | 'db-api';
+
 export interface ApiForwardConfig {
   id: string;
   name: string;
@@ -115,7 +117,7 @@ export interface ApiForwardConfig {
 
   customParams: CustomParamDef[];
 
-  targetType: 'mock' | 'api-client';
+  targetType: ApiForwardTargetType;
   targetId: string;
 
   paramBindings: ParamBinding[];  // Map how customParams/static values bind to target endpoint params

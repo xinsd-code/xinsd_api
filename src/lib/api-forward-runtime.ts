@@ -1,10 +1,11 @@
-import { getApiClientById, getGroupVariables, getMockById } from './db';
+import { getApiClientById, getDatabaseInstanceById, getDbApiById, getGroupVariables, getMockById } from './db';
 import { applyOrchestration } from './orchestration-engine';
 import { writeRedisCacheValue } from './redis-cache';
 import { matchPath } from './matcher';
 import { parseJsonBody, flattenJsonBody, JsonBodyField, buildJsonBodyFromFields } from './json-body';
 import { resolveVariables } from './utils';
 import { ApiForwardConfig, KeyValuePair } from './types';
+import { buildRequestInputMap, executeDbApi } from './db-api';
 
 export function findMatchingApiForward(
   forwards: ApiForwardConfig[],
@@ -59,7 +60,7 @@ export async function executeApiForwardRuntime(
     targetParams = mock.requestParams || [];
     targetBody = mock.requestBody || '';
     apiGroup = mock.apiGroup || '';
-  } else {
+  } else if (forwardConfig.targetType === 'api-client') {
     const client = getApiClientById(forwardConfig.targetId);
     if (!client) throw new Error('Target API Client not found');
     targetUrl = client.url;
@@ -68,6 +69,61 @@ export async function executeApiForwardRuntime(
     targetParams = client.requestParams || [];
     targetBody = client.requestBody || '';
     apiGroup = client.apiGroup || '';
+  } else {
+    const dbApi = getDbApiById(forwardConfig.targetId);
+    if (!dbApi) throw new Error('Target DB API not found');
+    const instance = getDatabaseInstanceById(dbApi.databaseInstanceId);
+    if (!instance || (instance.type !== 'mysql' && instance.type !== 'pgsql')) {
+      throw new Error('Target DB API database instance not found');
+    }
+
+    const dbApiInput = buildRequestInputMap({}, new URLSearchParams(), runParams);
+    const execution = await executeDbApi(dbApi, instance, dbApiInput);
+    const responsePayload = {
+      data: execution.result.rows,
+      columns: execution.result.columns,
+      summary: execution.result.summary,
+    };
+    let finalData: unknown = responsePayload;
+
+    if (forwardConfig.orchestration?.nodes?.length) {
+      finalData = applyOrchestration(
+        responsePayload,
+        forwardConfig.orchestration,
+        Object.fromEntries(
+          Object.entries(runParams).map(([key, value]) => [key, stringifyRuntimeValue(value)])
+        )
+      );
+    }
+
+    const cacheResult = await writeRedisCacheValue(
+      forwardConfig.id,
+      forwardConfig.redisConfig,
+      runParams,
+      finalData
+    );
+
+    return {
+      status: 200,
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+      data: finalData,
+      meta: {
+        forwardMethod: dbApi.method,
+        forwardUrl: dbApi.path,
+        forwardHeaders: {},
+        orchestrationApplied: !!forwardConfig.orchestration?.nodes?.length,
+        cache: cacheResult,
+        targetType: 'db-api',
+        dbApi: {
+          id: dbApi.id,
+          name: dbApi.name,
+          databaseInstanceId: dbApi.databaseInstanceId,
+          previewSql: execution.debug.previewSql,
+          resolvedBindings: execution.debug.resolvedBindings,
+          summary: execution.result.summary,
+        },
+      },
+    };
   }
 
   const groupVars = apiGroup ? getGroupVariables(apiGroup) : [];

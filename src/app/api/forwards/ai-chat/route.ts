@@ -4,6 +4,7 @@ import { NextResponse } from 'next/server';
 import { buildAiChatEndpoint } from '@/lib/ai-models';
 import {
   AIModelSelection,
+  ApiForwardTargetType,
   ComputeNodeConfig,
   CustomParamDef,
   FilterNodeConfig,
@@ -34,7 +35,7 @@ interface ValidationIssueInput {
 interface ForwardConfigRef {
   method: string;
   path: string;
-  targetType: 'mock' | 'api-client';
+  targetType: ApiForwardTargetType;
   targetId: string;
   paramBindings: ParamBinding[];
   customParams: CustomParamDef[];

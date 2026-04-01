@@ -5,6 +5,7 @@ import { flattenAIModelSelections, getAIModelSelectionKey, getDefaultAIModelSele
 import {
   AIModelProfile,
   AIModelSelection,
+  ApiForwardTargetType,
   OrchestrationConfig,
   OrchestrationNode,
   OrchestrationNodeType,
@@ -1030,7 +1031,7 @@ function NodeSummary({ node }: { node: OrchestrationNode }) {
 interface ForwardConfigRef {
   method: string;
   path: string;
-  targetType: 'mock' | 'api-client';
+  targetType: ApiForwardTargetType;
   targetId: string;
   paramBindings: ParamBinding[];
   customParams: CustomParamDef[];

@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import UnsavedChangesDialog from '@/components/UnsavedChangesDialog';
-import { ApiForwardConfig, ApiForwardSummary, MockAPISummary, ApiClientSummary, CustomParamDef, ParamBinding, KeyValuePair, OrchestrationConfig } from '@/lib/types';
+import { ApiClientSummary, ApiForwardConfig, ApiForwardSummary, ApiForwardTargetType, CustomParamDef, DbApiConfig, DbApiSummary, MockAPISummary, ParamBinding, KeyValuePair, OrchestrationConfig } from '@/lib/types';
 import JsonEditor from '@/components/JsonEditor';
 import OrchestrationEditor from '@/components/OrchestrationEditor';
 import { Icons } from '@/components/Icons';
@@ -188,6 +188,7 @@ export default function ApiForwardPage() {
   const [forwards, setForwards] = useState<ApiForwardSummary[]>([]);
   const [mocks, setMocks] = useState<MockAPISummary[]>([]);
   const [apiClients, setApiClients] = useState<ApiClientSummary[]>([]);
+  const [dbApis, setDbApis] = useState<DbApiSummary[]>([]);
 
   const [activeId, setActiveId] = useState<string | null>(null);
   const [activeForwardDetail, setActiveForwardDetail] = useState<ApiForwardConfig | null>(null);
@@ -201,7 +202,7 @@ export default function ApiForwardPage() {
   const [path, setPath] = useState('');
 
   const [customParams, setCustomParams] = useState<CustomParamDef[]>([]);
-  const [targetType, setTargetType] = useState<'mock' | 'api-client'>('api-client');
+  const [targetType, setTargetType] = useState<ApiForwardTargetType>('api-client');
   const [targetId, setTargetId] = useState<string>('');
   const [targetParams, setTargetParams] = useState<KeyValuePair[]>([]);
   const [paramBindings, setParamBindings] = useState<ParamBinding[]>([]);
@@ -275,12 +276,14 @@ export default function ApiForwardPage() {
 
   const fetchTargets = async () => {
     try {
-      const [mockRes, clientRes] = await Promise.all([
+      const [mockRes, clientRes, dbApiRes] = await Promise.all([
         fetch('/api/mocks'),
-        fetch('/api/api-client')
+        fetch('/api/api-client'),
+        fetch('/api/db-apis')
       ]);
       if (mockRes.ok) setMocks(await mockRes.json());
       if (clientRes.ok) setApiClients(await clientRes.json());
+      if (dbApiRes.ok) setDbApis(await dbApiRes.json());
     } catch (e) {
       console.error('Failed to fetch targets', e);
     }
@@ -294,12 +297,28 @@ export default function ApiForwardPage() {
     }
     const endpoint = targetType === 'mock'
       ? `/api/mocks/${targetId}`
-      : `/api/api-client/${targetId}`;
+      : targetType === 'api-client'
+        ? `/api/api-client/${targetId}`
+        : `/api/db-apis/${targetId}`;
     fetch(endpoint)
       .then(res => res.ok ? res.json() : null)
       .then(data => {
-        if (data) setTargetParams(data.requestParams || []);
-        else setTargetParams([]);
+        if (!data) {
+          setTargetParams([]);
+          return;
+        }
+
+        if (targetType === 'db-api') {
+          const detail = data as DbApiConfig;
+          setTargetParams((detail.customParams || []).map((param) => ({
+            key: param.key,
+            value: param.defaultValue || '',
+            type: param.type,
+          })));
+          return;
+        }
+
+        setTargetParams(data.requestParams || []);
       })
       .catch(() => setTargetParams([]));
   }, [targetId, targetType]);
@@ -476,7 +495,9 @@ export default function ApiForwardPage() {
 
     const target = targetType === 'mock'
       ? mocks.find(m => m.id === targetId)
-      : apiClients.find(c => c.id === targetId);
+      : targetType === 'api-client'
+        ? apiClients.find(c => c.id === targetId)
+        : dbApis.find(item => item.id === targetId);
 
     if (!target) {
       showToast('未找到目标接口', 'error');
@@ -543,7 +564,7 @@ export default function ApiForwardPage() {
                 <select
                   value={targetType}
                   onChange={(e) => {
-                    setTargetType(e.target.value as 'mock' | 'api-client');
+                    setTargetType(e.target.value as ApiForwardTargetType);
                     setTargetId('');
                     setParamBindings([]);
                   }}
@@ -551,6 +572,7 @@ export default function ApiForwardPage() {
                 >
                   <option value="api-client">API 接入 (第三方接口)</option>
                   <option value="mock">Mock 接口 (内部模拟)</option>
+                  <option value="db-api">DB API (数据库接口)</option>
                 </select>
               </div>
               <div className="form-group">
@@ -564,10 +586,15 @@ export default function ApiForwardPage() {
                   className="form-select"
                 >
                   <option value="">-- 选择目标端点 --</option>
-                  {targetType === 'mock'
-                    ? mocks.map(m => <option key={m.id} value={m.id}>[{m.apiGroup}] {m.name}</option>)
-                    : apiClients.map(c => <option key={c.id} value={c.id}>[{c.apiGroup}] {c.name}</option>)
-                  }
+                  {targetType === 'mock' && mocks.map(m => (
+                    <option key={m.id} value={m.id}>[{m.apiGroup}] {m.name}</option>
+                  ))}
+                  {targetType === 'api-client' && apiClients.map(c => (
+                    <option key={c.id} value={c.id}>[{c.apiGroup}] {c.name}</option>
+                  ))}
+                  {targetType === 'db-api' && dbApis.map(item => (
+                    <option key={item.id} value={item.id}>[{item.apiGroup}] {item.name}</option>
+                  ))}
                 </select>
               </div>
             </div>
