@@ -181,7 +181,8 @@ export async function getDatabaseSchema(instance: DatabaseInstance): Promise<Dat
             is_nullable AS isNullable,
             column_default AS columnDefault,
             column_key AS columnKey,
-            extra AS extra
+            extra AS extra,
+            column_comment AS columnComment
           FROM information_schema.columns
           WHERE table_schema = ?
           ORDER BY table_name, ordinal_position
@@ -203,6 +204,7 @@ export async function getDatabaseSchema(instance: DatabaseInstance): Promise<Dat
           defaultValue: row.columnDefault ? String(row.columnDefault) : null,
           isPrimary: row.columnKey === 'PRI',
           extra: row.extra ? String(row.extra) : '',
+          comment: row.columnComment ? String(row.columnComment) : '',
         });
         map.set(tableName, current);
       }
@@ -235,6 +237,11 @@ export async function getDatabaseSchema(instance: DatabaseInstance): Promise<Dat
                 AND tc.table_name = cols.table_name
                 AND kcu.column_name = cols.column_name
             ) AS "isPrimary"
+            ,
+            col_description(
+              format('%I.%I', cols.table_schema, cols.table_name)::regclass,
+              cols.ordinal_position
+            ) AS "columnComment"
           FROM information_schema.columns cols
           INNER JOIN information_schema.tables tbl
             ON cols.table_schema = tbl.table_schema
@@ -252,6 +259,7 @@ export async function getDatabaseSchema(instance: DatabaseInstance): Promise<Dat
         isNullable: string;
         columnDefault: string | null;
         isPrimary: boolean;
+        columnComment: string | null;
       }>) {
         const current = map.get(row.tableName) || {
           name: row.tableName,
@@ -264,6 +272,7 @@ export async function getDatabaseSchema(instance: DatabaseInstance): Promise<Dat
           nullable: row.isNullable === 'YES',
           defaultValue: row.columnDefault,
           isPrimary: row.isPrimary,
+          comment: row.columnComment || '',
         });
         map.set(row.tableName, current);
       }

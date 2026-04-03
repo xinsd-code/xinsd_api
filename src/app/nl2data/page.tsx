@@ -152,7 +152,7 @@ export default function Nl2DataPage() {
     () => databaseInstances.filter((item) => item.type === 'mysql' || item.type === 'pgsql'),
     [databaseInstances]
   );
-  const modelSelections = useMemo(() => flattenAIModelSelections(modelProfiles), [modelProfiles]);
+  const modelSelections = useMemo(() => flattenAIModelSelections(modelProfiles, 'chat'), [modelProfiles]);
   const selectedModel = useMemo(
     () => modelSelections.find((item) => getAIModelSelectionKey(item) === selectedModelKey) || null,
     [modelSelections, selectedModelKey]
@@ -225,7 +225,7 @@ export default function Nl2DataPage() {
       return;
     }
 
-    const defaultSelection = getDefaultAIModelSelection(modelProfiles);
+    const defaultSelection = getDefaultAIModelSelection(modelProfiles, 'chat');
     const defaultKey = defaultSelection ? getAIModelSelectionKey(defaultSelection) : getAIModelSelectionKey(modelSelections[0]);
 
     setSelectedModelKey((current) => (
@@ -653,7 +653,7 @@ export default function Nl2DataPage() {
                   {chatLoading && (
                     <div className={`${styles.chatMessage} ${styles.assistant}`}>
                       <div className={styles.chatMessageRole}>AI</div>
-                      <div className={styles.chatMessageBubble}>正在分析结构、改写 SQL 并执行查询...</div>
+                      <div className={styles.chatMessageBubble}>正在识别业务名词、补充字段语义并生成 SQL...</div>
                     </div>
                   )}
                 </div>
@@ -734,7 +734,7 @@ export default function Nl2DataPage() {
                       <div>
                         <strong className={styles.chatDebugTitle}>本次生成 Prompt</strong>
                         <div className={styles.chatDebugDesc}>
-                          这里展示当前 NL2DATA 发送给模型的上下文内容，便于排查与校验。
+                          这里展示当前 NL2DATA 的两阶段上下文，包含第一轮 NER 和第二轮 SQL 生成内容，便于排查与校验。
                         </div>
                       </div>
                     </div>

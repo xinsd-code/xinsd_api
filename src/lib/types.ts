@@ -145,10 +145,12 @@ export interface ApiForwardSummary {
 }
 
 export type AIModelAuthType = 'none' | 'bearer' | 'custom-header';
+export type AIModelType = 'chat' | 'embedding';
 
 export interface AIModelProfile {
   id: string;
   name: string;
+  modelType: AIModelType;
   baseUrl: string;
   authType: AIModelAuthType;
   authToken?: string;
@@ -163,11 +165,12 @@ export interface AIModelProfile {
 export type CreateAIModelProfile = Omit<AIModelProfile, 'id' | 'createdAt' | 'updatedAt'>;
 export type UpdateAIModelProfile = Partial<CreateAIModelProfile>;
 
-export interface AIModelProfileSummary extends Omit<AIModelProfile, 'authToken' | 'authHeaderName'> { }
+export type AIModelProfileSummary = Omit<AIModelProfile, 'authToken' | 'authHeaderName'>;
 
 export interface AIModelSelection {
   profileId: string;
   profileName: string;
+  modelType: AIModelType;
   baseUrl: string;
   authType: AIModelAuthType;
   authToken?: string;
@@ -190,7 +193,7 @@ export interface DatabaseInstance {
   updatedAt: string;
 }
 
-export interface DatabaseInstanceSummary extends Omit<DatabaseInstance, 'username' | 'password'> { }
+export type DatabaseInstanceSummary = Omit<DatabaseInstance, 'username' | 'password'>;
 
 export type CreateDatabaseInstance = Omit<DatabaseInstance, 'id' | 'createdAt' | 'updatedAt'>;
 export type UpdateDatabaseInstance = Partial<CreateDatabaseInstance>;
@@ -206,6 +209,7 @@ export interface DatabaseCollectionInfo {
     defaultValue?: string | null;
     isPrimary?: boolean;
     extra?: string;
+    comment?: string;
   }>;
 }
 
@@ -275,6 +279,8 @@ export interface DatabaseFieldMetricMapping {
   description?: string;
   metricType?: string;
   calcMode?: string;
+  enableForNer?: boolean;
+  aliases?: string[];
 }
 
 export interface DatabaseTableMetricMapping {

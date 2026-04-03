@@ -6,7 +6,7 @@ import { executeDbApi } from '@/lib/db-api';
 import { getAIModelProfileById, getDatabaseInstanceById } from '@/lib/db';
 import { getDatabaseSchema } from '@/lib/database-instances-server';
 import { normalizeSqlForExecution } from '@/lib/sql-normalize';
-import { DatabaseSchemaPayload, DbApiConfig } from '@/lib/types';
+import { AIModelProfile, DatabaseSchemaPayload, DbApiConfig } from '@/lib/types';
 
 type ChatRole = 'user' | 'assistant';
 
@@ -54,6 +54,8 @@ interface DatabaseFieldMetricView {
   description?: string;
   metricType?: string;
   calcMode?: string;
+  enableForNer?: boolean;
+  aliases?: string[];
 }
 
 interface DatabaseTableMetricView {
@@ -66,6 +68,30 @@ type DatabaseMetricViewMap = Record<string, DatabaseTableMetricView>;
 interface Nl2DataAiPayload {
   message: string;
   sql: string;
+}
+
+interface Nl2DataNerCandidate {
+  table: string;
+  column: string;
+  metricName?: string;
+  description?: string;
+  aliases: string[];
+}
+
+interface Nl2DataMatchedMetric {
+  term: string;
+  table: string;
+  column: string;
+  metricName?: string;
+  confidence: 'high' | 'medium' | 'low';
+}
+
+interface Nl2DataNerPayload {
+  normalizedTerms: string[];
+  matchedMetrics: Nl2DataMatchedMetric[];
+  unmatchedTerms: string[];
+  timeHints: string[];
+  intent: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -93,6 +119,22 @@ function compactText(value: string | null | undefined, maxLength = 2400): string
   if (!text) return '(empty)';
   if (text.length <= maxLength) return text;
   return `${text.slice(0, maxLength)}…`;
+}
+
+function dedupeStrings(values: Array<string | null | undefined>, maxLength = 60): string[] {
+  const seen = new Set<string>();
+  const next: string[] = [];
+
+  values.forEach((value) => {
+    const text = (value || '').replace(/\s+/g, ' ').trim();
+    if (!text) return;
+    const normalized = text.toLowerCase();
+    if (seen.has(normalized)) return;
+    seen.add(normalized);
+    next.push(text.length <= maxLength ? text : `${text.slice(0, maxLength)}…`);
+  });
+
+  return next;
 }
 
 function extractJsonPayload(content: string): string {
@@ -200,6 +242,7 @@ function buildSchemaOverview(
           const columnScore = scoreTextByKeywords(column.name, keywords)
             + scoreTextByKeywords(metric?.metricName, keywords)
             + scoreTextByKeywords(metric?.description, keywords)
+            + (metric?.enableForNer ? 1 : 0)
             + (metric ? 4 : 0)
             + (column.isPrimary ? 1 : 0);
 
@@ -213,6 +256,8 @@ function buildSchemaOverview(
               metricDesc: truncateText(metric?.description, 70),
               metricType: truncateText(metric?.metricType, 30),
               calcMode: truncateText(metric?.calcMode, 30),
+              aliases: metric?.aliases?.slice(0, 3),
+              ner: metric?.enableForNer || undefined,
             },
           };
         })
@@ -256,13 +301,121 @@ function sanitizeAiPayload(input: unknown, databaseEngine: 'mysql' | 'pgsql'): N
   };
 }
 
-let promptTemplateCache: string | null = null;
+function scoreCandidate(candidate: Nl2DataNerCandidate, keywords: Set<string>): number {
+  let score = 0;
+  score += scoreTextByKeywords(candidate.metricName, keywords) * 2;
+  score += scoreTextByKeywords(candidate.column, keywords) * 2;
+  score += scoreTextByKeywords(candidate.table, keywords);
+  score += scoreTextByKeywords(candidate.description, keywords);
+  candidate.aliases.forEach((alias) => {
+    score += scoreTextByKeywords(alias, keywords) * 2;
+  });
+  if (candidate.metricName) score += 1;
+  if (candidate.description) score += 1;
+  return score;
+}
 
-async function loadPromptTemplate(): Promise<string> {
-  if (promptTemplateCache) return promptTemplateCache;
-  const promptPath = path.join(process.cwd(), 'src/prompts/nl2data-agent.md');
-  promptTemplateCache = await readFile(promptPath, 'utf8');
-  return promptTemplateCache;
+function buildNerCandidateBundle(
+  schema: DatabaseSchemaPayload,
+  metricMappings: DatabaseMetricViewMap,
+  keywords: Set<string>
+): {
+  totalAvailable: number;
+  candidateCount: number;
+  truncated: boolean;
+  candidates: Nl2DataNerCandidate[];
+} {
+  const allCandidates: Nl2DataNerCandidate[] = [];
+
+  schema.collections
+    .filter((collection) => collection.category === 'table')
+    .forEach((collection) => {
+      const tableMetrics = metricMappings[collection.name];
+      (collection.columns || []).forEach((column) => {
+        const metric = tableMetrics?.fields?.[column.name];
+        if (!metric?.enableForNer) return;
+
+        allCandidates.push({
+          table: collection.name,
+          column: column.name,
+          metricName: truncateText(metric.metricName, 40),
+          description: truncateText(metric.description || column.comment || tableMetrics?.description, 20),
+          aliases: dedupeStrings([
+            ...(metric.aliases || []),
+            metric.metricName,
+            column.name,
+            collection.name,
+          ], 18).slice(0, 3),
+        });
+      });
+    });
+
+  const sorted = allCandidates
+    .map((candidate) => ({
+      candidate,
+      score: scoreCandidate(candidate, keywords),
+    }))
+    .sort((left, right) => right.score - left.score
+      || left.candidate.table.localeCompare(right.candidate.table)
+      || left.candidate.column.localeCompare(right.candidate.column));
+
+  const hardLimit = 16;
+  const matched = keywords.size > 0 ? sorted.filter((item) => item.score > 0) : sorted;
+  const chosen = (matched.length > 0 ? matched : sorted).slice(0, hardLimit).map((item) => item.candidate);
+
+  return {
+    totalAvailable: allCandidates.length,
+    candidateCount: chosen.length,
+    truncated: allCandidates.length > chosen.length,
+    candidates: chosen,
+  };
+}
+
+function sanitizeNerPayload(input: unknown): Nl2DataNerPayload {
+  const source = isRecord(input) ? input : {};
+  const sanitizeTextList = (value: unknown, max = 12) => (
+    Array.isArray(value)
+      ? dedupeStrings(value.map((item) => (typeof item === 'string' ? item : '')), 40).slice(0, max)
+      : []
+  );
+
+  const matchedMetrics = Array.isArray(source.matchedMetrics)
+    ? source.matchedMetrics
+      .filter(isRecord)
+      .reduce<Nl2DataMatchedMetric[]>((list, item) => {
+        const confidence = item.confidence === 'high' || item.confidence === 'medium' || item.confidence === 'low'
+          ? item.confidence
+          : 'medium';
+        const term = typeof item.term === 'string' ? item.term.trim() : '';
+        const table = typeof item.table === 'string' ? item.table.trim() : '';
+        const column = typeof item.column === 'string' ? item.column.trim() : '';
+        const metricName = typeof item.metricName === 'string' ? item.metricName.trim() : undefined;
+        if (!term || !table || !column) {
+          return list;
+        }
+        list.push({ term, table, column, metricName, confidence });
+        return list;
+      }, [])
+      .slice(0, 12)
+    : [];
+
+  return {
+    normalizedTerms: sanitizeTextList(source.normalizedTerms),
+    matchedMetrics,
+    unmatchedTerms: sanitizeTextList(source.unmatchedTerms),
+    timeHints: sanitizeTextList(source.timeHints, 8),
+    intent: typeof source.intent === 'string' && source.intent.trim() ? source.intent.trim() : 'query',
+  };
+}
+const promptTemplateCache = new Map<string, string>();
+
+async function loadPromptTemplate(filename: string): Promise<string> {
+  const cached = promptTemplateCache.get(filename);
+  if (cached) return cached;
+  const promptPath = path.join(process.cwd(), 'src/prompts', filename);
+  const template = await readFile(promptPath, 'utf8');
+  promptTemplateCache.set(filename, template);
+  return template;
 }
 
 function renderPromptTemplate(template: string, replacements: Record<string, string>): string {
@@ -271,7 +424,28 @@ function renderPromptTemplate(template: string, replacements: Record<string, str
   ), template);
 }
 
-function buildPromptContext(
+function buildNerPromptContext(
+  databaseInstanceId: string,
+  databaseName: string,
+  databaseEngine: 'mysql' | 'pgsql',
+  question: string,
+  currentSql: string,
+  candidates: ReturnType<typeof buildNerCandidateBundle>
+): string {
+  return [
+    '动态上下文如下：',
+    `数据库实例 ID: ${databaseInstanceId}`,
+    `数据库名称: ${databaseName}`,
+    `数据库类型: ${databaseEngine}`,
+    `用户原始问句: ${compactText(question, 320)}`,
+    '当前 SQL 草稿：',
+    compactText(currentSql, 1200),
+    '第一轮 NER 候选实体：',
+    compactJson(candidates, 3200),
+  ].join('\n');
+}
+
+function buildSqlPromptContext(
   databaseInstanceId: string,
   databaseName: string,
   databaseEngine: 'mysql' | 'pgsql',
@@ -279,10 +453,16 @@ function buildPromptContext(
   metricMappings: DatabaseMetricViewMap,
   currentSql: string,
   messages: Nl2DataChatMessage[],
+  nerPayload: Nl2DataNerPayload,
   currentResult?: Nl2DataAgentRequest['currentResult']
 ): string {
   const latestUserMessage = messages.filter((message) => message.role === 'user').at(-1)?.content || '';
-  const keywords = buildKeywordSet(latestUserMessage, currentSql);
+  const keywords = buildKeywordSet(
+    latestUserMessage,
+    currentSql,
+    nerPayload.normalizedTerms.join(' '),
+    nerPayload.matchedMetrics.map((item) => `${item.term} ${item.metricName || ''} ${item.table} ${item.column}`).join(' ')
+  );
   const schemaOverview = buildSchemaOverview(schema, metricMappings, keywords);
   const resultColumns = Array.isArray(currentResult?.columns) ? currentResult?.columns.slice(0, 24) : [];
   const resultRows = Array.isArray(currentResult?.rows) ? currentResult.rows.slice(0, 3) : [];
@@ -295,6 +475,8 @@ function buildPromptContext(
     `最近一次用户意图: ${compactText(latestUserMessage, 320)}`,
     '当前 SQL 草稿：',
     compactText(currentSql, 2400),
+    '第一轮 NER 结果：',
+    compactJson(nerPayload, 3200),
     '上一轮结果摘要：',
     compactText(currentResult?.summary, 400),
     '上一轮结果字段：',
@@ -322,6 +504,36 @@ function buildUpstreamPayload(systemPrompt: string, messages: Nl2DataChatMessage
       })),
     ],
   };
+}
+
+async function requestModelContent(
+  endpoint: string,
+  profile: AIModelProfile,
+  modelId: string,
+  systemPrompt: string,
+  messages: Nl2DataChatMessage[]
+): Promise<string> {
+  const upstreamResponse = await fetch(endpoint, {
+    method: 'POST',
+    headers: buildAIModelHeaders(profile),
+    body: JSON.stringify(buildUpstreamPayload(systemPrompt, messages, modelId)),
+  });
+
+  const upstreamText = await upstreamResponse.text();
+  const upstreamJson = parseJsonSafely(upstreamText);
+
+  if (!upstreamResponse.ok) {
+    throw new Error(getModelErrorMessage(upstreamJson));
+  }
+
+  return isRecord(upstreamJson)
+    && Array.isArray(upstreamJson.choices)
+    && upstreamJson.choices.length > 0
+    && isRecord(upstreamJson.choices[0])
+    && isRecord(upstreamJson.choices[0].message)
+    && typeof upstreamJson.choices[0].message.content === 'string'
+    ? upstreamJson.choices[0].message.content
+    : '';
 }
 
 function createHarnessDbApiConfig(sql: string, databaseInstanceId: string): DbApiConfig {
@@ -377,9 +589,33 @@ export async function runNl2DataHarness(input: Nl2DataAgentRequest): Promise<Nl2
 
   const schema = await getDatabaseSchema(databaseInstance);
   const metricMappings = sanitizeDatabaseMetricMappings(databaseInstance.metricMappings || {}) as DatabaseMetricViewMap;
-  const promptTemplate = await loadPromptTemplate();
+  const latestUserMessage = input.messages.filter((message) => message.role === 'user').at(-1)?.content || '';
+  const keywords = buildKeywordSet(latestUserMessage, input.currentSql || '');
+  const nerCandidates = buildNerCandidateBundle(schema, metricMappings, keywords);
+  const nerPromptTemplate = await loadPromptTemplate('nl2data-ner.md');
+  const nerPrompt = renderPromptTemplate(nerPromptTemplate, {
+    DYNAMIC_CONTEXT: buildNerPromptContext(
+      databaseInstance.id,
+      databaseInstance.name,
+      databaseInstance.type,
+      latestUserMessage,
+      input.currentSql || '',
+      nerCandidates
+    ),
+  });
+
+  const nerContent = await requestModelContent(
+    endpoint,
+    profile,
+    selectedModel.modelId,
+    nerPrompt,
+    [{ role: 'user', content: latestUserMessage }]
+  );
+  const nerPayload = sanitizeNerPayload(parseJsonSafely(extractJsonPayload(nerContent)));
+
+  const promptTemplate = await loadPromptTemplate('nl2data-agent.md');
   const prompt = renderPromptTemplate(promptTemplate, {
-    DYNAMIC_CONTEXT: buildPromptContext(
+    DYNAMIC_CONTEXT: buildSqlPromptContext(
       databaseInstance.id,
       databaseInstance.name,
       databaseInstance.type,
@@ -387,31 +623,17 @@ export async function runNl2DataHarness(input: Nl2DataAgentRequest): Promise<Nl2
       metricMappings,
       input.currentSql || '',
       input.messages,
+      nerPayload,
       input.currentResult
     ),
   });
-
-  const upstreamResponse = await fetch(endpoint, {
-    method: 'POST',
-    headers: buildAIModelHeaders(profile),
-    body: JSON.stringify(buildUpstreamPayload(prompt, input.messages, selectedModel.modelId)),
-  });
-
-  const upstreamText = await upstreamResponse.text();
-  const upstreamJson = parseJsonSafely(upstreamText);
-
-  if (!upstreamResponse.ok) {
-    throw new Error(getModelErrorMessage(upstreamJson));
-  }
-
-  const content = isRecord(upstreamJson)
-    && Array.isArray(upstreamJson.choices)
-    && upstreamJson.choices.length > 0
-    && isRecord(upstreamJson.choices[0])
-    && isRecord(upstreamJson.choices[0].message)
-    && typeof upstreamJson.choices[0].message.content === 'string'
-    ? upstreamJson.choices[0].message.content
-    : '';
+  const content = await requestModelContent(
+    endpoint,
+    profile,
+    selectedModel.modelId,
+    prompt,
+    input.messages
+  );
 
   const aiPayload = sanitizeAiPayload(
     parseJsonSafely(extractJsonPayload(content)),
@@ -437,7 +659,16 @@ export async function runNl2DataHarness(input: Nl2DataAgentRequest): Promise<Nl2
       engine: databaseInstance.type,
       previewSql: execution.debug.previewSql,
     },
-    prompt,
+    prompt: [
+      '[NER Prompt]',
+      nerPrompt,
+      '',
+      '[NER Result]',
+      JSON.stringify(nerPayload, null, 2),
+      '',
+      '[SQL Prompt]',
+      prompt,
+    ].join('\n'),
   };
 }
 

@@ -1,4 +1,4 @@
-import { AIModelProfile, AIModelSelection, CreateAIModelProfile } from './types';
+import { AIModelProfile, AIModelSelection, AIModelType, CreateAIModelProfile } from './types';
 
 export function normalizeBaseUrl(input: string): string {
   const trimmed = input.trim();
@@ -22,6 +22,20 @@ export function buildAiChatEndpoint(baseUrl: string): string {
   return normalized.endsWith('/chat/completions') ? normalized : `${normalized}/chat/completions`;
 }
 
+export function buildEmbeddingEndpoint(baseUrl: string): string {
+  const normalized = normalizeBaseUrl(baseUrl);
+  if (!normalized) return '';
+  return normalized.endsWith('/embeddings') ? normalized : `${normalized}/embeddings`;
+}
+
+export function buildAIModelEndpoint(baseUrl: string, modelType: AIModelType): string {
+  return modelType === 'embedding' ? buildEmbeddingEndpoint(baseUrl) : buildAiChatEndpoint(baseUrl);
+}
+
+export function getAIModelTypeLabel(modelType: AIModelType): string {
+  return modelType === 'embedding' ? 'Embedding' : '对话模型';
+}
+
 export function sanitizeAIModelProfileInput(input: Partial<CreateAIModelProfile>): CreateAIModelProfile {
   const modelIds = normalizeModelIds(Array.isArray(input.modelIds) ? input.modelIds : []);
   const requestedDefaultModelId = typeof input.defaultModelId === 'string' ? input.defaultModelId.trim() : '';
@@ -29,9 +43,11 @@ export function sanitizeAIModelProfileInput(input: Partial<CreateAIModelProfile>
     ? requestedDefaultModelId
     : (modelIds[0] || '');
   const authType = input.authType === 'custom-header' || input.authType === 'none' ? input.authType : 'bearer';
+  const modelType = input.modelType === 'embedding' ? 'embedding' : 'chat';
 
   return {
     name: typeof input.name === 'string' ? input.name.trim() : '',
+    modelType,
     baseUrl: normalizeBaseUrl(typeof input.baseUrl === 'string' ? input.baseUrl : ''),
     authType,
     authToken: typeof input.authToken === 'string' ? input.authToken.trim() : '',
@@ -73,6 +89,7 @@ export function buildAIModelHeaders(input: Pick<CreateAIModelProfile, 'authType'
 export function getAIModelValidationSignature(input: CreateAIModelProfile): string {
   return JSON.stringify({
     name: input.name,
+    modelType: input.modelType,
     baseUrl: input.baseUrl,
     authType: input.authType,
     authToken: input.authToken,
@@ -108,7 +125,7 @@ function parseJsonSafely(text: string): unknown {
 }
 
 export async function verifyAIModelAvailability(input: CreateAIModelProfile): Promise<{ ok: true; message: string } | { ok: false; message: string }> {
-  const endpoint = buildAiChatEndpoint(input.baseUrl);
+  const endpoint = buildAIModelEndpoint(input.baseUrl, input.modelType);
   if (!endpoint) {
     return { ok: false, message: '当前模型的 Base URL 无效。' };
   }
@@ -117,21 +134,29 @@ export async function verifyAIModelAvailability(input: CreateAIModelProfile): Pr
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: buildAIModelHeaders(input),
-      body: JSON.stringify({
-        model: input.defaultModelId,
-        stream: false,
-        temperature: 0,
-        messages: [
-          {
-            role: 'system',
-            content: 'You are a connection test assistant.',
-          },
-          {
-            role: 'user',
-            content: 'Reply with OK.',
-          },
-        ],
-      }),
+      body: JSON.stringify(
+        input.modelType === 'embedding'
+          ? {
+              model: input.defaultModelId,
+              input: '衣服的质量杠杠的，很漂亮，不枉我等了这么久啊，喜欢，以后还来这里买',
+              encoding_format: 'float',
+            }
+          : {
+              model: input.defaultModelId,
+              stream: false,
+              temperature: 0,
+              messages: [
+                {
+                  role: 'system',
+                  content: 'You are a connection test assistant.',
+                },
+                {
+                  role: 'user',
+                  content: 'Reply with OK.',
+                },
+              ],
+            }
+      ),
     });
 
     const text = await response.text();
@@ -146,7 +171,7 @@ export async function verifyAIModelAvailability(input: CreateAIModelProfile): Pr
 
     return {
       ok: true,
-      message: `模型连接测试通过：${input.defaultModelId}`,
+      message: `${getAIModelTypeLabel(input.modelType)}连接测试通过：${input.defaultModelId}`,
     };
   } catch (error) {
     return {
@@ -156,11 +181,17 @@ export async function verifyAIModelAvailability(input: CreateAIModelProfile): Pr
   }
 }
 
-export function flattenAIModelSelections(profiles: AIModelProfile[]): AIModelSelection[] {
-  return profiles.flatMap((profile) => (
+export function flattenAIModelSelections(
+  profiles: AIModelProfile[],
+  modelType?: AIModelType
+): AIModelSelection[] {
+  const targetProfiles = modelType ? profiles.filter((profile) => profile.modelType === modelType) : profiles;
+
+  return targetProfiles.flatMap((profile) => (
     profile.modelIds.map((modelId) => ({
       profileId: profile.id,
       profileName: profile.name,
+      modelType: profile.modelType,
       baseUrl: profile.baseUrl,
       authType: profile.authType,
       authToken: profile.authToken,
@@ -171,8 +202,11 @@ export function flattenAIModelSelections(profiles: AIModelProfile[]): AIModelSel
   ));
 }
 
-export function getDefaultAIModelSelection(profiles: AIModelProfile[]): AIModelSelection | null {
-  const selections = flattenAIModelSelections(profiles);
+export function getDefaultAIModelSelection(
+  profiles: AIModelProfile[],
+  modelType?: AIModelType
+): AIModelSelection | null {
+  const selections = flattenAIModelSelections(profiles, modelType);
   return selections.find((item) => item.isDefault) || selections[0] || null;
 }
 

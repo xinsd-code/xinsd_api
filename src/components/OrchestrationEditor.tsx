@@ -1181,8 +1181,8 @@ function OrchestrationWorkspace({
     [sortedNodes, rootArrayFieldOptions]
   );
   const validationErrorCount = validationIssues.filter((issue) => issue.severity === 'error').length;
-  const modelOptions = useMemo(() => flattenAIModelSelections(modelProfiles), [modelProfiles]);
-  const defaultModelOption = useMemo(() => getDefaultAIModelSelection(modelProfiles), [modelProfiles]);
+  const modelOptions = useMemo(() => flattenAIModelSelections(modelProfiles, 'chat'), [modelProfiles]);
+  const defaultModelOption = useMemo(() => getDefaultAIModelSelection(modelProfiles, 'chat'), [modelProfiles]);
   const activeModel = useMemo(() => {
     const matched = modelOptions.find((item) => getAIModelSelectionKey(item) === activeModelKey);
     return matched || defaultModelOption || null;
@@ -1392,7 +1392,7 @@ function OrchestrationWorkspace({
 
   const openChatPanel = async () => {
     const profiles = modelProfiles.length > 0 ? modelProfiles : await loadModelProfiles();
-    const nextDefault = getDefaultAIModelSelection(profiles);
+    const nextDefault = getDefaultAIModelSelection(profiles, 'chat');
     if (!nextDefault) {
       setModelReminderOpen(true);
       return;

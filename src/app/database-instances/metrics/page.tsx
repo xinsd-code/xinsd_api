@@ -81,8 +81,24 @@ function DatabaseMetricConfigPageContent() {
     [selectedMetricMappings]
   );
   const hasSelectedTableConfig = Boolean(selectedTableDescription || selectedMetricCount > 0);
+  const commentImportableCount = useMemo(
+    () => (selectedInfo?.columns || []).filter((column) => {
+      const comment = column.comment?.trim();
+      if (!comment) return false;
+      const mapping = selectedMetricMappings[column.name] || {};
+      return !mapping.metricName || !mapping.description;
+    }).length,
+    [selectedInfo, selectedMetricMappings]
+  );
   const totalMetricCount = useMemo(
     () => Object.values(sanitizedMappings).reduce((sum, mapping) => sum + Object.keys(mapping.fields || {}).length, 0),
+    [sanitizedMappings]
+  );
+  const totalNerEnabledCount = useMemo(
+    () => Object.values(sanitizedMappings).reduce(
+      (sum, mapping) => sum + Object.values(mapping.fields || {}).filter((field) => field.enableForNer).length,
+      0
+    ),
     [sanitizedMappings]
   );
 
@@ -160,7 +176,7 @@ function DatabaseMetricConfigPageContent() {
     tableName: string,
     columnName: string,
     key: keyof DatabaseFieldMetricMapping,
-    value: string
+    value: string | boolean | string[]
   ) => {
     setMetricMappings((prev) => {
       const next = { ...prev };
@@ -168,9 +184,21 @@ function DatabaseMetricConfigPageContent() {
         ...(next[tableName] || { fields: {} }),
         fields: { ...(next[tableName]?.fields || {}) },
       };
-      const fieldMapping = { ...(tableMapping.fields[columnName] || {}) } as Record<string, string>;
+      const fieldMapping = { ...(tableMapping.fields[columnName] || {}) } as Record<string, unknown>;
 
-      if (value) {
+      if (typeof value === 'boolean') {
+        if (value) {
+          fieldMapping[key] = true;
+        } else {
+          delete fieldMapping[key];
+        }
+      } else if (Array.isArray(value)) {
+        if (value.length > 0) {
+          fieldMapping[key] = value;
+        } else {
+          delete fieldMapping[key];
+        }
+      } else if (value) {
         fieldMapping[key] = value;
       } else {
         delete fieldMapping[key];
@@ -273,6 +301,53 @@ function DatabaseMetricConfigPageContent() {
     });
   }, [selectedCollection]);
 
+  const handleImportColumnComments = useCallback(() => {
+    if (!selectedInfo) return;
+
+    const next = { ...metricMappings };
+    const tableMapping: DatabaseTableMetricMapping = {
+      ...(next[selectedInfo.name] || { fields: {} }),
+      fields: { ...(next[selectedInfo.name]?.fields || {}) },
+    };
+    let importedCount = 0;
+
+    for (const column of selectedInfo.columns || []) {
+      const comment = column.comment?.trim();
+      if (!comment) continue;
+
+      const fieldMapping = { ...(tableMapping.fields[column.name] || {}) };
+      let changed = false;
+
+      if (!fieldMapping.metricName) {
+        fieldMapping.metricName = comment;
+        changed = true;
+      }
+
+      if (!fieldMapping.description) {
+        fieldMapping.description = comment;
+        changed = true;
+      }
+
+      if (changed) {
+        tableMapping.fields[column.name] = fieldMapping;
+        importedCount += 1;
+      }
+    }
+
+    if (tableMapping.description || Object.keys(tableMapping.fields).length > 0) {
+      next[selectedInfo.name] = tableMapping;
+    }
+
+    setMetricMappings(next);
+
+    if (importedCount > 0) {
+      showToast(`已从字段备注导入 ${importedCount} 项`);
+      return;
+    }
+
+    showToast('当前表没有可导入的字段备注，或相关指标已手动补充', 'error');
+  }, [metricMappings, selectedInfo, showToast]);
+
   if (!instanceId) {
     return (
       <div className={styles.emptyPage}>
@@ -297,12 +372,13 @@ function DatabaseMetricConfigPageContent() {
           </div>
           <div className={styles.heroTitle}>指标配置</div>
           <div className={styles.heroDesc}>
-            把数据库原始字段补充成可理解的业务指标。这里专门负责维护指标名称、描述、类型与计算模式，让数据库实例详情页重新回到结构浏览本身。
+            把数据库原始字段补充成可理解的业务指标。这里专门负责维护指标名称、描述、类型、计算模式，以及哪些字段要参与 NL2DATA 的名词识别补充。
           </div>
           <div className={styles.heroMeta}>
             <span className={styles.metaBadge}><Icons.Database size={12} /> {instance?.name || '读取实例中'}</span>
             <span className={styles.metaBadge}><Icons.Layers size={12} /> {tableCollections.length} 张表</span>
             <span className={styles.metaBadge}><Icons.Check size={12} /> 已配置 {totalMetricCount} 个字段</span>
+            <span className={styles.metaBadge}><Icons.Sparkles size={12} /> NER 已启用 {totalNerEnabledCount} 个字段</span>
           </div>
         </div>
 
@@ -335,7 +411,7 @@ function DatabaseMetricConfigPageContent() {
           </div>
           <div className={styles.schemaList}>
             {tableCollections.map((collection) => {
-              const count = Object.keys(sanitizedMappings[collection.name] || {}).length;
+              const count = Object.keys(sanitizedMappings[collection.name]?.fields || {}).length;
               return (
                 <button
                   key={collection.name}
@@ -388,8 +464,18 @@ function DatabaseMetricConfigPageContent() {
                     <div className={styles.badgeRow}>
                       <span className={styles.metricBadge}>实例：{instance.name}</span>
                       <span className={styles.metricBadge}>引擎：{instance.type.toUpperCase()}</span>
+                      <span className={styles.metricBadge}>可导入备注：{commentImportableCount} 项</span>
                       {isDirty && <span className={styles.metricBadgePending}>存在未保存修改</span>}
                     </div>
+                    <div className={styles.panelActionRow}>
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        type="button"
+                        onClick={handleImportColumnComments}
+                        disabled={commentImportableCount === 0}
+                      >
+                        <Icons.Download size={14} /> 导入字段备注
+                      </button>
                     <button
                       className="btn btn-secondary btn-sm"
                       type="button"
@@ -398,18 +484,21 @@ function DatabaseMetricConfigPageContent() {
                     >
                       <Icons.X size={14} /> 清空该表配置
                     </button>
+                    </div>
                   </div>
                 </div>
                 <div className={styles.panelBody}>
                   <div className={styles.metricStudioHeader}>
                     <div>
                       <strong>字段语义补充</strong>
-                      <span>把字段技术属性翻译成业务指标语义，后续更适合下游 DB API、调试和分析配置复用。</span>
+                      <span>把字段技术属性翻译成业务指标语义，并决定哪些字段要进入 NL2DATA 的第一轮名词识别。</span>
                     </div>
                     <div className={styles.metricLegend}>
                       <span className={styles.metricLegendItem}>字段属性</span>
                       <span className={styles.metricLegendItem}>业务语义</span>
                       <span className={styles.metricLegendItem}>计算规则</span>
+                      <span className={styles.metricLegendItem}>NER 补充开关</span>
+                      <span className={styles.metricLegendItem}>备注可导入项 {commentImportableCount}</span>
                     </div>
                   </div>
                   <label className={styles.tableDescriptionField}>
@@ -428,6 +517,7 @@ function DatabaseMetricConfigPageContent() {
                 {selectedInfo.columns?.map((column) => {
                   const mapping = selectedMetricMappings[column.name] || {};
                   const isMapped = Object.keys(mapping).length > 0;
+                  const nerEnabled = mapping.enableForNer === true;
 
                   return (
                     <section key={column.name} className={`${styles.metricRow} ${isMapped ? styles.metricRowActive : ''}`}>
@@ -438,11 +528,13 @@ function DatabaseMetricConfigPageContent() {
                             <span className={styles.metricFieldType}>{column.type}</span>
                             {column.isPrimary && <span className={styles.metricFieldPrimary}>主键</span>}
                             {isMapped && <span className={styles.metricFieldMapped}>已配置</span>}
+                            {nerEnabled && <span className={styles.metricFieldNer}>NER</span>}
                           </div>
                           <div className={styles.metricFieldMeta}>
                             <span>{column.nullable ? '允许空值' : '必填字段'}</span>
                             <span>默认值：{column.defaultValue ?? '-'}</span>
                             <span>附加属性：{column.extra || '-'}</span>
+                            <span>字段备注：{column.comment?.trim() || '-'}</span>
                           </div>
                         </div>
                       </div>
@@ -486,6 +578,30 @@ function DatabaseMetricConfigPageContent() {
                             onChange={(event) => updateColumnMetricMapping(selectedInfo.name, column.name, 'calcMode', event.target.value)}
                             placeholder="例如：原值 / 求和 / 平均 / 去重计数"
                           />
+                        </label>
+
+                        <label className={styles.metricFormField}>
+                          <span className={styles.metricFieldLabelWithHint}>
+                            <span>名词识别</span>
+                            <span
+                              className={styles.metricFieldHint}
+                              aria-label="名词识别说明"
+                            >
+                              ?
+                              <span className={styles.metricFieldTooltip}>
+                                开启后，该字段会进入 NL2DATA 第一轮 NER 候选集，用于辅助识别用户问句中的业务名词。
+                              </span>
+                            </span>
+                          </span>
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={nerEnabled}
+                            className={`${styles.metricToggleButton} ${nerEnabled ? styles.metricToggleButtonActive : ''}`}
+                            onClick={() => updateColumnMetricMapping(selectedInfo.name, column.name, 'enableForNer', !nerEnabled)}
+                          >
+                            <span className={styles.metricToggleKnob} />
+                          </button>
                         </label>
                       </div>
                     </section>

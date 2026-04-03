@@ -115,8 +115,14 @@ function sanitizeMetricMapping(value: unknown): DatabaseFieldMetricMapping | nul
   const description = typeof input.description === 'string' ? input.description.trim() : '';
   const metricType = typeof input.metricType === 'string' ? input.metricType.trim() : '';
   const calcMode = typeof input.calcMode === 'string' ? input.calcMode.trim() : '';
+  const enableForNer = input.enableForNer === true;
+  const aliases = Array.isArray(input.aliases)
+    ? input.aliases
+      .map((item) => (typeof item === 'string' ? item.trim() : ''))
+      .filter((item, index, array) => item.length > 0 && array.indexOf(item) === index)
+    : [];
 
-  if (!metricName && !description && !metricType && !calcMode) {
+  if (!metricName && !description && !metricType && !calcMode && !enableForNer && aliases.length === 0) {
     return null;
   }
 
@@ -125,6 +131,8 @@ function sanitizeMetricMapping(value: unknown): DatabaseFieldMetricMapping | nul
     ...(description ? { description } : {}),
     ...(metricType ? { metricType } : {}),
     ...(calcMode ? { calcMode } : {}),
+    ...(enableForNer ? { enableForNer: true } : {}),
+    ...(aliases.length > 0 ? { aliases } : {}),
   };
 }
 

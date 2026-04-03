@@ -346,6 +346,7 @@ function validateSelectedModel(input: unknown): AIModelSelection | null {
   return {
     profileId: input.profileId.trim(),
     profileName: input.profileName.trim(),
+    modelType: input.modelType === 'embedding' ? 'embedding' : 'chat',
     baseUrl: input.baseUrl.trim(),
     modelId: input.modelId.trim(),
     authType,

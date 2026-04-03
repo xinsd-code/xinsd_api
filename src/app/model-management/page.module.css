@@ -59,6 +59,34 @@
   line-height: 1.5;
 }
 
+.typeTabs {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding: 6px;
+  background: rgba(241, 245, 249, 0.88);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+}
+
+.typeTabs button {
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 800;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.typeTabs button.active {
+  background: white;
+  color: var(--color-text);
+  box-shadow: var(--shadow-sm);
+}
+
 .profileList {
   flex: 1;
   overflow-y: auto;

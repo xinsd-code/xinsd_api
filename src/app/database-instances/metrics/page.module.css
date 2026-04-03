@@ -226,6 +226,13 @@
   gap: 10px;
 }
 
+.panelActionRow {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .panelTitle {
   display: flex;
   flex-direction: column;
@@ -367,7 +374,8 @@
 
 .metricFieldType,
 .metricFieldPrimary,
-.metricFieldMapped {
+.metricFieldMapped,
+.metricFieldNer {
   display: inline-flex;
   align-items: center;
   padding: 4px 9px;
@@ -392,6 +400,11 @@
   color: #047857;
 }
 
+.metricFieldNer {
+  background: color-mix(in srgb, var(--color-primary-accent) 10%, white);
+  color: color-mix(in srgb, var(--color-primary-accent) 70%, var(--color-text));
+}
+
 .metricFieldMeta {
   display: flex;
   flex-wrap: wrap;
@@ -410,7 +423,12 @@
 
 .metricRowFields {
   display: grid;
-  grid-template-columns: minmax(180px, 1.1fr) minmax(220px, 1.5fr) minmax(140px, 0.8fr) minmax(160px, 0.9fr);
+  grid-template-columns:
+    minmax(180px, 1.1fr)
+    minmax(220px, 1.5fr)
+    minmax(140px, 0.8fr)
+    minmax(160px, 0.9fr)
+    minmax(104px, 0.46fr);
   gap: 12px;
   align-items: start;
 }
@@ -419,6 +437,7 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
+  min-width: 0;
 }
 
 .metricFormField span {
@@ -452,6 +471,163 @@
 .metricInput {
   min-height: 38px;
   font-size: 12px;
+}
+
+.metricFieldLabelWithHint {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.metricFieldHint {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--color-primary-accent) 18%, var(--color-border));
+  background: color-mix(in srgb, var(--color-primary-accent) 5%, white);
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  cursor: help;
+  flex: 0 0 auto;
+}
+
+.metricFieldHint:hover {
+  border-color: color-mix(in srgb, var(--color-primary-accent) 28%, var(--color-border));
+  color: color-mix(in srgb, var(--color-primary-accent) 72%, var(--color-text));
+}
+
+.metricFieldTooltip {
+  position: absolute;
+  right: calc(100% + 10px);
+  bottom: calc(100% + 10px);
+  transform: translateX(-6px) translateY(4px);
+  min-width: 200px;
+  max-width: min(280px, calc(100vw - 48px));
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.96);
+  color: rgba(255, 255, 255, 0.94);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.6;
+  letter-spacing: normal;
+  text-transform: none;
+  box-shadow: 0 14px 32px rgba(15, 23, 42, 0.22);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--transition-fast), transform var(--transition-fast);
+  z-index: 20;
+}
+
+.metricFieldTooltip::after {
+  content: '';
+  position: absolute;
+  right: 12px;
+  top: calc(100% - 6px);
+  width: 10px;
+  height: 10px;
+  background: rgba(15, 23, 42, 0.96);
+  transform: rotate(45deg);
+}
+
+.metricFieldHint:hover .metricFieldTooltip,
+.metricFieldHint:focus-visible .metricFieldTooltip {
+  opacity: 1;
+  transform: translateX(0) translateY(0);
+}
+
+.metricToggleField {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  min-width: 0;
+  border-radius: 16px;
+  border: 1px solid color-mix(in srgb, var(--color-primary-accent) 12%, var(--color-border));
+  background:
+    radial-gradient(circle at top left, color-mix(in srgb, var(--color-primary-accent) 7%, transparent), transparent 46%),
+    #fbfbfd;
+}
+
+.metricToggleHeader {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.metricToggleHeader span:first-child {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.metricToggleHint {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+}
+
+.metricToggleButton {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  min-height: 38px;
+  width: fit-content;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  transition: transform var(--transition-fast), opacity var(--transition-fast);
+}
+
+.metricToggleButton:hover {
+  transform: translateY(-1px);
+  opacity: 0.92;
+}
+
+.metricToggleButtonActive {
+}
+
+.metricToggleKnob {
+  position: relative;
+  width: 38px;
+  height: 22px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: color-mix(in srgb, #cbd5e1 82%, white);
+  box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.18);
+  transition: background var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.metricToggleKnob::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.98));
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.14);
+  transition: transform var(--transition-fast);
+}
+
+.metricToggleButtonActive .metricToggleKnob {
+  background: color-mix(in srgb, var(--color-primary-accent) 62%, white);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-primary-accent) 24%, white);
+}
+
+.metricToggleButtonActive .metricToggleKnob::after {
+  transform: translateX(16px);
 }
 
 .metricSelect {
@@ -503,6 +679,22 @@
 
   .sidebar {
     max-height: none;
+  }
+}
+
+@media (max-width: 1560px) {
+  .metricRowFields {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1180px) {
+  .metricRow {
+    grid-template-columns: 1fr;
+  }
+
+  .metricRowFields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

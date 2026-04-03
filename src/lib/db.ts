@@ -152,6 +152,7 @@ function initializeDb(database: Database.Database) {
     CREATE TABLE IF NOT EXISTS ai_model_profiles (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
+      model_type TEXT NOT NULL DEFAULT 'chat',
       base_url TEXT NOT NULL,
       auth_type TEXT NOT NULL DEFAULT 'bearer',
       auth_token TEXT DEFAULT '',
@@ -220,6 +221,14 @@ function initializeDb(database: Database.Database) {
   } catch (err) {
     if (err instanceof Error && !err.message.includes('duplicate column name')) {
       console.error('Migration error api_forwards:', err);
+    }
+  }
+
+  try {
+    database.exec(`ALTER TABLE ai_model_profiles ADD COLUMN model_type TEXT NOT NULL DEFAULT 'chat';`);
+  } catch (err) {
+    if (err instanceof Error && !err.message.includes('duplicate column name')) {
+      console.error('Migration error ai_model_profiles model_type:', err);
     }
   }
 
@@ -804,6 +813,7 @@ function rowToAIModelProfile(row: Record<string, unknown>): AIModelProfile {
   return {
     id: row.id as string,
     name: row.name as string,
+    modelType: row.model_type === 'embedding' ? 'embedding' : 'chat',
     baseUrl: row.base_url as string,
     authType: row.auth_type as AIModelProfile['authType'],
     authToken: (row.auth_token as string) || '',
@@ -821,7 +831,7 @@ export function getAllAIModelProfiles(): AIModelProfile[] {
   const rows = db.prepare(`
     SELECT *
     FROM ai_model_profiles
-    ORDER BY is_default DESC, updated_at DESC, created_at DESC
+    ORDER BY model_type ASC, is_default DESC, updated_at DESC, created_at DESC
   `).all();
 
   return rows.map((row) => rowToAIModelProfile(row as Record<string, unknown>));
@@ -830,22 +840,26 @@ export function getAllAIModelProfiles(): AIModelProfile[] {
 export function getAllAIModelProfilesSummary(): AIModelProfileSummary[] {
   const db = getDb();
   const rows = db.prepare(`
-    SELECT id, name, base_url, auth_type, model_ids, default_model_id, is_default, created_at, updated_at
+    SELECT id, name, model_type, base_url, auth_type, model_ids, default_model_id, is_default, created_at, updated_at
     FROM ai_model_profiles
-    ORDER BY is_default DESC, updated_at DESC, created_at DESC
+    ORDER BY model_type ASC, is_default DESC, updated_at DESC, created_at DESC
   `).all();
 
-  return rows.map((row: any) => ({
-    id: row.id,
-    name: row.name,
-    baseUrl: row.base_url,
-    authType: row.auth_type,
-    modelIds: JSON.parse((row.model_ids as string) || '[]'),
-    defaultModelId: (row.default_model_id as string) || '',
-    isDefault: (row.is_default as number) === 1,
-    createdAt: row.created_at as string,
-    updatedAt: row.updated_at as string,
-  }));
+  return rows.map((row) => {
+    const item = row as Record<string, unknown>;
+    return {
+      id: item.id as string,
+      name: item.name as string,
+      modelType: item.model_type === 'embedding' ? 'embedding' : 'chat',
+      baseUrl: item.base_url as string,
+      authType: item.auth_type as AIModelProfile['authType'],
+      modelIds: JSON.parse((item.model_ids as string) || '[]'),
+      defaultModelId: (item.default_model_id as string) || '',
+      isDefault: (item.is_default as number) === 1,
+      createdAt: item.created_at as string,
+      updatedAt: item.updated_at as string,
+    };
+  });
 }
 
 export function getAIModelProfileById(id: string): AIModelProfile | null {
@@ -862,18 +876,19 @@ export function createAIModelProfile(input: CreateAIModelProfile): AIModelProfil
 
   const tx = db.transaction(() => {
     if (data.isDefault) {
-      db.prepare('UPDATE ai_model_profiles SET is_default = 0').run();
+      db.prepare('UPDATE ai_model_profiles SET is_default = 0 WHERE model_type = ?').run(data.modelType);
     }
 
     db.prepare(`
       INSERT INTO ai_model_profiles (
-        id, name, base_url, auth_type, auth_token, auth_header_name,
+        id, name, model_type, base_url, auth_type, auth_token, auth_header_name,
         model_ids, default_model_id, is_default, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       data.name,
+      data.modelType,
       data.baseUrl,
       data.authType,
       data.authToken || '',
@@ -908,13 +923,14 @@ export function updateAIModelProfile(id: string, input: UpdateAIModelProfile): A
 
   const tx = db.transaction(() => {
     if (data.isDefault) {
-      db.prepare('UPDATE ai_model_profiles SET is_default = 0 WHERE id != ?').run(id);
+      db.prepare('UPDATE ai_model_profiles SET is_default = 0 WHERE id != ? AND model_type = ?').run(id, data.modelType);
     }
 
     db.prepare(`
       UPDATE ai_model_profiles
       SET
         name = ?,
+        model_type = ?,
         base_url = ?,
         auth_type = ?,
         auth_token = ?,
@@ -926,6 +942,7 @@ export function updateAIModelProfile(id: string, input: UpdateAIModelProfile): A
       WHERE id = ?
     `).run(
       data.name,
+      data.modelType,
       data.baseUrl,
       data.authType,
       data.authToken || '',
