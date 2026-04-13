@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Icons } from '@/components/Icons';
 import UnsavedChangesDialog from '@/components/UnsavedChangesDialog';
 import { flattenAIModelSelections, getAIModelSelectionKey, getDefaultAIModelSelection } from '@/lib/ai-models';
-import { sanitizeDatabaseMetricMappings } from '@/lib/database-instances';
+import { getEffectiveDatabaseMetricMappings } from '@/lib/database-instances';
 import { readDbApiDraft, writeDbApiDraft } from '@/lib/db-api-draft';
 import { useUnsavedChangesGuard } from '@/hooks/use-unsaved-changes-guard';
 import { extractSqlVariables } from '@/lib/sql-template';
@@ -38,6 +38,7 @@ type DatabaseMetricViewMap = Record<string, DatabaseTableMetricView>;
 
 interface DatabaseInstanceMetricPayload {
   metricMappings?: unknown;
+  semanticModel?: unknown;
 }
 
 interface AiChatMessage {
@@ -1036,7 +1037,10 @@ export default function DbApiEditorPage() {
           const instanceDetail = instancePayload as DatabaseInstanceSummary & DatabaseInstanceMetricPayload;
           setDatabaseInstanceName(instanceDetail.name || '');
           setMetricMappings(
-            sanitizeDatabaseMetricMappings(instanceDetail.metricMappings || {}) as DatabaseMetricViewMap
+            getEffectiveDatabaseMetricMappings({
+              metricMappings: instanceDetail.metricMappings,
+              semanticModel: instanceDetail.semanticModel,
+            }) as DatabaseMetricViewMap
           );
         } else {
           setDatabaseInstanceName('');
@@ -1118,7 +1122,7 @@ export default function DbApiEditorPage() {
       {
         id: assistantMessageId,
         role: 'assistant',
-        content: '正在读取当前表结构、指标配置和 SQL 草稿，并生成可直接回填的 SQL...',
+        content: '正在读取当前表结构、语义配置和 SQL 草稿，并生成可直接回填的 SQL...',
       },
     ]);
     setChatInput('');

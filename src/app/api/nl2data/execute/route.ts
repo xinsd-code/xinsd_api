@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { executeNl2DataSql, getNl2DataErrorMessage } from '@/lib/nl2data/harness';
+import { executeNl2DataSql, getNl2DataErrorMessage } from '@/lib/nl2data/executor';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';

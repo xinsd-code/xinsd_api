@@ -547,6 +547,49 @@
   border-radius: var(--radius-lg);
 }
 
+.structureFilterBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in oklab, var(--color-primary-accent) 10%, var(--color-border));
+  border-radius: var(--radius-lg);
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.92), rgba(255, 255, 255, 0.96));
+}
+
+.structureFilterGroup {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-secondary);
+}
+
+.structureFilterGroup select {
+  min-width: 132px;
+}
+
+.structureToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.structureToggle input {
+  margin: 0;
+}
+
+.structureFilterMeta {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
 .metricIntro {
   border: 1px solid color-mix(in oklab, var(--color-primary-accent) 10%, var(--color-border));
   border-radius: var(--radius-lg);
@@ -824,6 +867,26 @@
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--color-text);
+}
+
+.cellStack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 160px;
+}
+
+.cellLine {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+  word-break: break-word;
+}
+
+.cellMuted {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-muted);
 }
 
 .metricInput {

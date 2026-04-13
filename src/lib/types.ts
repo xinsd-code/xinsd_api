@@ -181,6 +181,43 @@ export interface AIModelSelection {
 
 export type DatabaseInstanceType = 'mysql' | 'pgsql' | 'redis';
 
+export type DatabaseSemanticRole = 'metric' | 'dimension' | 'time' | 'identifier' | 'attribute';
+export type DatabaseSemanticFieldSource = 'mapping' | 'schema' | 'manual';
+
+export interface DatabaseSemanticModelField {
+  table: string;
+  column: string;
+  metricName: string;
+  description?: string;
+  metricType?: string;
+  calcMode?: string;
+  enableForNer: boolean;
+  aliases: string[];
+  semanticRole: DatabaseSemanticRole;
+  derivedFrom: DatabaseSemanticFieldSource;
+}
+
+export interface DatabaseSemanticModelEntity {
+  table: string;
+  description?: string;
+  metrics: string[];
+  dimensions: string[];
+  timeFields: string[];
+  identifierFields: string[];
+  nerEnabledFields: string[];
+  fields: DatabaseSemanticModelField[];
+}
+
+export interface DatabaseSemanticModel {
+  entityCount: number;
+  configuredFieldCount: number;
+  inferredFieldCount: number;
+  glossary: string[];
+  entities: DatabaseSemanticModelEntity[];
+  source?: 'generated' | 'manual';
+  updatedAt?: string;
+}
+
 export interface DatabaseInstance {
   id: string;
   name: string;
@@ -189,6 +226,7 @@ export interface DatabaseInstance {
   username?: string;
   password?: string;
   metricMappings?: DatabaseMetricMappings;
+  semanticModel?: DatabaseSemanticModel;
   createdAt: string;
   updatedAt: string;
 }
@@ -210,6 +248,8 @@ export interface DatabaseCollectionInfo {
     isPrimary?: boolean;
     extra?: string;
     comment?: string;
+    referencesTable?: string;
+    referencesColumn?: string;
   }>;
 }
 

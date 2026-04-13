@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
-import { getDatabaseInstanceById, updateDatabaseInstanceMetricMappings } from '@/lib/db';
+import { getDatabaseInstanceById, updateDatabaseInstance } from '@/lib/db';
 import { sanitizeDatabaseMetricMappings } from '@/lib/database-instances';
+import { getDatabaseSchema } from '@/lib/database-instances-server';
+import { deriveSemanticSnapshot } from '@/lib/db-harness/tools/catalog-tools';
 
 export const dynamic = 'force-dynamic';
 
@@ -21,7 +23,13 @@ export async function PUT(
 
     const body = await request.json();
     const metricMappings = sanitizeDatabaseMetricMappings(body?.metricMappings);
-    const updated = updateDatabaseInstanceMetricMappings(id, metricMappings);
+    const schema = await getDatabaseSchema(existing);
+    const semanticModel = {
+      ...deriveSemanticSnapshot(schema, metricMappings),
+      source: 'generated' as const,
+      updatedAt: new Date().toISOString(),
+    };
+    const updated = updateDatabaseInstance(id, { metricMappings, semanticModel });
     return NextResponse.json(updated);
   } catch (error) {
     console.error('Failed to update database metric mappings:', error);

@@ -4,18 +4,29 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import UnsavedChangesDialog from '@/components/UnsavedChangesDialog';
-import { sanitizeDatabaseMetricMappings } from '@/lib/database-instances';
+import { getEffectiveDatabaseMetricMappings, sanitizeDatabaseSemanticModel } from '@/lib/database-instances';
 import { useUnsavedChangesGuard } from '@/hooks/use-unsaved-changes-guard';
+import { isDateLikeType, isNumericType, isTextLikeType } from '@/lib/db-harness/core/utils';
 import {
   DatabaseCollectionInfo,
   DatabaseFieldMetricMapping,
   DatabaseInstance,
-  DatabaseMetricMappings,
+  DatabaseSemanticModel,
+  DatabaseSemanticModelEntity,
+  DatabaseSemanticModelField,
+  DatabaseSemanticRole,
   DatabaseSchemaPayload,
-  DatabaseTableMetricMapping,
 } from '@/lib/types';
 import { Icons } from '@/components/Icons';
 import styles from './page.module.css';
+
+const SEMANTIC_ROLE_OPTIONS: Array<{ value: DatabaseSemanticRole; label: string }> = [
+  { value: 'metric', label: '度量 / Metric' },
+  { value: 'dimension', label: '维度 / Dimension' },
+  { value: 'time', label: '时间 / Time' },
+  { value: 'identifier', label: '标识 / Identifier' },
+  { value: 'attribute', label: '属性 / Attribute' },
+];
 
 function getApiErrorMessage(data: unknown, fallback: string): string {
   if (data && typeof data === 'object' && 'error' in data && typeof data.error === 'string' && data.error.trim()) {
@@ -38,7 +49,98 @@ async function readApiJson<T>(response: Response, fallback: string): Promise<T> 
   }
 }
 
-function DatabaseMetricConfigPageContent() {
+function buildEmptySemanticModel(): DatabaseSemanticModel {
+  return {
+    entityCount: 0,
+    configuredFieldCount: 0,
+    inferredFieldCount: 0,
+    glossary: [],
+    entities: [],
+    source: 'generated',
+  };
+}
+
+function isConfiguredSemanticField(field: DatabaseSemanticModelField | undefined): boolean {
+  if (!field) return false;
+  return field.derivedFrom !== 'schema'
+    || field.enableForNer
+    || field.aliases.length > 0
+    || Boolean(field.description)
+    || Boolean(field.metricType)
+    || Boolean(field.calcMode);
+}
+
+function inferSemanticRole(
+  column: NonNullable<DatabaseCollectionInfo['columns']>[number],
+  mapping: DatabaseFieldMetricMapping | undefined
+): DatabaseSemanticRole {
+  const metricType = (mapping?.metricType || '').toLowerCase();
+  const calcMode = (mapping?.calcMode || '').toLowerCase();
+  const name = column.name.toLowerCase();
+
+  if (metricType.includes('时间') || metricType.includes('time') || isDateLikeType(column.type)) {
+    return 'time';
+  }
+  if (
+    column.isPrimary
+    || metricType.includes('标识')
+    || metricType.includes('id')
+    || /(^id$|_id$|uuid|code$)/i.test(name)
+  ) {
+    return 'identifier';
+  }
+  if (
+    metricType.includes('度量')
+    || metricType.includes('指标')
+    || metricType.includes('metric')
+    || calcMode.includes('求和')
+    || calcMode.includes('平均')
+    || calcMode.includes('计数')
+    || calcMode.includes('count')
+    || isNumericType(column.type)
+  ) {
+    return 'metric';
+  }
+  if (metricType.includes('维度') || metricType.includes('dimension') || isTextLikeType(column.type)) {
+    return 'dimension';
+  }
+  return 'attribute';
+}
+
+function rebuildSemanticEntity(entity: DatabaseSemanticModelEntity): DatabaseSemanticModelEntity {
+  const dedupe = (values: string[], limit: number) => values
+    .filter((item, index, array) => item && array.indexOf(item) === index)
+    .slice(0, limit);
+
+  return {
+    ...entity,
+    metrics: dedupe(entity.fields.filter((field) => field.semanticRole === 'metric').map((field) => field.metricName), 12),
+    dimensions: dedupe(entity.fields.filter((field) => field.semanticRole === 'dimension').map((field) => field.metricName), 12),
+    timeFields: dedupe(entity.fields.filter((field) => field.semanticRole === 'time').map((field) => field.metricName), 8),
+    identifierFields: dedupe(entity.fields.filter((field) => field.semanticRole === 'identifier').map((field) => field.metricName), 8),
+    nerEnabledFields: dedupe(entity.fields.filter((field) => field.enableForNer).map((field) => field.metricName), 16),
+  };
+}
+
+function rebuildSemanticModel(model: DatabaseSemanticModel): DatabaseSemanticModel {
+  const entities = model.entities.map((entity) => rebuildSemanticEntity(entity));
+  const fields = entities.flatMap((entity) => entity.fields);
+  const glossary = [...(model.glossary || []), ...fields.flatMap((field) => [field.metricName, ...(field.aliases || [])])]
+    .map((item) => item.trim())
+    .filter((item, index, array) => item && array.indexOf(item) === index)
+    .slice(0, 160);
+
+  return {
+    ...model,
+    entityCount: entities.length,
+    configuredFieldCount: fields.filter((field) => isConfiguredSemanticField(field)).length,
+    inferredFieldCount: fields.filter((field) => !isConfiguredSemanticField(field)).length,
+    glossary,
+    entities,
+  };
+}
+
+function DatabaseSemanticConfigPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const instanceId = searchParams.get('instanceId');
@@ -47,10 +149,11 @@ function DatabaseMetricConfigPageContent() {
   const [instance, setInstance] = useState<DatabaseInstance | null>(null);
   const [schema, setSchema] = useState<DatabaseSchemaPayload | null>(null);
   const [selectedCollection, setSelectedCollection] = useState<string | null>(initialCollection);
-  const [metricMappings, setMetricMappings] = useState<DatabaseMetricMappings>({});
-  const [baseline, setBaseline] = useState('{}');
+  const [semanticModel, setSemanticModel] = useState<DatabaseSemanticModel>(buildEmptySemanticModel());
+  const [semanticBaseline, setSemanticBaseline] = useState('{}');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [refreshingSemantic, setRefreshingSemantic] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
   const tableCollections = useMemo(
@@ -61,50 +164,167 @@ function DatabaseMetricConfigPageContent() {
     () => tableCollections.find((item) => item.name === selectedCollection) || null,
     [selectedCollection, tableCollections]
   );
-  const sanitizedMappings = useMemo(
-    () => sanitizeDatabaseMetricMappings(metricMappings),
-    [metricMappings]
+  const seedMetricMappings = useMemo(
+    () => getEffectiveDatabaseMetricMappings({
+      metricMappings: instance?.metricMappings,
+      semanticModel: instance?.semanticModel,
+    }),
+    [instance]
   );
-  const selectedTableMapping = useMemo<DatabaseTableMetricMapping | null>(
-    () => (selectedCollection ? sanitizedMappings[selectedCollection] || null : null),
-    [sanitizedMappings, selectedCollection]
+  const sanitizedSemanticModel = useMemo(
+    () => sanitizeDatabaseSemanticModel(semanticModel) || buildEmptySemanticModel(),
+    [semanticModel]
   );
-  const selectedMetricMappings = useMemo(
-    () => selectedTableMapping?.fields || {},
-    [selectedTableMapping]
+  const selectedSemanticEntity = useMemo<DatabaseSemanticModelEntity | null>(
+    () => (selectedCollection ? sanitizedSemanticModel.entities.find((entity) => entity.table === selectedCollection) || null : null),
+    [sanitizedSemanticModel.entities, selectedCollection]
   );
-  const selectedTableDescription = selectedTableMapping?.description || '';
-  const metricSignature = useMemo(() => JSON.stringify(sanitizedMappings), [sanitizedMappings]);
-  const isDirty = metricSignature !== baseline;
-  const selectedMetricCount = useMemo(
-    () => Object.keys(selectedMetricMappings).length,
-    [selectedMetricMappings]
-  );
-  const hasSelectedTableConfig = Boolean(selectedTableDescription || selectedMetricCount > 0);
-  const commentImportableCount = useMemo(
-    () => (selectedInfo?.columns || []).filter((column) => {
-      const comment = column.comment?.trim();
-      if (!comment) return false;
-      const mapping = selectedMetricMappings[column.name] || {};
-      return !mapping.metricName || !mapping.description;
-    }).length,
-    [selectedInfo, selectedMetricMappings]
-  );
-  const totalMetricCount = useMemo(
-    () => Object.values(sanitizedMappings).reduce((sum, mapping) => sum + Object.keys(mapping.fields || {}).length, 0),
-    [sanitizedMappings]
-  );
-  const totalNerEnabledCount = useMemo(
-    () => Object.values(sanitizedMappings).reduce(
-      (sum, mapping) => sum + Object.values(mapping.fields || {}).filter((field) => field.enableForNer).length,
-      0
-    ),
-    [sanitizedMappings]
-  );
+  const semanticSignature = useMemo(() => JSON.stringify(sanitizedSemanticModel), [sanitizedSemanticModel]);
+  const isDirty = semanticSignature !== semanticBaseline;
 
   const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
     setToast({ message, type });
   }, []);
+
+  const buildDefaultSemanticEntity = useCallback((tableName: string, baseEntity?: DatabaseSemanticModelEntity | null) => {
+    const collection = tableCollections.find((item) => item.name === tableName);
+    const fieldMap = new Map((baseEntity?.fields || []).map((field) => [field.column, field]));
+    const tableMetricMapping = seedMetricMappings[tableName];
+
+    const fields = (collection?.columns || []).map((column) => {
+      const existing = fieldMap.get(column.name);
+      if (existing) {
+        return { ...existing, aliases: [...(existing.aliases || [])] };
+      }
+
+      const mapping = tableMetricMapping?.fields?.[column.name];
+      return {
+        table: tableName,
+        column: column.name,
+        metricName: mapping?.metricName || column.comment?.trim() || column.name,
+        description: mapping?.description || column.comment?.trim() || '',
+        metricType: mapping?.metricType,
+        calcMode: mapping?.calcMode,
+        enableForNer: mapping?.enableForNer === true,
+        aliases: [...(mapping?.aliases || [])],
+        semanticRole: inferSemanticRole(column, mapping),
+        derivedFrom: mapping ? 'mapping' : 'schema',
+      } satisfies DatabaseSemanticModelField;
+    });
+
+    return rebuildSemanticEntity({
+      table: tableName,
+      description: baseEntity?.description || tableMetricMapping?.description || '',
+      metrics: [],
+      dimensions: [],
+      timeFields: [],
+      identifierFields: [],
+      nerEnabledFields: [],
+      fields,
+    });
+  }, [seedMetricMappings, tableCollections]);
+
+  const selectedSemanticDraftEntity = useMemo(
+    () => (selectedInfo ? buildDefaultSemanticEntity(selectedInfo.name, selectedSemanticEntity) : null),
+    [buildDefaultSemanticEntity, selectedInfo, selectedSemanticEntity]
+  );
+  const selectedSemanticFieldMap = useMemo<Record<string, DatabaseSemanticModelField>>(
+    () => Object.fromEntries((selectedSemanticDraftEntity?.fields || []).map((field) => [field.column, field])),
+    [selectedSemanticDraftEntity]
+  );
+  const selectedSemanticConfiguredCount = useMemo(
+    () => (selectedInfo?.columns || []).filter((column) => isConfiguredSemanticField(selectedSemanticFieldMap[column.name])).length,
+    [selectedInfo, selectedSemanticFieldMap]
+  );
+  const totalConfiguredCount = sanitizedSemanticModel.configuredFieldCount;
+
+  const mutateSemanticModel = useCallback((updater: (current: DatabaseSemanticModel) => DatabaseSemanticModel) => {
+    setSemanticModel((prev) => rebuildSemanticModel(updater(sanitizeDatabaseSemanticModel(prev) || buildEmptySemanticModel())));
+  }, []);
+
+  const updateSemanticTableDescription = useCallback((tableName: string, value: string) => {
+    mutateSemanticModel((current) => {
+      const entities = [...current.entities];
+      const index = entities.findIndex((entity) => entity.table === tableName);
+      const nextEntity = buildDefaultSemanticEntity(tableName, index >= 0 ? entities[index] : null);
+      nextEntity.description = value.trim();
+      if (index >= 0) {
+        entities[index] = rebuildSemanticEntity(nextEntity);
+      } else {
+        entities.push(rebuildSemanticEntity(nextEntity));
+      }
+      return { ...current, entities };
+    });
+  }, [buildDefaultSemanticEntity, mutateSemanticModel]);
+
+  const updateSemanticField = useCallback((
+    tableName: string,
+    columnName: string,
+    key: keyof DatabaseSemanticModelField,
+    value: string | boolean | string[]
+  ) => {
+    mutateSemanticModel((current) => {
+      const entities = [...current.entities];
+      const index = entities.findIndex((entity) => entity.table === tableName);
+      const nextEntity = buildDefaultSemanticEntity(tableName, index >= 0 ? entities[index] : null);
+
+      nextEntity.fields = nextEntity.fields.map((field) => {
+        if (field.column !== columnName) return field;
+
+        const nextField: DatabaseSemanticModelField = {
+          ...field,
+          aliases: [...(field.aliases || [])],
+          derivedFrom: 'manual',
+        };
+
+        if (key === 'enableForNer' && typeof value === 'boolean') {
+          nextField.enableForNer = value;
+          return nextField;
+        }
+
+        if (key === 'aliases' && Array.isArray(value)) {
+          nextField.aliases = value;
+          return nextField;
+        }
+
+        if (key === 'semanticRole' && typeof value === 'string') {
+          nextField.semanticRole = value as DatabaseSemanticRole;
+          return nextField;
+        }
+
+        if (typeof value === 'string') {
+          if (key === 'metricName') {
+            nextField.metricName = value.trim() || field.metricName || columnName;
+          } else if (key === 'description') {
+            nextField.description = value.trim();
+          } else if (key === 'metricType') {
+            nextField.metricType = value.trim();
+          } else if (key === 'calcMode') {
+            nextField.calcMode = value.trim();
+          }
+        }
+
+        return nextField;
+      });
+
+      if (index >= 0) {
+        entities[index] = rebuildSemanticEntity(nextEntity);
+      } else {
+        entities.push(rebuildSemanticEntity(nextEntity));
+      }
+
+      return { ...current, entities };
+    });
+  }, [buildDefaultSemanticEntity, mutateSemanticModel]);
+
+  const handleResetSelectedSemanticTable = useCallback(() => {
+    if (!selectedCollection) return;
+    mutateSemanticModel((current) => {
+      const entities = current.entities.filter((entity) => entity.table !== selectedCollection);
+      entities.push(buildDefaultSemanticEntity(selectedCollection, null));
+      return { ...current, entities };
+    });
+  }, [buildDefaultSemanticEntity, mutateSemanticModel, selectedCollection]);
 
   useEffect(() => {
     if (!toast) return;
@@ -123,9 +343,10 @@ function DatabaseMetricConfigPageContent() {
     void (async () => {
       setLoading(true);
       try {
-        const [instanceResponse, schemaResponse] = await Promise.all([
+        const [instanceResponse, schemaResponse, semanticResponse] = await Promise.all([
           fetch(`/api/database-instances/${instanceId}`),
           fetch(`/api/database-instances/${instanceId}/schema`),
+          fetch(`/api/database-instances/${instanceId}/semantic-model`),
         ]);
 
         const instancePayload = await readApiJson<DatabaseInstance & { error?: string }>(instanceResponse, '读取数据库实例失败');
@@ -138,11 +359,16 @@ function DatabaseMetricConfigPageContent() {
           throw new Error(getApiErrorMessage(schemaPayload, '读取数据库结构失败'));
         }
 
+        const semanticPayload = await readApiJson<DatabaseSemanticModel & { error?: string }>(semanticResponse, '读取语义模型失败');
+        if (!semanticResponse.ok) {
+          throw new Error(getApiErrorMessage(semanticPayload, '读取语义模型失败'));
+        }
+
         if (cancelled) return;
 
         const nextInstance = instancePayload as DatabaseInstance;
-        const nextMappings = sanitizeDatabaseMetricMappings(nextInstance.metricMappings || {});
         const nextSchema = schemaPayload as DatabaseSchemaPayload;
+        const nextSemanticModel = sanitizeDatabaseSemanticModel(semanticPayload as DatabaseSemanticModel) || buildEmptySemanticModel();
         const nextTables = nextSchema.collections.filter((item) => item.category === 'table');
         const nextSelectedCollection =
           (initialCollection && nextTables.some((item) => item.name === initialCollection) ? initialCollection : null)
@@ -151,14 +377,16 @@ function DatabaseMetricConfigPageContent() {
 
         setInstance(nextInstance);
         setSchema(nextSchema);
-        setMetricMappings(nextMappings);
-        setBaseline(JSON.stringify(nextMappings));
+        setSemanticModel(nextSemanticModel);
+        setSemanticBaseline(JSON.stringify(nextSemanticModel));
         setSelectedCollection(nextSelectedCollection);
       } catch (error) {
         if (!cancelled) {
-          showToast(error instanceof Error ? error.message : '读取指标配置失败', 'error');
+          showToast(error instanceof Error ? error.message : '读取配置失败', 'error');
           setInstance(null);
           setSchema(null);
+          setSemanticModel(buildEmptySemanticModel());
+          setSemanticBaseline('{}');
         }
       } finally {
         if (!cancelled) {
@@ -172,115 +400,49 @@ function DatabaseMetricConfigPageContent() {
     };
   }, [initialCollection, instanceId, showToast]);
 
-  const updateColumnMetricMapping = useCallback((
-    tableName: string,
-    columnName: string,
-    key: keyof DatabaseFieldMetricMapping,
-    value: string | boolean | string[]
-  ) => {
-    setMetricMappings((prev) => {
-      const next = { ...prev };
-      const tableMapping: DatabaseTableMetricMapping = {
-        ...(next[tableName] || { fields: {} }),
-        fields: { ...(next[tableName]?.fields || {}) },
-      };
-      const fieldMapping = { ...(tableMapping.fields[columnName] || {}) } as Record<string, unknown>;
-
-      if (typeof value === 'boolean') {
-        if (value) {
-          fieldMapping[key] = true;
-        } else {
-          delete fieldMapping[key];
-        }
-      } else if (Array.isArray(value)) {
-        if (value.length > 0) {
-          fieldMapping[key] = value;
-        } else {
-          delete fieldMapping[key];
-        }
-      } else if (value) {
-        fieldMapping[key] = value;
-      } else {
-        delete fieldMapping[key];
-      }
-
-      if (Object.keys(fieldMapping).length > 0) {
-        tableMapping.fields[columnName] = fieldMapping as DatabaseFieldMetricMapping;
-      } else {
-        delete tableMapping.fields[columnName];
-      }
-
-      if (tableMapping.description || Object.keys(tableMapping.fields).length > 0) {
-        next[tableName] = tableMapping;
-      } else {
-        delete next[tableName];
-      }
-
-      return next;
-    });
-  }, []);
-
-  const handleTableDescriptionChange = useCallback((tableName: string, value: string) => {
-    setMetricMappings((prev) => {
-      const next = { ...prev };
-      const tableMapping: DatabaseTableMetricMapping = {
-        ...(next[tableName] || { fields: {} }),
-        fields: { ...(next[tableName]?.fields || {}) },
-      };
-      const nextDescription = value.trim();
-
-      if (nextDescription) {
-        tableMapping.description = nextDescription;
-      } else {
-        delete tableMapping.description;
-      }
-
-      if (tableMapping.description || Object.keys(tableMapping.fields).length > 0) {
-        next[tableName] = tableMapping;
-      } else {
-        delete next[tableName];
-      }
-
-      return next;
-    });
-  }, []);
+  const updateRouteParams = useCallback((collection: string | null) => {
+    const nextParams = new URLSearchParams(searchParams.toString());
+    if (collection === null) {
+      nextParams.delete('collection');
+    } else {
+      nextParams.set('collection', collection);
+    }
+    router.replace(`/database-instances/metrics?${nextParams.toString()}`);
+  }, [router, searchParams]);
 
   const handleSelectCollection = useCallback((collectionName: string) => {
     setSelectedCollection(collectionName);
-    const nextParams = new URLSearchParams(searchParams.toString());
-    nextParams.set('collection', collectionName);
-    router.replace(`/database-instances/metrics?${nextParams.toString()}`);
-  }, [router, searchParams]);
+    updateRouteParams(collectionName);
+  }, [updateRouteParams]);
 
   const saveCurrent = useCallback(async (): Promise<boolean> => {
     if (!instanceId || !instance || instance.type === 'redis') return false;
 
     setSaving(true);
     try {
-      const response = await fetch(`/api/database-instances/${instanceId}/metric-mappings`, {
+      const semanticResponse = await fetch(`/api/database-instances/${instanceId}/semantic-model`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ metricMappings: sanitizedMappings }),
+        body: JSON.stringify({ semanticModel: sanitizedSemanticModel }),
       });
-      const payload = await readApiJson<DatabaseInstance & { error?: string }>(response, '保存指标映射失败');
-      if (!response.ok) {
-        throw new Error(getApiErrorMessage(payload, '保存指标映射失败'));
+      const semanticPayload = await readApiJson<DatabaseSemanticModel & { error?: string }>(semanticResponse, '保存语义模型失败');
+      if (!semanticResponse.ok) {
+        throw new Error(getApiErrorMessage(semanticPayload, '保存语义模型失败'));
       }
 
-      const nextInstance = payload as DatabaseInstance;
-      const nextMappings = sanitizeDatabaseMetricMappings(nextInstance.metricMappings || {});
-      setInstance(nextInstance);
-      setMetricMappings(nextMappings);
-      setBaseline(JSON.stringify(nextMappings));
-      showToast('指标映射已保存');
+      const nextSemanticModel = sanitizeDatabaseSemanticModel(semanticPayload as DatabaseSemanticModel) || buildEmptySemanticModel();
+      setInstance((prev) => (prev ? { ...prev, semanticModel: nextSemanticModel } : prev));
+      setSemanticModel(nextSemanticModel);
+      setSemanticBaseline(JSON.stringify(nextSemanticModel));
+      showToast('语义配置已保存');
       return true;
     } catch (error) {
-      showToast(error instanceof Error ? error.message : '保存指标映射失败', 'error');
+      showToast(error instanceof Error ? error.message : '保存语义模型失败', 'error');
       return false;
     } finally {
       setSaving(false);
     }
-  }, [instance, instanceId, sanitizedMappings, showToast]);
+  }, [instance, instanceId, sanitizedSemanticModel, showToast]);
 
   const handleSave = useCallback(() => {
     void saveCurrent();
@@ -292,68 +454,37 @@ function DatabaseMetricConfigPageContent() {
     onSave: saveCurrent,
   });
 
-  const handleResetSelectedTable = useCallback(() => {
-    if (!selectedCollection) return;
-    setMetricMappings((prev) => {
-      const next = { ...prev };
-      delete next[selectedCollection];
-      return next;
-    });
-  }, [selectedCollection]);
+  const handleRefreshSemanticModel = useCallback(async () => {
+    if (!instanceId) return;
 
-  const handleImportColumnComments = useCallback(() => {
-    if (!selectedInfo) return;
-
-    const next = { ...metricMappings };
-    const tableMapping: DatabaseTableMetricMapping = {
-      ...(next[selectedInfo.name] || { fields: {} }),
-      fields: { ...(next[selectedInfo.name]?.fields || {}) },
-    };
-    let importedCount = 0;
-
-    for (const column of selectedInfo.columns || []) {
-      const comment = column.comment?.trim();
-      if (!comment) continue;
-
-      const fieldMapping = { ...(tableMapping.fields[column.name] || {}) };
-      let changed = false;
-
-      if (!fieldMapping.metricName) {
-        fieldMapping.metricName = comment;
-        changed = true;
+    setRefreshingSemantic(true);
+    try {
+      const response = await fetch(`/api/database-instances/${instanceId}/semantic-model`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ persist: false }),
+      });
+      const payload = await readApiJson<DatabaseSemanticModel & { error?: string }>(response, '更新语义模型失败');
+      if (!response.ok) {
+        throw new Error(getApiErrorMessage(payload, '更新语义模型失败'));
       }
 
-      if (!fieldMapping.description) {
-        fieldMapping.description = comment;
-        changed = true;
-      }
-
-      if (changed) {
-        tableMapping.fields[column.name] = fieldMapping;
-        importedCount += 1;
-      }
+      const nextSemanticModel = sanitizeDatabaseSemanticModel(payload as DatabaseSemanticModel) || buildEmptySemanticModel();
+      setSemanticModel(nextSemanticModel);
+      showToast('已按当前 schema 重新生成语义草稿');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : '更新语义模型失败', 'error');
+    } finally {
+      setRefreshingSemantic(false);
     }
-
-    if (tableMapping.description || Object.keys(tableMapping.fields).length > 0) {
-      next[selectedInfo.name] = tableMapping;
-    }
-
-    setMetricMappings(next);
-
-    if (importedCount > 0) {
-      showToast(`已从字段备注导入 ${importedCount} 项`);
-      return;
-    }
-
-    showToast('当前表没有可导入的字段备注，或相关指标已手动补充', 'error');
-  }, [metricMappings, selectedInfo, showToast]);
+  }, [instanceId, showToast]);
 
   if (!instanceId) {
     return (
       <div className={styles.emptyPage}>
         <Icons.AlertTriangle size={24} />
         <strong>缺少数据库实例参数</strong>
-        <span>请从数据库实例详情页进入指标配置页。</span>
+        <span>请从数据库实例详情页进入语义配置页。</span>
         <Link href="/database-instances" className="btn btn-primary">返回数据库实例</Link>
       </div>
     );
@@ -367,25 +498,30 @@ function DatabaseMetricConfigPageContent() {
       <section className={styles.hero}>
         <div>
           <div className={styles.heroEyebrow}>
-            <Icons.Activity size={14} />
-            Metric Studio
+            <Icons.Sparkles size={14} />
+            Semantic Studio
           </div>
-          <div className={styles.heroTitle}>指标配置</div>
+          <div className={styles.heroTitle}>语义配置</div>
           <div className={styles.heroDesc}>
-            把数据库原始字段补充成可理解的业务指标。这里专门负责维护指标名称、描述、类型、计算模式，以及哪些字段要参与 NL2DATA 的名词识别补充。
+            这里是数据库字段语义的唯一配置入口。我们统一维护字段角色、术语别名、NER 开关和业务口径，DB Harness 与 NL2DATA
+            会直接消费这份语义配置，不再单独维护一套重复的指标配置。
           </div>
           <div className={styles.heroMeta}>
             <span className={styles.metaBadge}><Icons.Database size={12} /> {instance?.name || '读取实例中'}</span>
             <span className={styles.metaBadge}><Icons.Layers size={12} /> {tableCollections.length} 张表</span>
-            <span className={styles.metaBadge}><Icons.Check size={12} /> 已配置 {totalMetricCount} 个字段</span>
-            <span className={styles.metaBadge}><Icons.Sparkles size={12} /> NER 已启用 {totalNerEnabledCount} 个字段</span>
+            <span className={styles.metaBadge}><Icons.Check size={12} /> 已配置 {totalConfiguredCount} 个字段</span>
+            <span className={styles.metaBadge}><Icons.Sparkles size={12} /> 术语 {sanitizedSemanticModel.glossary.length} 项</span>
           </div>
         </div>
 
         <div className={styles.heroActions}>
           <div className={styles.heroActionTop}>
             <strong>当前配置焦点</strong>
-            <span>{selectedInfo ? `${selectedInfo.name} · ${selectedMetricCount}/${selectedInfo.columns?.length || 0} 字段已补充` : '请选择左侧库表'}</span>
+            <span>
+              {selectedInfo
+                ? `${selectedInfo.name} · ${selectedSemanticConfiguredCount}/${selectedInfo.columns?.length || 0} 字段已补充`
+                : '请选择左侧库表'}
+            </span>
           </div>
           <div className={styles.heroActionButtons}>
             <button className="btn btn-secondary" type="button" onClick={() => unsavedGuard.confirmAction(() => router.push(detailHref))}>
@@ -395,7 +531,7 @@ function DatabaseMetricConfigPageContent() {
               <Icons.Database size={16} /> 数据库实例
             </Link>
             <button className="btn btn-primary" type="button" onClick={handleSave} disabled={saving || !isDirty}>
-              <Icons.Check size={16} /> {saving ? '保存中...' : '保存指标配置'}
+              <Icons.Check size={16} /> {saving ? '保存中...' : '保存语义配置'}
             </button>
           </div>
         </div>
@@ -406,12 +542,13 @@ function DatabaseMetricConfigPageContent() {
           <div className={styles.sidebarHeader}>
             <div>
               <strong>表列表</strong>
-              <span>切换需要配置指标的数据库表。</span>
+              <span>切换当前正在维护语义的数据库表。</span>
             </div>
           </div>
           <div className={styles.schemaList}>
             {tableCollections.map((collection) => {
-              const count = Object.keys(sanitizedMappings[collection.name]?.fields || {}).length;
+              const entity = sanitizedSemanticModel.entities.find((item) => item.table === collection.name);
+              const configuredCount = (entity?.fields || []).filter((field) => isConfiguredSemanticField(field)).length;
               return (
                 <button
                   key={collection.name}
@@ -424,8 +561,8 @@ function DatabaseMetricConfigPageContent() {
                     <span className={styles.schemaCount}>{collection.columns?.length || 0} 字段</span>
                   </div>
                   <div className={styles.schemaCardMeta}>
-                    <span>{count} 个字段已配置</span>
-                    <span>{count > 0 ? '可继续完善' : '等待配置'}</span>
+                    <span>已配置 {configuredCount}</span>
+                    <span>术语 {(entity?.fields || []).filter((field) => field.enableForNer).length}</span>
                   </div>
                 </button>
               );
@@ -437,77 +574,72 @@ function DatabaseMetricConfigPageContent() {
           {loading ? (
             <div className={styles.emptyPage}>
               <Icons.Refresh size={22} />
-              <strong>正在读取指标配置</strong>
-              <span>正在加载实例详情与表结构，请稍候。</span>
+              <strong>正在读取配置</strong>
+              <span>正在加载实例详情、表结构和语义模型，请稍候。</span>
             </div>
           ) : !instance || instance.type === 'redis' ? (
             <div className={styles.emptyPage}>
               <Icons.AlertTriangle size={24} />
-              <strong>当前实例不支持指标配置</strong>
-              <span>只有 MySQL 与 PostgreSQL 实例支持字段级指标映射。</span>
+              <strong>当前实例不支持配置</strong>
+              <span>只有 MySQL 与 PostgreSQL 实例支持语义配置。</span>
             </div>
-          ) : !selectedInfo ? (
+          ) : !selectedInfo || !selectedSemanticDraftEntity ? (
             <div className={styles.emptyPage}>
               <Icons.Layers size={24} />
               <strong>请选择一个数据库表</strong>
-              <span>左侧库表列表用于切换当前正在配置的指标对象。</span>
+              <span>左侧表列表用于切换当前正在配置的对象。</span>
             </div>
           ) : (
             <>
               <div className={styles.panel}>
                 <div className={styles.panelHeader}>
                   <div className={styles.panelTitle}>
-                    <strong>配置概览</strong>
-                    <span>{selectedInfo.name} · {selectedMetricCount}/{selectedInfo.columns?.length || 0} 字段已配置</span>
+                    <strong className={styles.overviewTitle}>
+                      语义配置概览
+                      <span className={styles.metricFieldHint} tabIndex={0} aria-label="语义配置说明">
+                        ?
+                        <span className={`${styles.metricFieldTooltip} ${styles.tooltipRightDown}`}>
+                          图形化语义配置会按字段维护语义名称、角色、别名和 NER 开关。保存后会同步成系统可消费的语义映射，直接用于 DB Harness 与 NL2DATA。
+                        </span>
+                      </span>
+                    </strong>
+                    <span>{selectedInfo.name} · {selectedSemanticConfiguredCount}/{selectedInfo.columns?.length || 0} 字段已补充</span>
                   </div>
                   <div className={styles.panelHeaderMeta}>
                     <div className={styles.badgeRow}>
-                      <span className={styles.metricBadge}>实例：{instance.name}</span>
-                      <span className={styles.metricBadge}>引擎：{instance.type.toUpperCase()}</span>
-                      <span className={styles.metricBadge}>可导入备注：{commentImportableCount} 项</span>
+                      <span className={styles.metricBadge}>实体：{sanitizedSemanticModel.entityCount}</span>
+                      <span className={styles.metricBadge}>已配置字段：{sanitizedSemanticModel.configuredFieldCount}</span>
+                      <span className={styles.metricBadge}>默认推断：{sanitizedSemanticModel.inferredFieldCount}</span>
+                      <span className={styles.metricBadge}>术语：{sanitizedSemanticModel.glossary.length}</span>
                       {isDirty && <span className={styles.metricBadgePending}>存在未保存修改</span>}
                     </div>
                     <div className={styles.panelActionRow}>
                       <button
                         className="btn btn-secondary btn-sm"
                         type="button"
-                        onClick={handleImportColumnComments}
-                        disabled={commentImportableCount === 0}
+                        onClick={handleRefreshSemanticModel}
+                        disabled={refreshingSemantic}
                       >
-                        <Icons.Download size={14} /> 导入字段备注
+                        <Icons.Refresh size={14} /> {refreshingSemantic ? '刷新中...' : '手动更新语义模型'}
                       </button>
-                    <button
-                      className="btn btn-secondary btn-sm"
-                      type="button"
-                      onClick={handleResetSelectedTable}
-                      disabled={!hasSelectedTableConfig}
-                    >
-                      <Icons.X size={14} /> 清空该表配置
-                    </button>
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        type="button"
+                        onClick={handleResetSelectedSemanticTable}
+                      >
+                        <Icons.X size={14} /> 恢复该表默认语义
+                      </button>
                     </div>
                   </div>
                 </div>
                 <div className={styles.panelBody}>
-                  <div className={styles.metricStudioHeader}>
-                    <div>
-                      <strong>字段语义补充</strong>
-                      <span>把字段技术属性翻译成业务指标语义，并决定哪些字段要进入 NL2DATA 的第一轮名词识别。</span>
-                    </div>
-                    <div className={styles.metricLegend}>
-                      <span className={styles.metricLegendItem}>字段属性</span>
-                      <span className={styles.metricLegendItem}>业务语义</span>
-                      <span className={styles.metricLegendItem}>计算规则</span>
-                      <span className={styles.metricLegendItem}>NER 补充开关</span>
-                      <span className={styles.metricLegendItem}>备注可导入项 {commentImportableCount}</span>
-                    </div>
-                  </div>
                   <label className={styles.tableDescriptionField}>
-                    <span>整表补充说明</span>
+                    <span>整表语义说明</span>
                     <textarea
                       className={`form-input ${styles.tableDescriptionInput}`}
-                      value={selectedTableDescription}
-                      onChange={(event) => handleTableDescriptionChange(selectedInfo.name, event.target.value)}
-                      placeholder="补充整张表的业务用途、统计口径、边界说明或使用注意事项，这部分会与字段指标一起保存。"
+                      value={selectedSemanticDraftEntity.description || ''}
+                      onChange={(event) => updateSemanticTableDescription(selectedInfo.name, event.target.value)}
+                      placeholder="补充这张表在业务语义层的角色、适用场景、口径边界或注意事项。"
                     />
                   </label>
                 </div>
@@ -515,94 +647,124 @@ function DatabaseMetricConfigPageContent() {
 
               <div className={styles.metricRowList}>
                 {selectedInfo.columns?.map((column) => {
-                  const mapping = selectedMetricMappings[column.name] || {};
-                  const isMapped = Object.keys(mapping).length > 0;
-                  const nerEnabled = mapping.enableForNer === true;
+                  const field = selectedSemanticFieldMap[column.name];
+                  if (!field) return null;
+
+                  const isConfigured = isConfiguredSemanticField(field);
 
                   return (
-                    <section key={column.name} className={`${styles.metricRow} ${isMapped ? styles.metricRowActive : ''}`}>
+                    <section key={column.name} className={`${styles.metricRow} ${isConfigured ? styles.metricRowActive : ''}`}>
                       <div className={styles.metricRowIdentity}>
                         <div className={styles.metricFieldTitle}>
                           <div className={styles.metricFieldNameRow}>
                             <code>{column.name}</code>
                             <span className={styles.metricFieldType}>{column.type}</span>
-                            {column.isPrimary && <span className={styles.metricFieldPrimary}>主键</span>}
-                            {isMapped && <span className={styles.metricFieldMapped}>已配置</span>}
-                            {nerEnabled && <span className={styles.metricFieldNer}>NER</span>}
+                            <span className={styles.metricFieldMapped}>{field.semanticRole}</span>
+                            <span className={styles.metricFieldType}>
+                              {field.derivedFrom === 'manual' ? '手工' : field.derivedFrom === 'mapping' ? '迁移' : '推断'}
+                            </span>
+                            {field.enableForNer && <span className={styles.metricFieldNer}>NER</span>}
                           </div>
                           <div className={styles.metricFieldMeta}>
                             <span>{column.nullable ? '允许空值' : '必填字段'}</span>
                             <span>默认值：{column.defaultValue ?? '-'}</span>
-                            <span>附加属性：{column.extra || '-'}</span>
                             <span>字段备注：{column.comment?.trim() || '-'}</span>
+                            <span>当前语义名：{field.metricName}</span>
                           </div>
                         </div>
                       </div>
 
-                      <div className={styles.metricRowFields}>
+                      <div className={styles.semanticRowFields}>
                         <label className={styles.metricFormField}>
-                          <span>指标名称</span>
+                          <span>语义名称</span>
                           <input
                             className={`form-input ${styles.metricInput}`}
-                            value={mapping.metricName || ''}
-                            onChange={(event) => updateColumnMetricMapping(selectedInfo.name, column.name, 'metricName', event.target.value)}
-                            placeholder="例如：订单金额 / 会话ID / 模型名称"
+                            value={field.metricName}
+                            onChange={(event) => updateSemanticField(selectedInfo.name, column.name, 'metricName', event.target.value)}
+                            placeholder="例如：下单时间 / 用户地区 / 支付金额"
                           />
                         </label>
 
                         <label className={styles.metricFormField}>
-                          <span>指标描述</span>
+                          <span>语义描述</span>
                           <input
                             className={`form-input ${styles.metricInput}`}
-                            value={mapping.description || ''}
-                            onChange={(event) => updateColumnMetricMapping(selectedInfo.name, column.name, 'description', event.target.value)}
-                            placeholder="补充该字段在业务分析、调试或报表中的具体含义"
+                            value={field.description || ''}
+                            onChange={(event) => updateSemanticField(selectedInfo.name, column.name, 'description', event.target.value)}
+                            placeholder="补充业务口径、边界说明和常见提问方式"
                           />
+                        </label>
+
+                        <label className={styles.metricFormField}>
+                          <span>业务别名</span>
+                          <input
+                            className={`form-input ${styles.metricInput}`}
+                            value={(field.aliases || []).join(', ')}
+                            onChange={(event) => updateSemanticField(
+                              selectedInfo.name,
+                              column.name,
+                              'aliases',
+                              event.target.value.split(',').map((item) => item.trim()).filter(Boolean)
+                            )}
+                            placeholder="例如：客单价, ARPU, 订单额"
+                          />
+                        </label>
+
+                        <label className={styles.metricFormField}>
+                          <span>语义角色</span>
+                          <select
+                            className={`form-select ${styles.metricSelect}`}
+                            value={field.semanticRole}
+                            onChange={(event) => updateSemanticField(selectedInfo.name, column.name, 'semanticRole', event.target.value)}
+                          >
+                            {SEMANTIC_ROLE_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>{option.label}</option>
+                            ))}
+                          </select>
                         </label>
 
                         <label className={styles.metricFormField}>
                           <span>指标类型</span>
                           <input
                             className={`form-input ${styles.metricInput}`}
-                            value={mapping.metricType || ''}
-                            onChange={(event) => updateColumnMetricMapping(selectedInfo.name, column.name, 'metricType', event.target.value)}
-                            placeholder="例如：维度 / 度量 / 标识 / 时间"
+                            value={field.metricType || ''}
+                            onChange={(event) => updateSemanticField(selectedInfo.name, column.name, 'metricType', event.target.value)}
+                            placeholder="例如：业务指标 / 标签字段 / 时间键"
                           />
                         </label>
 
                         <label className={styles.metricFormField}>
-                          <span>指标计算模式</span>
+                          <span>计算口径</span>
                           <input
                             className={`form-input ${styles.metricInput}`}
-                            value={mapping.calcMode || ''}
-                            onChange={(event) => updateColumnMetricMapping(selectedInfo.name, column.name, 'calcMode', event.target.value)}
-                            placeholder="例如：原值 / 求和 / 平均 / 去重计数"
+                            value={field.calcMode || ''}
+                            onChange={(event) => updateSemanticField(selectedInfo.name, column.name, 'calcMode', event.target.value)}
+                            placeholder="例如：原值 / 求和 / 去重计数"
                           />
                         </label>
 
-                        <label className={styles.metricFormField}>
-                          <span className={styles.metricFieldLabelWithHint}>
-                            <span>名词识别</span>
-                            <span
-                              className={styles.metricFieldHint}
-                              aria-label="名词识别说明"
-                            >
+                        <div className={styles.metricFormField}>
+                          <span className={styles.metricToggleTitle}>
+                            名词识别
+                            <span className={styles.metricFieldHint} tabIndex={0} aria-label="名词识别说明">
                               ?
-                              <span className={styles.metricFieldTooltip}>
-                                开启后，该字段会进入 NL2DATA 第一轮 NER 候选集，用于辅助识别用户问句中的业务名词。
+                              <span className={`${styles.metricFieldTooltip} ${styles.tooltipRightDown}`}>
+                                控制这条语义是否进入 NER 候选集，帮助模型识别业务术语。
                               </span>
                             </span>
                           </span>
-                          <button
-                            type="button"
-                            role="switch"
-                            aria-checked={nerEnabled}
-                            className={`${styles.metricToggleButton} ${nerEnabled ? styles.metricToggleButtonActive : ''}`}
-                            onClick={() => updateColumnMetricMapping(selectedInfo.name, column.name, 'enableForNer', !nerEnabled)}
-                          >
-                            <span className={styles.metricToggleKnob} />
-                          </button>
-                        </label>
+                          <div className={styles.metricToggleInputRow}>
+                            <button
+                              type="button"
+                              role="switch"
+                              aria-checked={field.enableForNer}
+                              className={`${styles.metricToggleButton} ${field.enableForNer ? styles.metricToggleButtonActive : ''}`}
+                              onClick={() => updateSemanticField(selectedInfo.name, column.name, 'enableForNer', !field.enableForNer)}
+                            >
+                              <span className={styles.metricToggleKnob} />
+                            </button>
+                          </div>
+                        </div>
                       </div>
                     </section>
                   );
@@ -629,7 +791,7 @@ function DatabaseMetricConfigPageContent() {
 export default function DatabaseMetricConfigPage() {
   return (
     <Suspense fallback={null}>
-      <DatabaseMetricConfigPageContent />
+      <DatabaseSemanticConfigPageContent />
     </Suspense>
   );
 }

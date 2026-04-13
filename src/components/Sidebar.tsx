@@ -33,6 +33,11 @@ export default function Sidebar() {
       path: '/nl2data',
       icon: <Icons.MessageSquare size={18} />,
     },
+    {
+      name: 'DB Harness',
+      path: '/db-harness',
+      icon: <Icons.Layers size={18} />,
+    },
   ];
   const bottomNavItems = [
     {

@@ -175,17 +175,23 @@ export async function getDatabaseSchema(instance: DatabaseInstance): Promise<Dat
       const [rows] = await connection.query(
         `
           SELECT
-            table_name AS tableName,
-            column_name AS columnName,
-            data_type AS dataType,
-            is_nullable AS isNullable,
-            column_default AS columnDefault,
-            column_key AS columnKey,
-            extra AS extra,
-            column_comment AS columnComment
-          FROM information_schema.columns
-          WHERE table_schema = ?
-          ORDER BY table_name, ordinal_position
+            cols.table_name AS tableName,
+            cols.column_name AS columnName,
+            cols.data_type AS dataType,
+            cols.is_nullable AS isNullable,
+            cols.column_default AS columnDefault,
+            cols.column_key AS columnKey,
+            cols.extra AS extra,
+            cols.column_comment AS columnComment,
+            kcu.referenced_table_name AS referencedTableName,
+            kcu.referenced_column_name AS referencedColumnName
+          FROM information_schema.columns cols
+          LEFT JOIN information_schema.key_column_usage kcu
+            ON cols.table_schema = kcu.table_schema
+            AND cols.table_name = kcu.table_name
+            AND cols.column_name = kcu.column_name
+          WHERE cols.table_schema = ?
+          ORDER BY cols.table_name, cols.ordinal_position
         `,
         [database]
       );
@@ -205,6 +211,8 @@ export async function getDatabaseSchema(instance: DatabaseInstance): Promise<Dat
           isPrimary: row.columnKey === 'PRI',
           extra: row.extra ? String(row.extra) : '',
           comment: row.columnComment ? String(row.columnComment) : '',
+          referencesTable: row.referencedTableName ? String(row.referencedTableName) : '',
+          referencesColumn: row.referencedColumnName ? String(row.referencedColumnName) : '',
         });
         map.set(tableName, current);
       }
@@ -241,7 +249,39 @@ export async function getDatabaseSchema(instance: DatabaseInstance): Promise<Dat
             col_description(
               format('%I.%I', cols.table_schema, cols.table_name)::regclass,
               cols.ordinal_position
-            ) AS "columnComment"
+            ) AS "columnComment",
+            (
+              SELECT ccu.table_name
+              FROM information_schema.table_constraints tc
+              INNER JOIN information_schema.key_column_usage kcu
+                ON tc.constraint_name = kcu.constraint_name
+                AND tc.table_schema = kcu.table_schema
+                AND tc.table_name = kcu.table_name
+              INNER JOIN information_schema.constraint_column_usage ccu
+                ON ccu.constraint_name = tc.constraint_name
+                AND ccu.constraint_schema = tc.table_schema
+              WHERE tc.constraint_type = 'FOREIGN KEY'
+                AND tc.table_schema = cols.table_schema
+                AND tc.table_name = cols.table_name
+                AND kcu.column_name = cols.column_name
+              LIMIT 1
+            ) AS "referencedTableName",
+            (
+              SELECT ccu.column_name
+              FROM information_schema.table_constraints tc
+              INNER JOIN information_schema.key_column_usage kcu
+                ON tc.constraint_name = kcu.constraint_name
+                AND tc.table_schema = kcu.table_schema
+                AND tc.table_name = kcu.table_name
+              INNER JOIN information_schema.constraint_column_usage ccu
+                ON ccu.constraint_name = tc.constraint_name
+                AND ccu.constraint_schema = tc.table_schema
+              WHERE tc.constraint_type = 'FOREIGN KEY'
+                AND tc.table_schema = cols.table_schema
+                AND tc.table_name = cols.table_name
+                AND kcu.column_name = cols.column_name
+              LIMIT 1
+            ) AS "referencedColumnName"
           FROM information_schema.columns cols
           INNER JOIN information_schema.tables tbl
             ON cols.table_schema = tbl.table_schema
@@ -260,6 +300,8 @@ export async function getDatabaseSchema(instance: DatabaseInstance): Promise<Dat
         columnDefault: string | null;
         isPrimary: boolean;
         columnComment: string | null;
+        referencedTableName: string | null;
+        referencedColumnName: string | null;
       }>) {
         const current = map.get(row.tableName) || {
           name: row.tableName,
@@ -273,6 +315,8 @@ export async function getDatabaseSchema(instance: DatabaseInstance): Promise<Dat
           defaultValue: row.columnDefault,
           isPrimary: row.isPrimary,
           comment: row.columnComment || '',
+          referencesTable: row.referencedTableName || '',
+          referencesColumn: row.referencedColumnName || '',
         });
         map.set(row.tableName, current);
       }

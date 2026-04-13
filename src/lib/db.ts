@@ -21,6 +21,7 @@ import {
   CreateAIModelProfile,
   UpdateAIModelProfile,
   DatabaseInstance,
+  DatabaseSemanticModel,
   DatabaseInstanceSummary,
   CreateDatabaseInstance,
   UpdateDatabaseInstance,
@@ -31,6 +32,14 @@ import {
 } from './types';
 import { nanoid } from 'nanoid';
 import { sanitizeAIModelProfileInput } from './ai-models';
+import { getEffectiveDatabaseMetricMappings, sanitizeDatabaseSemanticModel } from './database-instances';
+import type {
+  DBHarnessChatMessage,
+  DBHarnessKnowledgeMemoryEntry,
+  DBHarnessSelectedModelInput,
+  DBHarnessSessionRecord,
+  DBHarnessWorkspaceRecord,
+} from './db-harness/core/types';
 
 const DEFAULT_DATA_DIR = path.join(process.cwd(), 'data');
 
@@ -215,6 +224,50 @@ function initializeDb(database: Database.Database) {
     );
   `);
 
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS db_harness_workspaces (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      database_id TEXT DEFAULT '',
+      rules TEXT DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS db_harness_sessions (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      title TEXT DEFAULT '',
+      messages_json TEXT DEFAULT '[]',
+      selected_database_id TEXT DEFAULT '',
+      selected_model_profile_id TEXT DEFAULT '',
+      selected_model_id TEXT DEFAULT '',
+      last_message_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS db_harness_knowledge_memory (
+      id TEXT PRIMARY KEY,
+      memory_key TEXT NOT NULL,
+      workspace_id TEXT DEFAULT '',
+      database_id TEXT DEFAULT '',
+      session_id TEXT DEFAULT '',
+      message_id TEXT DEFAULT '',
+      source TEXT NOT NULL DEFAULT 'feedback',
+      feedback_type TEXT DEFAULT '',
+      summary TEXT NOT NULL,
+      tags_json TEXT DEFAULT '[]',
+      payload_json TEXT DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+
   // Migration for api_forwards orchestration column
   try {
     database.exec(`ALTER TABLE api_forwards ADD COLUMN orchestration TEXT DEFAULT '{}';`);
@@ -241,10 +294,34 @@ function initializeDb(database: Database.Database) {
   }
 
   try {
+    database.exec(`ALTER TABLE database_instances ADD COLUMN semantic_model TEXT DEFAULT NULL;`);
+  } catch (err) {
+    if (err instanceof Error && !err.message.includes('duplicate column name')) {
+      console.error('Migration error database_instances.semantic_model:', err);
+    }
+  }
+
+  try {
     database.exec(`ALTER TABLE db_apis ADD COLUMN redis_config TEXT DEFAULT '{}';`);
   } catch (err) {
     if (err instanceof Error && !err.message.includes('duplicate column name')) {
       console.error('Migration error db_apis.redis_config:', err);
+    }
+  }
+
+  try {
+    database.exec(`ALTER TABLE db_harness_workspaces ADD COLUMN database_id TEXT DEFAULT '';`);
+  } catch (err) {
+    if (err instanceof Error && !err.message.includes('duplicate column name')) {
+      console.error('Migration error db_harness_workspaces.database_id:', err);
+    }
+  }
+
+  try {
+    database.exec(`ALTER TABLE db_harness_workspaces ADD COLUMN rules TEXT DEFAULT '';`);
+  } catch (err) {
+    if (err instanceof Error && !err.message.includes('duplicate column name')) {
+      console.error('Migration error db_harness_workspaces.rules:', err);
     }
   }
 }
@@ -264,6 +341,44 @@ export interface Nl2DataSessionHistoryRecord {
   prompt?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+function parseJsonArray<T>(value: unknown, fallback: T[] = []): T[] {
+  try {
+    const parsed = JSON.parse(typeof value === 'string' ? value : '[]');
+    return Array.isArray(parsed) ? parsed as T[] : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function rowToDBHarnessSession(row: Record<string, unknown>): DBHarnessSessionRecord {
+  const profileId = typeof row.selected_model_profile_id === 'string' ? row.selected_model_profile_id : '';
+  const modelId = typeof row.selected_model_id === 'string' ? row.selected_model_id : '';
+  const selectedModel: DBHarnessSelectedModelInput | null = profileId && modelId
+    ? { profileId, modelId }
+    : null;
+
+  return {
+    id: row.id as string,
+    workspaceId: row.workspace_id as string,
+    title: (row.title as string) || '新会话',
+    messages: parseJsonArray<DBHarnessChatMessage>(row.messages_json),
+    selectedDatabaseId: (row.selected_database_id as string) || '',
+    selectedModel,
+    lastMessageAt: (row.last_message_at as string) || (row.updated_at as string) || (row.created_at as string),
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  };
+}
+
+function bumpDBHarnessWorkspace(workspaceId: string, nextTimestamp?: string) {
+  const db = getDb();
+  db.prepare(`
+    UPDATE db_harness_workspaces
+    SET updated_at = ?
+    WHERE id = ?
+  `).run(nextTimestamp || new Date().toISOString(), workspaceId);
 }
 
 function rowToNl2DataSessionHistory(row: Record<string, unknown>): Nl2DataSessionHistoryRecord {
@@ -967,12 +1082,21 @@ export function deleteAIModelProfile(id: string): boolean {
 
 function rowToDatabaseInstance(row: Record<string, unknown>): DatabaseInstance {
   let metricMappings: DatabaseInstance['metricMappings'];
+  let semanticModel: DatabaseSemanticModel | undefined;
   try {
     if (row.metric_mappings) {
       metricMappings = JSON.parse(row.metric_mappings as string) as DatabaseInstance['metricMappings'];
     }
   } catch {
     metricMappings = undefined;
+  }
+
+  try {
+    if (row.semantic_model) {
+      semanticModel = JSON.parse(row.semantic_model as string) as DatabaseSemanticModel;
+    }
+  } catch {
+    semanticModel = undefined;
   }
 
   return {
@@ -983,6 +1107,7 @@ function rowToDatabaseInstance(row: Record<string, unknown>): DatabaseInstance {
     username: (row.username as string) || '',
     password: (row.password as string) || '',
     metricMappings,
+    semanticModel,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
   };
@@ -1029,12 +1154,17 @@ export function createDatabaseInstance(input: CreateDatabaseInstance): DatabaseI
   const db = getDb();
   const id = nanoid(12);
   const now = new Date().toISOString();
+  const semanticModel = sanitizeDatabaseSemanticModel(input.semanticModel);
+  const metricMappings = getEffectiveDatabaseMetricMappings({
+    metricMappings: input.metricMappings,
+    semanticModel,
+  });
 
   db.prepare(`
     INSERT INTO database_instances (
-      id, name, type, connection_uri, username, password, metric_mappings, created_at, updated_at
+      id, name, type, connection_uri, username, password, metric_mappings, semantic_model, created_at, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     input.name,
@@ -1042,7 +1172,8 @@ export function createDatabaseInstance(input: CreateDatabaseInstance): DatabaseI
     input.connectionUri,
     input.username || '',
     input.password || '',
-    input.metricMappings ? JSON.stringify(input.metricMappings) : null,
+    Object.keys(metricMappings).length > 0 ? JSON.stringify(metricMappings) : null,
+    semanticModel ? JSON.stringify(semanticModel) : null,
     now,
     now
   );
@@ -1060,6 +1191,11 @@ export function updateDatabaseInstance(id: string, input: UpdateDatabaseInstance
     ...existing,
     ...input,
   };
+  const semanticModel = sanitizeDatabaseSemanticModel(next.semanticModel);
+  const metricMappings = getEffectiveDatabaseMetricMappings({
+    metricMappings: next.metricMappings,
+    semanticModel,
+  });
 
   db.prepare(`
     UPDATE database_instances
@@ -1070,6 +1206,7 @@ export function updateDatabaseInstance(id: string, input: UpdateDatabaseInstance
       username = ?,
       password = ?,
       metric_mappings = ?,
+      semantic_model = ?,
       updated_at = ?
     WHERE id = ?
   `).run(
@@ -1078,7 +1215,8 @@ export function updateDatabaseInstance(id: string, input: UpdateDatabaseInstance
     next.connectionUri,
     next.username || '',
     next.password || '',
-    next.metricMappings ? JSON.stringify(next.metricMappings) : null,
+    Object.keys(metricMappings).length > 0 ? JSON.stringify(metricMappings) : null,
+    semanticModel ? JSON.stringify(semanticModel) : null,
     now,
     id
   );
@@ -1100,6 +1238,34 @@ export function updateDatabaseInstanceMetricMappings(id: string, metricMappings:
     WHERE id = ?
   `).run(
     metricMappings ? JSON.stringify(metricMappings) : null,
+    now,
+    id
+  );
+
+  return getDatabaseInstanceById(id);
+}
+
+export function updateDatabaseInstanceSemanticModel(id: string, semanticModel: DatabaseInstance['semanticModel']): DatabaseInstance | null {
+  const db = getDb();
+  const existing = getDatabaseInstanceById(id);
+  if (!existing) return null;
+
+  const now = new Date().toISOString();
+  const sanitizedSemanticModel = sanitizeDatabaseSemanticModel(semanticModel);
+  const metricMappings = getEffectiveDatabaseMetricMappings({
+    metricMappings: existing.metricMappings,
+    semanticModel: sanitizedSemanticModel,
+  });
+  db.prepare(`
+    UPDATE database_instances
+    SET
+      metric_mappings = ?,
+      semantic_model = ?,
+      updated_at = ?
+    WHERE id = ?
+  `).run(
+    Object.keys(metricMappings).length > 0 ? JSON.stringify(metricMappings) : null,
+    sanitizedSemanticModel ? JSON.stringify(sanitizedSemanticModel) : null,
     now,
     id
   );
@@ -1172,4 +1338,371 @@ export function deleteNl2DataSessionHistory(id: string): boolean {
   const db = getDb();
   const result = db.prepare('DELETE FROM nl2data_session_history WHERE id = ?').run(id);
   return result.changes > 0;
+}
+
+export function getDBHarnessWorkspaces(): DBHarnessWorkspaceRecord[] {
+  const db = getDb();
+  const workspaceRows = db.prepare(`
+    SELECT *
+    FROM db_harness_workspaces
+    ORDER BY updated_at DESC, created_at DESC
+  `).all();
+
+  const sessionRows = db.prepare(`
+    SELECT *
+    FROM db_harness_sessions
+    ORDER BY last_message_at DESC, created_at DESC
+  `).all();
+
+  const sessionsByWorkspace = new Map<string, DBHarnessSessionRecord[]>();
+  sessionRows.forEach((row) => {
+    const session = rowToDBHarnessSession(row as Record<string, unknown>);
+    const bucket = sessionsByWorkspace.get(session.workspaceId) || [];
+    bucket.push(session);
+    sessionsByWorkspace.set(session.workspaceId, bucket);
+  });
+
+  return workspaceRows.map((row) => {
+    const record = row as Record<string, unknown>;
+    return {
+      id: record.id as string,
+      name: record.name as string,
+      databaseId: (record.database_id as string) || '',
+      rules: (record.rules as string) || '',
+      sessions: sessionsByWorkspace.get(record.id as string) || [],
+      createdAt: record.created_at as string,
+      updatedAt: record.updated_at as string,
+    };
+  });
+}
+
+export function createDBHarnessWorkspace(input: { id?: string; name: string; databaseId?: string; rules?: string }): DBHarnessWorkspaceRecord {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const id = input.id || nanoid();
+  const databaseId = input.databaseId?.trim() || '';
+  const rules = input.rules?.trim() || '';
+
+  db.prepare(`
+    INSERT INTO db_harness_workspaces (
+      id,
+      name,
+      database_id,
+      rules,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `).run(id, input.name.trim() || '新建 Workspace', databaseId, rules, now, now);
+
+  return {
+    id,
+    name: input.name.trim() || '新建 Workspace',
+    databaseId,
+    rules,
+    sessions: [],
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function updateDBHarnessWorkspace(input: { id: string; name?: string; databaseId?: string; rules?: string }): DBHarnessWorkspaceRecord | null {
+  const db = getDb();
+  const current = db.prepare(`
+    SELECT *
+    FROM db_harness_workspaces
+    WHERE id = ?
+  `).get(input.id) as Record<string, unknown> | undefined;
+
+  if (!current) {
+    return null;
+  }
+
+  const now = new Date().toISOString();
+  const nextName = input.name === undefined ? ((current.name as string) || '新建 Workspace') : (input.name.trim() || '新建 Workspace');
+  const nextDatabaseId = input.databaseId === undefined ? (((current.database_id as string) || '')) : input.databaseId.trim();
+  const nextRules = input.rules === undefined ? (((current.rules as string) || '')) : input.rules.trim();
+  db.prepare(`
+    UPDATE db_harness_workspaces
+    SET name = ?,
+        database_id = ?,
+        rules = ?,
+        updated_at = ?
+    WHERE id = ?
+  `).run(nextName, nextDatabaseId, nextRules, now, input.id);
+
+  const sessions = getDBHarnessWorkspaces().find((item) => item.id === input.id)?.sessions || [];
+  return {
+    id: input.id,
+    name: nextName,
+    databaseId: nextDatabaseId,
+    rules: nextRules,
+    sessions,
+    createdAt: current.created_at as string,
+    updatedAt: now,
+  };
+}
+
+export function deleteDBHarnessWorkspace(id: string): boolean {
+  const db = getDb();
+  const deleteSessions = db.prepare('DELETE FROM db_harness_sessions WHERE workspace_id = ?');
+  const deleteWorkspace = db.prepare('DELETE FROM db_harness_workspaces WHERE id = ?');
+  const tx = db.transaction((workspaceId: string) => {
+    deleteSessions.run(workspaceId);
+    return deleteWorkspace.run(workspaceId);
+  });
+
+  const result = tx(id);
+  return result.changes > 0;
+}
+
+export function createDBHarnessSession(input: {
+  id?: string;
+  workspaceId: string;
+  title?: string;
+  messages?: DBHarnessChatMessage[];
+  selectedDatabaseId?: string;
+  selectedModel?: DBHarnessSelectedModelInput | null;
+  lastMessageAt?: string;
+}): DBHarnessSessionRecord {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const id = input.id || nanoid();
+  const title = input.title?.trim() || '新会话';
+  const lastMessageAt = input.lastMessageAt || now;
+
+  db.prepare(`
+    INSERT INTO db_harness_sessions (
+      id,
+      workspace_id,
+      title,
+      messages_json,
+      selected_database_id,
+      selected_model_profile_id,
+      selected_model_id,
+      last_message_at,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    input.workspaceId,
+    title,
+    JSON.stringify(input.messages || []),
+    input.selectedDatabaseId || '',
+    input.selectedModel?.profileId || '',
+    input.selectedModel?.modelId || '',
+    lastMessageAt,
+    now,
+    now
+  );
+
+  bumpDBHarnessWorkspace(input.workspaceId, lastMessageAt);
+
+  return {
+    id,
+    workspaceId: input.workspaceId,
+    title,
+    messages: input.messages || [],
+    selectedDatabaseId: input.selectedDatabaseId || '',
+    selectedModel: input.selectedModel || null,
+    lastMessageAt,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function updateDBHarnessSession(input: {
+  id: string;
+  title?: string;
+  messages?: DBHarnessChatMessage[];
+  selectedDatabaseId?: string;
+  selectedModel?: DBHarnessSelectedModelInput | null;
+  lastMessageAt?: string;
+}): DBHarnessSessionRecord | null {
+  const db = getDb();
+  const current = db.prepare(`
+    SELECT *
+    FROM db_harness_sessions
+    WHERE id = ?
+  `).get(input.id) as Record<string, unknown> | undefined;
+
+  if (!current) {
+    return null;
+  }
+
+  const now = new Date().toISOString();
+  const nextTitle = input.title?.trim() || (current.title as string) || '新会话';
+  const nextMessages = Array.isArray(input.messages) ? input.messages : parseJsonArray<DBHarnessChatMessage>(current.messages_json);
+  const nextSelectedDatabaseId = input.selectedDatabaseId ?? ((current.selected_database_id as string) || '');
+  const existingProfileId = (current.selected_model_profile_id as string) || '';
+  const existingModelId = (current.selected_model_id as string) || '';
+  const nextSelectedModel = input.selectedModel === undefined
+    ? (existingProfileId && existingModelId ? { profileId: existingProfileId, modelId: existingModelId } : null)
+    : input.selectedModel;
+  const lastMessageAt = input.lastMessageAt || (nextMessages[nextMessages.length - 1]?.createdAt ?? (current.last_message_at as string) ?? now);
+
+  db.prepare(`
+    UPDATE db_harness_sessions
+    SET title = ?,
+        messages_json = ?,
+        selected_database_id = ?,
+        selected_model_profile_id = ?,
+        selected_model_id = ?,
+        last_message_at = ?,
+        updated_at = ?
+    WHERE id = ?
+  `).run(
+    nextTitle,
+    JSON.stringify(nextMessages),
+    nextSelectedDatabaseId,
+    nextSelectedModel?.profileId || '',
+    nextSelectedModel?.modelId || '',
+    lastMessageAt,
+    now,
+    input.id
+  );
+
+  bumpDBHarnessWorkspace(current.workspace_id as string, lastMessageAt);
+
+  return {
+    id: input.id,
+    workspaceId: current.workspace_id as string,
+    title: nextTitle,
+    messages: nextMessages,
+    selectedDatabaseId: nextSelectedDatabaseId,
+    selectedModel: nextSelectedModel,
+    lastMessageAt,
+    createdAt: current.created_at as string,
+    updatedAt: now,
+  };
+}
+
+export function deleteDBHarnessSession(id: string): boolean {
+  const db = getDb();
+  const current = db.prepare(`
+    SELECT workspace_id
+    FROM db_harness_sessions
+    WHERE id = ?
+  `).get(id) as { workspace_id?: string } | undefined;
+
+  if (!current?.workspace_id) {
+    return false;
+  }
+
+  const result = db.prepare('DELETE FROM db_harness_sessions WHERE id = ?').run(id);
+  if (result.changes > 0) {
+    bumpDBHarnessWorkspace(current.workspace_id);
+  }
+  return result.changes > 0;
+}
+
+function rowToDBHarnessKnowledgeMemoryEntry(row: Record<string, unknown>): DBHarnessKnowledgeMemoryEntry {
+  return {
+    key: (row.memory_key as string) || '',
+    summary: (row.summary as string) || '',
+    tags: parseJsonArray<string>(row.tags_json).slice(0, 24),
+    source: row.source === 'schema' ? 'schema' : 'feedback',
+    feedbackType: row.feedback_type === 'corrective' ? 'corrective' : row.feedback_type === 'positive' ? 'positive' : undefined,
+    updatedAt: (row.updated_at as string) || undefined,
+  };
+}
+
+export function listDBHarnessKnowledgeMemory(input: {
+  workspaceId?: string;
+  databaseId?: string;
+  limit?: number;
+}): DBHarnessKnowledgeMemoryEntry[] {
+  const db = getDb();
+  const limit = Math.max(1, Math.min(input.limit ?? 24, 120));
+  const databaseId = input.databaseId?.trim() || '';
+  const workspaceId = input.workspaceId?.trim() || '';
+
+  const rows = db.prepare(`
+    SELECT *
+    FROM db_harness_knowledge_memory
+    WHERE (? = '' OR database_id = ?)
+      AND (? = '' OR workspace_id = ? OR workspace_id = '')
+    ORDER BY updated_at DESC, created_at DESC
+    LIMIT ?
+  `).all(databaseId, databaseId, workspaceId, workspaceId, limit);
+
+  return rows.map((row) => rowToDBHarnessKnowledgeMemoryEntry(row as Record<string, unknown>));
+}
+
+export function upsertDBHarnessKnowledgeMemory(input: {
+  key: string;
+  workspaceId?: string;
+  databaseId: string;
+  sessionId?: string;
+  messageId?: string;
+  source?: 'feedback' | 'schema';
+  feedbackType?: 'positive' | 'corrective';
+  summary: string;
+  tags: string[];
+  payload?: Record<string, unknown>;
+}): DBHarnessKnowledgeMemoryEntry {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const key = input.key.trim();
+  const summary = input.summary.trim();
+  const tags = input.tags.filter((item, index, array) => item.trim() && array.indexOf(item) === index).slice(0, 24);
+  const payload = input.payload || {};
+
+  if (!key || !summary || !input.databaseId.trim()) {
+    throw new Error('知识记忆缺少必要字段。');
+  }
+
+  const current = input.messageId
+    ? db.prepare(`
+      SELECT *
+      FROM db_harness_knowledge_memory
+      WHERE message_id = ?
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `).get(input.messageId)
+    : undefined;
+
+  const id = current
+    ? ((current as Record<string, unknown>).id as string)
+    : nanoid();
+
+  db.prepare(`
+    INSERT OR REPLACE INTO db_harness_knowledge_memory (
+      id,
+      memory_key,
+      workspace_id,
+      database_id,
+      session_id,
+      message_id,
+      source,
+      feedback_type,
+      summary,
+      tags_json,
+      payload_json,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    key,
+    input.workspaceId?.trim() || '',
+    input.databaseId.trim(),
+    input.sessionId?.trim() || '',
+    input.messageId?.trim() || '',
+    input.source || 'feedback',
+    input.feedbackType || '',
+    summary,
+    JSON.stringify(tags),
+    JSON.stringify(payload),
+    current ? ((current as Record<string, unknown>).created_at as string) || now : now,
+    now
+  );
+
+  const row = db.prepare(`
+    SELECT *
+    FROM db_harness_knowledge_memory
+    WHERE id = ?
+  `).get(id);
+
+  return rowToDBHarnessKnowledgeMemoryEntry(row as Record<string, unknown>);
 }

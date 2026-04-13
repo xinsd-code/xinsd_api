@@ -286,6 +286,23 @@ h1, h2, h3 {
   background: var(--color-danger-soft);
 }
 
+.btn-danger {
+  background: var(--color-danger);
+  color: white;
+  border-color: var(--color-danger);
+}
+
+.btn-danger:hover {
+  background: #dc2626;
+  border-color: #dc2626;
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+}
+
+.btn-danger:active {
+  transform: translateY(0);
+}
+
 .btn-sm {
   padding: 4px 10px;
   font-size: 13px;
@@ -580,6 +597,33 @@ h1, h2, h3 {
 .form-input:focus, .form-select:focus, .form-textarea:focus {
   border-color: var(--color-primary);
   box-shadow: 0 0 0 3px rgba(15, 23, 42, 0.08);
+}
+
+@media (max-width: 960px) {
+  .app-body {
+    flex-direction: column;
+    overflow: auto;
+  }
+
+  .app-sidebar {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--color-border);
+    padding: 16px 12px;
+    gap: 18px;
+  }
+
+  .sidebar-bottom {
+    margin-top: 0;
+    padding: 0;
+  }
+
+  .app-main {
+    height: auto;
+    min-height: calc(100vh - 64px);
+    overflow: visible;
+    padding: 16px 12px 24px;
+  }
 }
 
 /* Modal */

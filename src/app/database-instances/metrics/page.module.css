@@ -201,6 +201,47 @@
   gap: 18px;
 }
 
+.tabBar {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 18px;
+  border: 1px solid var(--color-border);
+  background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.94));
+  box-shadow: var(--shadow-sm);
+  width: fit-content;
+}
+
+.tabButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 14px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: border-color var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
+}
+
+.tabButton:hover {
+  border-color: rgba(203, 213, 225, 0.92);
+  background: rgba(248, 250, 252, 0.92);
+  color: var(--color-text);
+}
+
+.tabButtonActive {
+  border-color: color-mix(in oklab, var(--color-primary-accent) 22%, var(--color-border));
+  background: linear-gradient(180deg, rgba(239,246,255,0.96), rgba(248,250,252,0.96));
+  color: var(--color-text);
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.08);
+}
+
 .panel {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-xl);
@@ -241,6 +282,12 @@
 
 .panelTitle strong {
   font-size: 16px;
+}
+
+.overviewTitle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .panelTitle span {
@@ -339,7 +386,7 @@
   box-shadow: var(--shadow-sm);
   padding: 16px 18px;
   display: grid;
-  grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
+  grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
   gap: 16px;
   align-items: start;
 }
@@ -433,6 +480,13 @@
   align-items: start;
 }
 
+.semanticRowFields {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
 .metricFormField {
   display: flex;
   flex-direction: column;
@@ -471,6 +525,16 @@
 .metricInput {
   min-height: 38px;
   font-size: 12px;
+  border-radius: 12px;
+  border-color: color-mix(in oklab, var(--color-primary-accent) 12%, var(--color-border));
+  background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.9));
+}
+
+.metricInput:focus,
+.metricSelect:focus {
+  border-color: color-mix(in oklab, var(--color-primary-accent) 36%, var(--color-border-hover));
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-primary-accent) 16%, transparent);
+  outline: none;
 }
 
 .metricFieldLabelWithHint {
@@ -542,26 +606,24 @@
   transform: translateX(0) translateY(0);
 }
 
-.metricToggleField {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 12px;
-  min-width: 0;
-  border-radius: 16px;
-  border: 1px solid color-mix(in srgb, var(--color-primary-accent) 12%, var(--color-border));
-  background:
-    radial-gradient(circle at top left, color-mix(in srgb, var(--color-primary-accent) 7%, transparent), transparent 46%),
-    #fbfbfd;
+.tooltipRightDown {
+  left: calc(100% + 10px);
+  top: calc(100% + 8px);
+  right: auto;
+  bottom: auto;
+  transform: translateX(6px) translateY(-4px);
 }
 
-.metricToggleHeader {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+.tooltipRightDown::after {
+  left: 12px;
+  top: -5px;
+  right: auto;
 }
 
-.metricToggleHeader span:first-child {
+.metricToggleTitle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   font-size: 11px;
   font-weight: 800;
   letter-spacing: 0.04em;
@@ -569,10 +631,14 @@
   color: var(--color-text-muted);
 }
 
-.metricToggleHint {
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--color-text-secondary);
+.metricToggleInputRow {
+  min-height: 38px;
+  border: none;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 0;
 }
 
 .metricToggleButton {
@@ -580,7 +646,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: flex-start;
-  min-height: 38px;
+  min-height: 22px;
   width: fit-content;
   padding: 0;
   border: none;
@@ -686,6 +752,14 @@
   .metricRowFields {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+
+  .metricRow {
+    grid-template-columns: 1fr;
+  }
+
+  .semanticRowFields {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 1180px) {
@@ -694,6 +768,10 @@
   }
 
   .metricRowFields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .semanticRowFields {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
@@ -731,5 +809,19 @@
 
   .metricRowFields {
     grid-template-columns: 1fr;
+  }
+
+  .semanticRowFields,
+  .tabBar {
+    width: 100%;
+  }
+
+  .semanticRowFields {
+    grid-template-columns: 1fr;
+  }
+
+  .tabBar {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
   }
 }

@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getNl2DataErrorMessage, runNl2DataExecutor } from '@/lib/nl2data/executor';
+import { getDBHarnessErrorMessage, runDBHarnessChatTurn } from '@/lib/db-harness';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -7,12 +7,12 @@ export const dynamic = 'force-dynamic';
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const result = await runNl2DataExecutor(body);
+    const result = await runDBHarnessChatTurn(body);
     return NextResponse.json(result);
   } catch (error) {
-    console.error('Failed to run NL2DATA executor:', error);
+    console.error('Failed to run DB-Multi-Agent compatibility route:', error);
     return NextResponse.json(
-      { error: getNl2DataErrorMessage(error) },
+      { error: getDBHarnessErrorMessage(error) },
       { status: 500 }
     );
   }

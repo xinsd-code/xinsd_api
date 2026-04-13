@@ -1,5 +1,9 @@
 import {
   CreateDatabaseInstance,
+  DatabaseSemanticModel,
+  DatabaseSemanticModelEntity,
+  DatabaseSemanticModelField,
+  DatabaseSemanticRole,
   DatabaseFieldMetricMapping,
   DatabaseInstanceType,
   DatabaseMetricMappings,
@@ -15,6 +19,8 @@ interface ResolvedConnection {
 function normalizeConnectionUri(uri: string): string {
   return uri.trim();
 }
+
+const DATABASE_SEMANTIC_ROLES: DatabaseSemanticRole[] = ['metric', 'dimension', 'time', 'identifier', 'attribute'];
 
 function stripJdbcPrefix(uri: string, expectedPrefix: string): string {
   if (!uri.startsWith(expectedPrefix)) {
@@ -74,6 +80,8 @@ export function sanitizeDatabaseInstanceInput(input: Partial<CreateDatabaseInsta
     connectionUri: typeof input.connectionUri === 'string' ? normalizeConnectionUri(input.connectionUri) : '',
     username: typeof input.username === 'string' ? input.username.trim() : '',
     password: typeof input.password === 'string' ? input.password : '',
+    metricMappings: sanitizeDatabaseMetricMappings(input.metricMappings),
+    semanticModel: sanitizeDatabaseSemanticModel(input.semanticModel) || undefined,
   };
 }
 
@@ -178,4 +186,183 @@ export function sanitizeDatabaseMetricMappings(input: unknown): DatabaseMetricMa
   });
 
   return nextMappings;
+}
+
+function sanitizeSemanticRole(value: unknown): DatabaseSemanticRole {
+  return typeof value === 'string' && DATABASE_SEMANTIC_ROLES.includes(value as DatabaseSemanticRole)
+    ? value as DatabaseSemanticRole
+    : 'attribute';
+}
+
+function sanitizeSemanticField(value: unknown): DatabaseSemanticModelField | null {
+  if (!value || typeof value !== 'object') return null;
+
+  const input = value as Record<string, unknown>;
+  const table = typeof input.table === 'string' ? input.table.trim() : '';
+  const column = typeof input.column === 'string' ? input.column.trim() : '';
+  const metricName = typeof input.metricName === 'string' ? input.metricName.trim() : '';
+  const description = typeof input.description === 'string' ? input.description.trim() : '';
+  const metricType = typeof input.metricType === 'string' ? input.metricType.trim() : '';
+  const calcMode = typeof input.calcMode === 'string' ? input.calcMode.trim() : '';
+  const enableForNer = input.enableForNer === true;
+  const aliases = Array.isArray(input.aliases)
+    ? input.aliases
+      .map((item) => (typeof item === 'string' ? item.trim() : ''))
+      .filter((item, index, array) => item.length > 0 && array.indexOf(item) === index)
+    : [];
+  const derivedFrom = input.derivedFrom === 'mapping' || input.derivedFrom === 'manual' ? input.derivedFrom : 'schema';
+
+  if (!table || !column || !metricName) {
+    return null;
+  }
+
+  return {
+    table,
+    column,
+    metricName,
+    ...(description ? { description } : {}),
+    ...(metricType ? { metricType } : {}),
+    ...(calcMode ? { calcMode } : {}),
+    enableForNer,
+    aliases,
+    semanticRole: sanitizeSemanticRole(input.semanticRole),
+    derivedFrom,
+  };
+}
+
+function sanitizeSemanticEntity(value: unknown): DatabaseSemanticModelEntity | null {
+  if (!value || typeof value !== 'object') return null;
+
+  const input = value as Record<string, unknown>;
+  const table = typeof input.table === 'string' ? input.table.trim() : '';
+  const description = typeof input.description === 'string' ? input.description.trim() : '';
+  const fields = Array.isArray(input.fields)
+    ? input.fields
+      .map((item) => sanitizeSemanticField(item))
+      .filter((item): item is DatabaseSemanticModelField => Boolean(item))
+      .filter((field, index, array) => array.findIndex((item) => item.table === field.table && item.column === field.column) === index)
+    : [];
+
+  if (!table || fields.length === 0) {
+    return null;
+  }
+
+  const byRole = (role: DatabaseSemanticRole) => fields
+    .filter((field) => field.semanticRole === role)
+    .map((field) => field.metricName)
+    .filter((item, index, array) => array.indexOf(item) === index)
+    .slice(0, role === 'time' || role === 'identifier' ? 8 : 12);
+
+  return {
+    table,
+    ...(description ? { description } : {}),
+    metrics: byRole('metric'),
+    dimensions: byRole('dimension'),
+    timeFields: byRole('time'),
+    identifierFields: byRole('identifier'),
+    nerEnabledFields: fields
+      .filter((field) => field.enableForNer)
+      .map((field) => field.metricName)
+      .filter((item, index, array) => array.indexOf(item) === index)
+      .slice(0, 16),
+    fields,
+  };
+}
+
+export function sanitizeDatabaseSemanticModel(input: unknown): DatabaseSemanticModel | null {
+  if (!input || typeof input !== 'object') return null;
+
+  const source = input as Record<string, unknown>;
+  const entities = Array.isArray(source.entities)
+    ? source.entities
+      .map((item) => sanitizeSemanticEntity(item))
+      .filter((item): item is DatabaseSemanticModelEntity => Boolean(item))
+      .filter((entity, index, array) => array.findIndex((item) => item.table === entity.table) === index)
+    : [];
+
+  if (entities.length === 0) {
+    return null;
+  }
+
+  const fields = entities.flatMap((entity) => entity.fields);
+  const glossarySeed = Array.isArray(source.glossary)
+    ? source.glossary.map((item) => (typeof item === 'string' ? item.trim() : '')).filter(Boolean)
+    : [];
+  const glossary = [...glossarySeed, ...fields.flatMap((field) => [field.metricName, ...field.aliases])]
+    .filter((item, index, array) => item.length > 0 && array.indexOf(item) === index)
+    .slice(0, 160);
+  const updatedAt = typeof source.updatedAt === 'string' && source.updatedAt.trim() ? source.updatedAt.trim() : undefined;
+
+  return {
+    entityCount: entities.length,
+    configuredFieldCount: fields.filter((field) => field.derivedFrom !== 'schema').length,
+    inferredFieldCount: fields.filter((field) => field.derivedFrom === 'schema').length,
+    glossary,
+    entities,
+    ...(source.source === 'manual' ? { source: 'manual' as const } : { source: 'generated' as const }),
+    ...(updatedAt ? { updatedAt } : {}),
+  };
+}
+
+function shouldMaterializeSemanticField(field: DatabaseSemanticModelField): boolean {
+  return field.derivedFrom !== 'schema'
+    || field.enableForNer
+    || field.aliases.length > 0
+    || Boolean(field.description)
+    || Boolean(field.metricType)
+    || Boolean(field.calcMode);
+}
+
+function fallbackMetricTypeFromRole(role: DatabaseSemanticRole): string {
+  if (role === 'metric') return 'metric';
+  if (role === 'dimension') return 'dimension';
+  if (role === 'time') return 'time';
+  if (role === 'identifier') return 'identifier';
+  return 'attribute';
+}
+
+export function deriveMetricMappingsFromSemanticModel(input: unknown): DatabaseMetricMappings {
+  const semanticModel = sanitizeDatabaseSemanticModel(input);
+  if (!semanticModel) return {};
+
+  const nextMappings: DatabaseMetricMappings = {};
+
+  semanticModel.entities.forEach((entity) => {
+    const fields = entity.fields.reduce<Record<string, DatabaseFieldMetricMapping>>((accumulator, field) => {
+      if (!shouldMaterializeSemanticField(field)) {
+        return accumulator;
+      }
+
+      accumulator[field.column] = {
+        metricName: field.metricName,
+        ...(field.description ? { description: field.description } : {}),
+        ...(field.metricType ? { metricType: field.metricType } : { metricType: fallbackMetricTypeFromRole(field.semanticRole) }),
+        ...(field.calcMode ? { calcMode: field.calcMode } : {}),
+        ...(field.enableForNer ? { enableForNer: true } : {}),
+        ...(field.aliases.length > 0 ? { aliases: field.aliases } : {}),
+      };
+      return accumulator;
+    }, {});
+
+    if (entity.description || Object.keys(fields).length > 0) {
+      nextMappings[entity.table] = {
+        ...(entity.description ? { description: entity.description } : {}),
+        fields,
+      };
+    }
+  });
+
+  return sanitizeDatabaseMetricMappings(nextMappings);
+}
+
+export function getEffectiveDatabaseMetricMappings(input: {
+  metricMappings?: unknown;
+  semanticModel?: unknown;
+}): DatabaseMetricMappings {
+  const semanticMappings = deriveMetricMappingsFromSemanticModel(input.semanticModel);
+  if (Object.keys(semanticMappings).length > 0) {
+    return semanticMappings;
+  }
+
+  return sanitizeDatabaseMetricMappings(input.metricMappings);
 }

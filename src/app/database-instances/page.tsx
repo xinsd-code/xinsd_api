@@ -3,14 +3,15 @@
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  getEffectiveDatabaseMetricMappings,
   getDatabaseInstanceValidationSignature,
-  sanitizeDatabaseMetricMappings,
   sanitizeDatabaseInstanceInput,
   validateDatabaseInstanceInput,
 } from '@/lib/database-instances';
 import {
   CreateDatabaseInstance,
   DatabaseCollectionInfo,
+  DatabaseFieldMetricMapping,
   DatabaseInstance,
   DatabaseInstanceSummary,
   DatabaseInstanceType,
@@ -19,11 +20,13 @@ import {
 } from '@/lib/types';
 import { Icons } from '@/components/Icons';
 import UnsavedChangesDialog from '@/components/UnsavedChangesDialog';
+import { isDateLikeType, isNumericType, isTextLikeType } from '@/lib/db-harness/core/utils';
 import { useUnsavedChangesGuard } from '@/hooks/use-unsaved-changes-guard';
 import styles from './page.module.css';
 
 type PanelMode = 'overview' | 'create' | 'edit' | 'detail';
 type ValidationState = 'idle' | 'success' | 'error';
+type FieldSemanticFilter = 'all' | 'metric' | 'dimension' | 'time' | 'identifier' | 'attribute';
 
 interface EditableInstance {
   name: string;
@@ -150,6 +153,48 @@ function getStructurePanelSubtitle(
   return instanceType === 'redis' ? `当前 Key：${selectedName}` : `当前对象：${selectedName}`;
 }
 
+function formatMetricAliases(aliases?: string[]): string {
+  if (!aliases?.length) return '-';
+  return aliases.join(' / ');
+}
+
+function inferFieldSemanticRole(
+  column: NonNullable<DatabaseCollectionInfo['columns']>[number],
+  metric?: DatabaseFieldMetricMapping
+): Exclude<FieldSemanticFilter, 'all'> {
+  const metricType = (metric?.metricType || '').toLowerCase();
+  const calcMode = (metric?.calcMode || '').toLowerCase();
+  const name = column.name.toLowerCase();
+
+  if (metricType.includes('时间') || metricType.includes('time') || isDateLikeType(column.type)) {
+    return 'time';
+  }
+  if (
+    column.isPrimary
+    || metricType.includes('标识')
+    || metricType.includes('id')
+    || /(^id$|_id$|uuid|code$)/i.test(name)
+  ) {
+    return 'identifier';
+  }
+  if (
+    metricType.includes('度量')
+    || metricType.includes('指标')
+    || metricType.includes('metric')
+    || calcMode.includes('求和')
+    || calcMode.includes('平均')
+    || calcMode.includes('计数')
+    || calcMode.includes('count')
+    || isNumericType(column.type)
+  ) {
+    return 'metric';
+  }
+  if (metricType.includes('维度') || metricType.includes('dimension') || isTextLikeType(column.type)) {
+    return 'dimension';
+  }
+  return 'attribute';
+}
+
 function DatabaseInstancesPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -175,6 +220,9 @@ function DatabaseInstancesPageContent() {
   const [queryText, setQueryText] = useState('');
   const [queryLoading, setQueryLoading] = useState(false);
   const [queryResult, setQueryResult] = useState<DatabaseQueryPayload | null>(null);
+  const [fieldSemanticFilter, setFieldSemanticFilter] = useState<FieldSemanticFilter>('all');
+  const [mappedOnly, setMappedOnly] = useState(false);
+  const [relatedOnly, setRelatedOnly] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [baselineSignature, setBaselineSignature] = useState(() => getDatabaseInstanceValidationSignature(sanitizeDatabaseInstanceInput(createEmptyDraft())));
 
@@ -206,7 +254,10 @@ function DatabaseInstancesPageContent() {
     [schemaData, selectedCollection]
   );
   const sanitizedMetricMappings = useMemo(
-    () => sanitizeDatabaseMetricMappings(activeDetail?.metricMappings || {}),
+    () => getEffectiveDatabaseMetricMappings({
+      metricMappings: activeDetail?.metricMappings,
+      semanticModel: activeDetail?.semanticModel,
+    }),
     [activeDetail]
   );
   const selectedMetricMappings = useMemo(
@@ -218,6 +269,24 @@ function DatabaseInstancesPageContent() {
     [selectedMetricMappings]
   );
   const selectedMetricTotal = selectedCollectionInfo?.columns?.length || 0;
+  const filteredColumns = useMemo(() => {
+    const columns = selectedCollectionInfo?.columns || [];
+    return columns.filter((column) => {
+      const metric = selectedMetricMappings[column.name];
+      const semanticRole = inferFieldSemanticRole(column, metric);
+
+      if (fieldSemanticFilter !== 'all' && semanticRole !== fieldSemanticFilter) {
+        return false;
+      }
+      if (mappedOnly && !metric) {
+        return false;
+      }
+      if (relatedOnly && !column.referencesTable) {
+        return false;
+      }
+      return true;
+    });
+  }, [fieldSemanticFilter, mappedOnly, relatedOnly, selectedCollectionInfo?.columns, selectedMetricMappings]);
 
   const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
     setToast({ message, type });
@@ -230,6 +299,9 @@ function DatabaseInstancesPageContent() {
   const resetExplorerState = useCallback(() => {
     setSchemaData(null);
     setSelectedCollection(null);
+    setFieldSemanticFilter('all');
+    setMappedOnly(false);
+    setRelatedOnly(false);
     setQueryResult(null);
     setQueryText('');
   }, []);
@@ -975,7 +1047,7 @@ function DatabaseInstancesPageContent() {
                             });
                           }}
                         >
-                          <Icons.Activity size={14} /> 指标配置
+                          <Icons.Activity size={14} /> 语义配置
                         </button>
                       )}
                       <button
@@ -995,32 +1067,110 @@ function DatabaseInstancesPageContent() {
                   {!isStructureCollapsed && (
                     <div className={styles.panelBody}>
                       {selectedCollectionInfo?.category === 'table' && selectedCollectionInfo.columns && selectedCollectionInfo.columns.length > 0 ? (
-                        <div className={styles.tableShell}>
+                        <>
+                          <div className={styles.structureFilterBar}>
+                            <label className={styles.structureFilterGroup}>
+                              <span>语义筛选</span>
+                              <select
+                                className="form-select"
+                                value={fieldSemanticFilter}
+                                onChange={(event) => setFieldSemanticFilter(event.target.value as FieldSemanticFilter)}
+                              >
+                                <option value="all">全部字段</option>
+                                <option value="metric">度量</option>
+                                <option value="dimension">维度</option>
+                                <option value="time">时间</option>
+                                <option value="identifier">标识</option>
+                                <option value="attribute">属性</option>
+                              </select>
+                            </label>
+                            <label className={styles.structureToggle}>
+                              <input
+                                type="checkbox"
+                                checked={mappedOnly}
+                                onChange={(event) => setMappedOnly(event.target.checked)}
+                              />
+                              <span>只看已映射字段</span>
+                            </label>
+                            <label className={styles.structureToggle}>
+                              <input
+                                type="checkbox"
+                                checked={relatedOnly}
+                                onChange={(event) => setRelatedOnly(event.target.checked)}
+                              />
+                              <span>只看有关联字段</span>
+                            </label>
+                            <div className={styles.structureFilterMeta}>
+                              当前展示 {filteredColumns.length} / {selectedCollectionInfo.columns.length} 个字段
+                            </div>
+                          </div>
+
+                          <div className={styles.tableShell}>
                           <table className={styles.dataTable}>
                             <thead>
                               <tr>
                                 <th>字段名</th>
                                 <th>类型</th>
-                                <th>可空</th>
-                                <th>默认值</th>
-                                <th>主键</th>
-                                <th>附加属性</th>
+                                <th>结构属性</th>
+                                <th>目录关系</th>
+                                <th>语义映射</th>
                               </tr>
                             </thead>
                             <tbody>
-                              {selectedCollectionInfo.columns.map((column) => (
-                                <tr key={column.name}>
-                                  <td><pre>{column.name}</pre></td>
-                                  <td><pre>{column.type}</pre></td>
-                                  <td><pre>{column.nullable ? 'YES' : 'NO'}</pre></td>
-                                  <td><pre>{column.defaultValue ?? '-'}</pre></td>
-                                  <td><pre>{column.isPrimary ? 'YES' : '-'}</pre></td>
-                                  <td><pre>{column.extra || '-'}</pre></td>
-                                </tr>
-                              ))}
+                              {filteredColumns.map((column) => {
+                                const metric = selectedMetricMappings[column.name];
+                                const relationText = column.referencesTable
+                                  ? `${column.referencesTable}.${column.referencesColumn || 'id'}`
+                                  : '无外键关联';
+                                const semanticRole = inferFieldSemanticRole(column, metric);
+
+                                return (
+                                  <tr key={column.name}>
+                                    <td><pre>{column.name}</pre></td>
+                                    <td><pre>{column.type}</pre></td>
+                                    <td>
+                                      <div className={styles.cellStack}>
+                                        <div className={styles.cellLine}>可空：{column.nullable ? 'YES' : 'NO'}</div>
+                                        <div className={styles.cellLine}>默认值：{column.defaultValue ?? '-'}</div>
+                                        <div className={styles.cellLine}>主键：{column.isPrimary ? 'YES' : '-'}</div>
+                                        <div className={styles.cellLine}>附加：{column.extra || '-'}</div>
+                                        <div className={styles.cellLine}>备注：{column.comment || '-'}</div>
+                                      </div>
+                                    </td>
+                                    <td>
+                                      <div className={styles.cellStack}>
+                                        <div className={styles.cellLine}>关系：{relationText}</div>
+                                        <div className={styles.cellLine}>实体：{selectedCollectionInfo.name}</div>
+                                      </div>
+                                    </td>
+                                    <td>
+                                      {metric ? (
+                                        <div className={styles.cellStack}>
+                                          <div className={styles.cellLine}>角色：{semanticRole}</div>
+                                          <div className={styles.cellLine}>业务名：{metric.metricName || '-'}</div>
+                                          <div className={styles.cellLine}>别名：{formatMetricAliases(metric.aliases)}</div>
+                                          <div className={styles.cellLine}>类型：{metric.metricType || '-'}</div>
+                                          <div className={styles.cellLine}>计算：{metric.calcMode || '-'}</div>
+                                          <div className={styles.cellLine}>NER：{metric.enableForNer ? '启用' : '关闭'}</div>
+                                          <div className={styles.cellLine}>描述：{metric.description || '-'}</div>
+                                        </div>
+                                      ) : (
+                                        <div className={styles.cellStack}>
+                                          <div className={styles.cellLine}>角色：{semanticRole}</div>
+                                          <div className={styles.cellMuted}>未配置语义映射</div>
+                                        </div>
+                                      )}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
                             </tbody>
                           </table>
-                        </div>
+                          </div>
+                          {filteredColumns.length === 0 ? (
+                            <div className={styles.inlineHint}>当前筛选条件下没有字段，请放宽语义或关联条件。</div>
+                          ) : null}
+                        </>
                       ) : (
                         <div className={styles.emptyStateCompact}>
                           <strong>当前对象没有可展示的字段属性</strong>
