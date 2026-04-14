@@ -35,11 +35,18 @@ import { sanitizeAIModelProfileInput } from './ai-models';
 import { getEffectiveDatabaseMetricMappings, sanitizeDatabaseSemanticModel } from './database-instances';
 import type {
   DBHarnessChatMessage,
+  DBHarnessGepaCandidate,
+  DBHarnessGepaRun,
+  DBHarnessGepaRunStatus,
+  DBHarnessGepaSampleResult,
+  DBHarnessGepaScoreCard,
   DBHarnessKnowledgeMemoryEntry,
+  DBHarnessRuntimeConfig,
   DBHarnessSelectedModelInput,
   DBHarnessSessionRecord,
   DBHarnessWorkspaceRecord,
 } from './db-harness/core/types';
+import { invalidateWorkspaceContextCache } from './db-harness/workspace/workspace-cache';
 
 const DEFAULT_DATA_DIR = path.join(process.cwd(), 'data');
 
@@ -230,6 +237,7 @@ function initializeDb(database: Database.Database) {
       name TEXT NOT NULL,
       database_id TEXT DEFAULT '',
       rules TEXT DEFAULT '',
+      runtime_config_json TEXT DEFAULT '{}',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -263,6 +271,26 @@ function initializeDb(database: Database.Database) {
       summary TEXT NOT NULL,
       tags_json TEXT DEFAULT '[]',
       payload_json TEXT DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS db_harness_gepa_runs (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT DEFAULT '',
+      database_id TEXT NOT NULL,
+      sample_limit INTEGER NOT NULL DEFAULT 20,
+      dataset_version TEXT DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'draft',
+      candidate_set_json TEXT DEFAULT '[]',
+      sample_results_json TEXT DEFAULT '[]',
+      score_card_json TEXT DEFAULT '{}',
+      report_json TEXT DEFAULT '{}',
+      approved_at TEXT DEFAULT '',
+      approved_by TEXT DEFAULT '',
+      applied_at TEXT DEFAULT '',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -324,6 +352,14 @@ function initializeDb(database: Database.Database) {
       console.error('Migration error db_harness_workspaces.rules:', err);
     }
   }
+
+  try {
+    database.exec(`ALTER TABLE db_harness_workspaces ADD COLUMN runtime_config_json TEXT DEFAULT '{}';`);
+  } catch (err) {
+    if (err instanceof Error && !err.message.includes('duplicate column name')) {
+      console.error('Migration error db_harness_workspaces.runtime_config_json:', err);
+    }
+  }
 }
 
 export interface Nl2DataSessionHistoryRecord {
@@ -347,6 +383,15 @@ function parseJsonArray<T>(value: unknown, fallback: T[] = []): T[] {
   try {
     const parsed = JSON.parse(typeof value === 'string' ? value : '[]');
     return Array.isArray(parsed) ? parsed as T[] : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function parseJsonObject<T>(value: unknown, fallback: T): T {
+  try {
+    const parsed = JSON.parse(typeof value === 'string' ? value : '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as T : fallback;
   } catch {
     return fallback;
   }
@@ -379,6 +424,7 @@ function bumpDBHarnessWorkspace(workspaceId: string, nextTimestamp?: string) {
     SET updated_at = ?
     WHERE id = ?
   `).run(nextTimestamp || new Date().toISOString(), workspaceId);
+  invalidateWorkspaceContextCache({ workspaceId });
 }
 
 function rowToNl2DataSessionHistory(row: Record<string, unknown>): Nl2DataSessionHistoryRecord {
@@ -395,6 +441,19 @@ function rowToNl2DataSessionHistory(row: Record<string, unknown>): Nl2DataSessio
     columns: JSON.parse((row.columns_json as string) || '[]'),
     rows: JSON.parse((row.rows_json as string) || '[]'),
     prompt: (row.prompt as string) || '',
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  };
+}
+
+function rowToDBHarnessWorkspace(row: Record<string, unknown>, sessions: DBHarnessSessionRecord[] = []): DBHarnessWorkspaceRecord {
+  return {
+    id: row.id as string,
+    name: (row.name as string) || '新建 Workspace',
+    databaseId: (row.database_id as string) || '',
+    rules: (row.rules as string) || '',
+    runtimeConfig: parseJsonObject<DBHarnessRuntimeConfig>(row.runtime_config_json, {}),
+    sessions,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
   };
@@ -1178,6 +1237,7 @@ export function createDatabaseInstance(input: CreateDatabaseInstance): DatabaseI
     now
   );
 
+  invalidateWorkspaceContextCache({ databaseId: id });
   return getDatabaseInstanceById(id)!;
 }
 
@@ -1221,6 +1281,7 @@ export function updateDatabaseInstance(id: string, input: UpdateDatabaseInstance
     id
   );
 
+  invalidateWorkspaceContextCache({ databaseId: id });
   return getDatabaseInstanceById(id);
 }
 
@@ -1242,6 +1303,7 @@ export function updateDatabaseInstanceMetricMappings(id: string, metricMappings:
     id
   );
 
+  invalidateWorkspaceContextCache({ databaseId: id });
   return getDatabaseInstanceById(id);
 }
 
@@ -1270,12 +1332,16 @@ export function updateDatabaseInstanceSemanticModel(id: string, semanticModel: D
     id
   );
 
+  invalidateWorkspaceContextCache({ databaseId: id });
   return getDatabaseInstanceById(id);
 }
 
 export function deleteDatabaseInstance(id: string): boolean {
   const db = getDb();
   const result = db.prepare('DELETE FROM database_instances WHERE id = ?').run(id);
+  if (result.changes > 0) {
+    invalidateWorkspaceContextCache({ databaseId: id });
+  }
   return result.changes > 0;
 }
 
@@ -1362,26 +1428,38 @@ export function getDBHarnessWorkspaces(): DBHarnessWorkspaceRecord[] {
     sessionsByWorkspace.set(session.workspaceId, bucket);
   });
 
-  return workspaceRows.map((row) => {
-    const record = row as Record<string, unknown>;
-    return {
-      id: record.id as string,
-      name: record.name as string,
-      databaseId: (record.database_id as string) || '',
-      rules: (record.rules as string) || '',
-      sessions: sessionsByWorkspace.get(record.id as string) || [],
-      createdAt: record.created_at as string,
-      updatedAt: record.updated_at as string,
-    };
-  });
+  return workspaceRows.map((row) => rowToDBHarnessWorkspace(row as Record<string, unknown>, sessionsByWorkspace.get((row as Record<string, unknown>).id as string) || []));
 }
 
-export function createDBHarnessWorkspace(input: { id?: string; name: string; databaseId?: string; rules?: string }): DBHarnessWorkspaceRecord {
+export function getDBHarnessWorkspaceById(id: string): DBHarnessWorkspaceRecord | null {
+  const db = getDb();
+  const workspaceRow = db.prepare(`
+    SELECT *
+    FROM db_harness_workspaces
+    WHERE id = ?
+  `).get(id) as Record<string, unknown> | undefined;
+
+  if (!workspaceRow) {
+    return null;
+  }
+
+  const sessionRows = db.prepare(`
+    SELECT *
+    FROM db_harness_sessions
+    WHERE workspace_id = ?
+    ORDER BY last_message_at DESC, created_at DESC
+  `).all(id);
+  const sessions = sessionRows.map((row) => rowToDBHarnessSession(row as Record<string, unknown>));
+  return rowToDBHarnessWorkspace(workspaceRow, sessions);
+}
+
+export function createDBHarnessWorkspace(input: { id?: string; name: string; databaseId?: string; rules?: string; runtimeConfig?: DBHarnessRuntimeConfig }): DBHarnessWorkspaceRecord {
   const db = getDb();
   const now = new Date().toISOString();
   const id = input.id || nanoid();
   const databaseId = input.databaseId?.trim() || '';
   const rules = input.rules?.trim() || '';
+  const runtimeConfig = input.runtimeConfig || {};
 
   db.prepare(`
     INSERT INTO db_harness_workspaces (
@@ -1389,23 +1467,26 @@ export function createDBHarnessWorkspace(input: { id?: string; name: string; dat
       name,
       database_id,
       rules,
+      runtime_config_json,
       created_at,
       updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?)
-  `).run(id, input.name.trim() || '新建 Workspace', databaseId, rules, now, now);
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(id, input.name.trim() || '新建 Workspace', databaseId, rules, JSON.stringify(runtimeConfig), now, now);
 
+  invalidateWorkspaceContextCache({ workspaceId: id, databaseId });
   return {
     id,
     name: input.name.trim() || '新建 Workspace',
     databaseId,
     rules,
+    runtimeConfig,
     sessions: [],
     createdAt: now,
     updatedAt: now,
   };
 }
 
-export function updateDBHarnessWorkspace(input: { id: string; name?: string; databaseId?: string; rules?: string }): DBHarnessWorkspaceRecord | null {
+export function updateDBHarnessWorkspace(input: { id: string; name?: string; databaseId?: string; rules?: string; runtimeConfig?: DBHarnessRuntimeConfig }): DBHarnessWorkspaceRecord | null {
   const db = getDb();
   const current = db.prepare(`
     SELECT *
@@ -1421,21 +1502,27 @@ export function updateDBHarnessWorkspace(input: { id: string; name?: string; dat
   const nextName = input.name === undefined ? ((current.name as string) || '新建 Workspace') : (input.name.trim() || '新建 Workspace');
   const nextDatabaseId = input.databaseId === undefined ? (((current.database_id as string) || '')) : input.databaseId.trim();
   const nextRules = input.rules === undefined ? (((current.rules as string) || '')) : input.rules.trim();
+  const nextRuntimeConfig = input.runtimeConfig === undefined
+    ? parseJsonObject<DBHarnessRuntimeConfig>(current.runtime_config_json, {})
+    : input.runtimeConfig;
   db.prepare(`
     UPDATE db_harness_workspaces
     SET name = ?,
         database_id = ?,
         rules = ?,
+        runtime_config_json = ?,
         updated_at = ?
     WHERE id = ?
-  `).run(nextName, nextDatabaseId, nextRules, now, input.id);
+  `).run(nextName, nextDatabaseId, nextRules, JSON.stringify(nextRuntimeConfig || {}), now, input.id);
 
+  invalidateWorkspaceContextCache({ workspaceId: input.id, databaseId: nextDatabaseId });
   const sessions = getDBHarnessWorkspaces().find((item) => item.id === input.id)?.sessions || [];
   return {
     id: input.id,
     name: nextName,
     databaseId: nextDatabaseId,
     rules: nextRules,
+    runtimeConfig: nextRuntimeConfig,
     sessions,
     createdAt: current.created_at as string,
     updatedAt: now,
@@ -1452,6 +1539,9 @@ export function deleteDBHarnessWorkspace(id: string): boolean {
   });
 
   const result = tx(id);
+  if (result.changes > 0) {
+    invalidateWorkspaceContextCache({ workspaceId: id });
+  }
   return result.changes > 0;
 }
 
@@ -1698,6 +1788,7 @@ export function upsertDBHarnessKnowledgeMemory(input: {
     now
   );
 
+  invalidateWorkspaceContextCache({ workspaceId: input.workspaceId, databaseId: input.databaseId });
   const row = db.prepare(`
     SELECT *
     FROM db_harness_knowledge_memory
@@ -1705,4 +1796,197 @@ export function upsertDBHarnessKnowledgeMemory(input: {
   `).get(id);
 
   return rowToDBHarnessKnowledgeMemoryEntry(row as Record<string, unknown>);
+}
+
+function rowToDBHarnessGepaRun(row: Record<string, unknown>): DBHarnessGepaRun {
+  return {
+    id: row.id as string,
+    workspaceId: (row.workspace_id as string) || '',
+    databaseId: (row.database_id as string) || '',
+    sampleLimit: Number(row.sample_limit || 20),
+    datasetVersion: (row.dataset_version as string) || '',
+    status: (row.status as DBHarnessGepaRunStatus) || 'draft',
+    candidateSet: parseJsonArray<DBHarnessGepaCandidate>(row.candidate_set_json),
+    samples: parseJsonArray<DBHarnessGepaSampleResult>(row.sample_results_json),
+    scoreCard: parseJsonObject<DBHarnessGepaScoreCard>(row.score_card_json, {
+      sqlSuccessRate: 0,
+      emptyRate: 0,
+      latencyAvgMs: 0,
+      latencyP95Ms: 0,
+      tokenCost: 0,
+      balancedScore: 0,
+      notes: [],
+    }),
+    report: parseJsonObject<Record<string, unknown>>(row.report_json, {}),
+    approvedAt: (row.approved_at as string) || undefined,
+    approvedBy: (row.approved_by as string) || undefined,
+    appliedAt: (row.applied_at as string) || undefined,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  };
+}
+
+export function listDBHarnessGepaRuns(limit = 24): DBHarnessGepaRun[] {
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT *
+    FROM db_harness_gepa_runs
+    ORDER BY updated_at DESC, created_at DESC
+    LIMIT ?
+  `).all(Math.max(1, Math.min(limit, 100)));
+  return rows.map((row) => rowToDBHarnessGepaRun(row as Record<string, unknown>));
+}
+
+export function getDBHarnessGepaRunById(id: string): DBHarnessGepaRun | null {
+  const db = getDb();
+  const row = db.prepare(`
+    SELECT *
+    FROM db_harness_gepa_runs
+    WHERE id = ?
+  `).get(id);
+  return row ? rowToDBHarnessGepaRun(row as Record<string, unknown>) : null;
+}
+
+export function createDBHarnessGepaRun(input: {
+  workspaceId?: string;
+  databaseId: string;
+  sampleLimit?: number;
+  datasetVersion?: string;
+  candidateSet?: DBHarnessGepaCandidate[];
+  samples?: DBHarnessGepaSampleResult[];
+  scoreCard?: DBHarnessGepaScoreCard;
+  report?: Record<string, unknown>;
+  status?: DBHarnessGepaRunStatus;
+  approvedAt?: string;
+  approvedBy?: string;
+  appliedAt?: string;
+}): DBHarnessGepaRun {
+  const db = getDb();
+  const id = nanoid(12);
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO db_harness_gepa_runs (
+      id,
+      workspace_id,
+      database_id,
+      sample_limit,
+      dataset_version,
+      status,
+      candidate_set_json,
+      sample_results_json,
+      score_card_json,
+      report_json,
+      approved_at,
+      approved_by,
+      applied_at,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    input.workspaceId?.trim() || '',
+    input.databaseId.trim(),
+    Math.max(1, Math.trunc(input.sampleLimit || 20)),
+    input.datasetVersion || '',
+    input.status || 'draft',
+    JSON.stringify(input.candidateSet || []),
+    JSON.stringify(input.samples || []),
+    JSON.stringify(input.scoreCard || {
+      sqlSuccessRate: 0,
+      emptyRate: 0,
+      latencyAvgMs: 0,
+      latencyP95Ms: 0,
+      tokenCost: 0,
+      balancedScore: 0,
+      notes: [],
+    }),
+    JSON.stringify(input.report || {}),
+    input.approvedAt || '',
+    input.approvedBy || '',
+    input.appliedAt || '',
+    now,
+    now
+  );
+
+  return getDBHarnessGepaRunById(id)!;
+}
+
+export function updateDBHarnessGepaRun(id: string, input: Partial<{
+  workspaceId: string;
+  databaseId: string;
+  sampleLimit: number;
+  datasetVersion: string;
+  candidateSet: DBHarnessGepaCandidate[];
+  samples: DBHarnessGepaSampleResult[];
+  scoreCard: DBHarnessGepaScoreCard;
+  report: Record<string, unknown>;
+  status: DBHarnessGepaRunStatus;
+  approvedAt: string;
+  approvedBy: string;
+  appliedAt: string;
+}>): DBHarnessGepaRun | null {
+  const current = getDBHarnessGepaRunById(id);
+  if (!current) return null;
+
+  const next = {
+    ...current,
+    ...input,
+  };
+  const now = new Date().toISOString();
+  const db = getDb();
+  db.prepare(`
+    UPDATE db_harness_gepa_runs
+    SET workspace_id = ?,
+        database_id = ?,
+        sample_limit = ?,
+        dataset_version = ?,
+        status = ?,
+        candidate_set_json = ?,
+        sample_results_json = ?,
+        score_card_json = ?,
+        report_json = ?,
+        approved_at = ?,
+        approved_by = ?,
+        applied_at = ?,
+        updated_at = ?
+    WHERE id = ?
+  `).run(
+    next.workspaceId || '',
+    next.databaseId,
+    Math.max(1, Math.trunc(next.sampleLimit || 20)),
+    next.datasetVersion || '',
+    next.status,
+    JSON.stringify(next.candidateSet || []),
+    JSON.stringify(next.samples || []),
+    JSON.stringify(next.scoreCard || current.scoreCard),
+    JSON.stringify(next.report || current.report),
+    next.approvedAt || '',
+    next.approvedBy || '',
+    next.appliedAt || '',
+    now,
+    id
+  );
+
+  return getDBHarnessGepaRunById(id);
+}
+
+export function deleteDBHarnessGepaRun(id: string): boolean {
+  const db = getDb();
+  const result = db.prepare('DELETE FROM db_harness_gepa_runs WHERE id = ?').run(id);
+  if (result.changes > 0) {
+    getDBHarnessWorkspaces().forEach((workspace) => {
+      if (workspace.runtimeConfig?.appliedRunId !== id) {
+        return;
+      }
+      updateDBHarnessWorkspace({
+        id: workspace.id,
+        runtimeConfig: {
+          ...workspace.runtimeConfig,
+          appliedRunId: undefined,
+          appliedCandidateIds: undefined,
+        },
+      });
+    });
+  }
+  return result.changes > 0;
 }

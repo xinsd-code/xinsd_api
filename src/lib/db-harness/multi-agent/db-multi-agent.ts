@@ -17,6 +17,7 @@ export class DBMultiAgent {
     const session = createDBHarnessSession(input);
     const logger = new DBHarnessAgentLogger(session.turnId);
     const trace = createPendingTrace();
+    const autoRetryEnabled = /^(1|true|yes|on)$/i.test(process.env.DB_HARNESS_EMPTY_RESULT_RETRY || '');
 
     logger.log('DB-Multi-Agent', 'Run started', {
       question: session.latestUserMessage,
@@ -100,6 +101,56 @@ export class DBMultiAgent {
       const detail = error instanceof Error ? error.message : 'Guardrail Agent 执行失败。';
       logger.log('Guardrail Agent', 'Error', detail);
       return buildFailureResponse(trace, 'guardrail', detail, queryResult.aiPayload.sql);
+    }
+
+    if (
+      autoRetryEnabled
+      && guardrailResult.execution.rows.length === 0
+      && intentResult.planningHints.timeRangeDays
+      && intentResult.planningHints.timeRangeDays <= 30
+    ) {
+      const relaxedHints = {
+        ...intentResult.planningHints,
+        timeRangeDays: Math.min(intentResult.planningHints.timeRangeDays * 3, 3650),
+        notes: [
+          ...intentResult.planningHints.notes,
+          '空结果后已自动放宽时间范围重试一次。',
+        ].slice(0, 8),
+      };
+      try {
+        const retryIntentResult = {
+          ...intentResult,
+          planningHints: relaxedHints,
+        };
+        const retryQueryResult = await runQueryAgent(session, workspace, retryIntentResult, schemaResult, gateway, logger);
+        const retryGuardrailResult = await runGuardrailAgent(workspace, retryQueryResult, logger);
+        if (retryGuardrailResult.execution.rows.length > 0) {
+          queryResult = retryQueryResult;
+          guardrailResult = retryGuardrailResult;
+          updateTrace(trace, 'query', 'completed', `${retryQueryResult.detail} 已触发空结果自动重试。`, {
+            title: '传给 Guardrail Agent',
+            payload: compactJson({
+              message: retryQueryResult.aiPayload.message,
+              sql: retryQueryResult.aiPayload.sql,
+              plan: retryQueryResult.plan,
+              usedFallback: retryQueryResult.usedFallback,
+            }, 1800),
+          });
+          updateTrace(trace, 'guardrail', 'completed', `${retryGuardrailResult.detail} 已用放宽条件结果替换原结果。`, {
+            title: '传给 Analysis Agent',
+            payload: compactJson({
+              rowCount: retryGuardrailResult.execution.rows.length,
+              columns: retryGuardrailResult.execution.columns,
+              summary: retryGuardrailResult.execution.summary,
+              previewRows: retryGuardrailResult.execution.rows.slice(0, 3),
+            }, 1800),
+          });
+        }
+      } catch (error) {
+        logger.log('DB-Multi-Agent', 'Empty result retry skipped', {
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
 
     try {

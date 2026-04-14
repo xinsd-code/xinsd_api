@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createDBHarnessWorkspace, getDBHarnessWorkspaces } from '@/lib/db';
+import type { DBHarnessRuntimeConfig } from '@/lib/db-harness/core/types';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -15,12 +16,13 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json() as { id?: string; name?: string; databaseId?: string; rules?: string };
+    const body = await request.json() as { id?: string; name?: string; databaseId?: string; rules?: string; runtimeConfig?: DBHarnessRuntimeConfig };
     const workspace = createDBHarnessWorkspace({
       id: body.id,
       name: body.name?.trim() || '新建 Workspace',
       databaseId: body.databaseId?.trim() || '',
       rules: body.rules?.trim() || '',
+      runtimeConfig: body.runtimeConfig || {},
     });
     return NextResponse.json(workspace, { status: 201 });
   } catch (error) {

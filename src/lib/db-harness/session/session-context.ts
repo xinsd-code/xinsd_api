@@ -30,6 +30,37 @@ function compactConversationContent(role: 'user' | 'assistant', content: string,
   return compactText(content, isLatest ? 720 : 260);
 }
 
+function extractConstraintSummary(messages: DBHarnessSessionContext['messages']): string {
+  const constraints = new Set<string>();
+  messages.forEach((message) => {
+    if (message.role !== 'user') return;
+    const text = message.content;
+    const timeRange = text.match(/(最近|近)\s*(\d+)\s*(天|周|月)/);
+    if (timeRange) {
+      constraints.add(`时间范围：${timeRange[0]}`);
+    }
+    const region = text.match(/(华东|华南|华北|华中|西南|西北|东北|北京|上海|深圳|广州|杭州|成都|重庆|苏州|南京|武汉|天津|福建|浙江|江苏|广东|山东|河南|河北|湖北|湖南|安徽|四川|陕西|云南|贵州|广西|新疆|内蒙古|宁夏|青海|甘肃|海南)[区市省]?/);
+    if (region) {
+      constraints.add(`地区限定：${region[0]}`);
+    }
+    const compare = text.match(/同比|环比|对比|比较|trend|compare/i);
+    if (compare) {
+      constraints.add(`分析意图：${compare[0]}`);
+    }
+    const limit = text.match(/(\d+)\s*条|top\s*(\d+)/i);
+    if (limit) {
+      constraints.add(`条数限制：${limit[0]}`);
+    }
+    if (/只看|仅看|排除|不看/.test(text)) {
+      constraints.add(`过滤约束：${compactText(text, 60)}`);
+    }
+  });
+
+  return constraints.size > 0
+    ? `用户在更早对话中已经设定了以下约束：${Array.from(constraints).join('；')}。`
+    : '未发现明确历史约束。';
+}
+
 export function buildCondensedSessionMessages(
   session: DBHarnessSessionContext,
   options?: {
@@ -58,11 +89,12 @@ export function buildCondensedSessionMessages(
     `${message.role === 'user' ? '用户' : '助手'}: ${compactConversationContent(message.role, message.content, false)}`
   ));
   const summaryText = compactText(summaryLines.join('\n'), maxSummaryLength);
+  const constraintSummary = extractConstraintSummary(olderMessages);
 
   return [
     {
       role: 'assistant',
-      content: `更早对话摘要：\n${summaryText}`,
+      content: `历史约束摘要：\n${constraintSummary}\n更早对话摘要：\n${summaryText}`,
     },
     ...recentMessages,
   ];

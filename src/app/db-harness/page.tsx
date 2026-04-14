@@ -1374,6 +1374,11 @@ export default function DbHarnessPage() {
             新建 Workspace
           </button>
 
+          <Link href="/db-harness/gepa" className={styles.sidebarSecondaryLink}>
+            <Icons.Sparkles size={15} />
+            GEPA 工作台
+          </Link>
+
           <div className={styles.workspaceList}>
             {workspaceItems.map((workspaceItem) => {
               const workspaceSelected = workspaceItem.id === selectedWorkspaceId;

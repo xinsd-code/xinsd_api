@@ -23,7 +23,12 @@ export async function runSchemaAgent(
   logger: DBHarnessAgentLogger
 ): Promise<DBHarnessSchemaResult> {
   const keywords = buildKeywordSet(session.latestUserMessage, session.currentSql);
-  const candidateBundle = buildNerCandidateBundle(workspace.schema, workspace.metricMappings, keywords);
+  const candidateBundle = buildNerCandidateBundle(
+    workspace.schema,
+    workspace.metricMappings,
+    keywords,
+    workspace.runtimeConfig?.nerCandidateLimit
+  );
 
   logger.log('Schema Agent', 'Input', {
     question: session.latestUserMessage,
@@ -61,7 +66,12 @@ export async function runSchemaAgent(
       throw error;
     }
 
-    const nerPayload = buildFallbackNerPayload(session.latestUserMessage, workspace.schema, workspace.metricMappings);
+    const nerPayload = buildFallbackNerPayload(
+      session.latestUserMessage,
+      workspace.schema,
+      workspace.metricMappings,
+      workspace.runtimeConfig?.nerCandidateLimit
+    );
     const knowledgeEntries = mergeKnowledgeEntries(
       workspace.knowledge,
       deriveKnowledgeEntries(workspace.schema, workspace.metricMappings, nerPayload)

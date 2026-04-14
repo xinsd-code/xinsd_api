@@ -49,13 +49,6 @@ export async function runQueryAgent(
   }
 
   try {
-    const promptContexts = (['standard', 'compact', 'minimal'] as const).map((level) => buildQueryPromptContext(
-      session,
-      workspace,
-      intentResult.planningHints,
-      schemaResult.nerPayload,
-      level
-    ));
     const condensedMessages = buildCondensedSessionMessages(session, {
       keepRecentMessages: 4,
       maxSummaryLength: 800,
@@ -65,7 +58,16 @@ export async function runQueryAgent(
       engine,
       intentResult.planningHints.intent
     );
-    const { content } = await gateway.runQueryPrompt(promptContexts, condensedMessages);
+    const { content } = await gateway.runQueryPrompt(
+      (level) => buildQueryPromptContext(
+        session,
+        workspace,
+        intentResult.planningHints,
+        schemaResult.nerPayload,
+        level
+      ),
+      condensedMessages
+    );
     const parsed = parseQueryAgentPayload(
       extractJsonPayload(content),
       engine,

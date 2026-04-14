@@ -62,6 +62,7 @@ export interface DBHarnessChatTurnRequest {
     content: string;
   }>;
   selectedModel?: DBHarnessSelectedModelInput | null;
+  nerSelectedModel?: DBHarnessSelectedModelInput | null;
   databaseInstanceId?: string;
   currentSql?: string;
   currentResult?: {
@@ -313,10 +314,14 @@ export interface DBHarnessSessionContext {
 export interface DBHarnessWorkspaceContext {
   workspaceId?: string;
   workspaceRules?: string;
+  runtimeConfig?: DBHarnessRuntimeConfig;
   databaseInstance: DatabaseInstance;
   profile: AIModelProfile;
   selectedModel: DBHarnessSelectedModelInput;
   endpoint: string;
+  nerProfile?: AIModelProfile;
+  nerSelectedModel?: DBHarnessSelectedModelInput;
+  nerEndpoint?: string;
   schema: DatabaseSchemaPayload;
   metricMappings: DatabaseMetricViewMap;
   catalog: DBHarnessCatalogSnapshot;
@@ -379,9 +384,21 @@ export interface DBHarnessWorkspaceRecord {
   name: string;
   databaseId?: string;
   rules?: string;
+  runtimeConfig?: DBHarnessRuntimeConfig;
   sessions: DBHarnessSessionRecord[];
   createdAt: string;
   updatedAt: string;
+}
+
+export interface DBHarnessRuntimeConfig {
+  preferredCompressionLevel?: 'standard' | 'compact' | 'minimal';
+  nerCandidateLimit?: number;
+  schemaOverviewTables?: number;
+  promptStrategy?: string;
+  source?: 'manual' | 'gepa';
+  appliedRunId?: string;
+  appliedCandidateIds?: string[];
+  updatedAt?: string;
 }
 
 export interface DBHarnessKnowledgeFeedbackRequest {
@@ -399,4 +416,91 @@ export interface DBHarnessKnowledgeFeedbackRequest {
 export interface DBHarnessKnowledgeFeedbackResponse {
   feedback: DBHarnessFeedbackState;
   knowledgeEntry: DBHarnessKnowledgeMemoryEntry;
+}
+
+export type DBHarnessGepaCandidateKind = 'prompt' | 'policy';
+export type DBHarnessGepaRunStatus = 'draft' | 'running' | 'reviewed' | 'applied' | 'failed';
+
+export interface DBHarnessGepaScoreCard {
+  sqlSuccessRate: number;
+  emptyRate: number;
+  latencyAvgMs: number;
+  latencyP95Ms: number;
+  tokenCost: number;
+  balancedScore: number;
+  baselineBalancedScore?: number;
+  notes: string[];
+}
+
+export interface DBHarnessGepaCandidate {
+  id: string;
+  kind: DBHarnessGepaCandidateKind;
+  title: string;
+  description: string;
+  compressionLevel?: 'standard' | 'compact' | 'minimal';
+  nerTopK?: number;
+  promptPatch?: string;
+  policyPatch?: Record<string, unknown>;
+  notes: string[];
+}
+
+export interface DBHarnessGepaSampleResult {
+  sampleId: string;
+  question: string;
+  baseline: {
+    status: 'success' | 'empty' | 'error';
+    latencyMs: number;
+    tokenCost: number;
+    score: number;
+    detail: string;
+  };
+  candidate: {
+    status: 'success' | 'empty' | 'error';
+    latencyMs: number;
+    tokenCost: number;
+    score: number;
+    detail: string;
+  };
+  delta: {
+    score: number;
+    latencyMs: number;
+    tokenCost: number;
+  };
+}
+
+export interface DBHarnessGepaRun {
+  id: string;
+  workspaceId?: string;
+  databaseId: string;
+  sampleLimit: number;
+  datasetVersion: string;
+  status: DBHarnessGepaRunStatus;
+  candidateSet: DBHarnessGepaCandidate[];
+  samples: DBHarnessGepaSampleResult[];
+  scoreCard: DBHarnessGepaScoreCard;
+  report: Record<string, unknown>;
+  approvedAt?: string;
+  approvedBy?: string;
+  appliedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DBHarnessRuntimeConfigDiffEntry {
+  key: keyof Pick<DBHarnessRuntimeConfig, 'preferredCompressionLevel' | 'nerCandidateLimit' | 'schemaOverviewTables' | 'promptStrategy'>;
+  label: string;
+  before: string;
+  after: string;
+}
+
+export interface DBHarnessGepaCreateRequest {
+  workspaceId: string;
+  databaseId: string;
+  sampleLimit?: number;
+  promptCandidateCount?: number;
+  policyCandidateCount?: number;
+}
+
+export interface DBHarnessGepaApplyRequest {
+  approvedBy?: string;
 }
