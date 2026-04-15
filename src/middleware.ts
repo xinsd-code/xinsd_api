@@ -1,6 +1,6 @@
 /**
  * Next.js 中间件：保护 API 路由
- * 检查所有 /api/database-instances 路由的认证
+ * 检查数据库实例、db-harness、nl2data 和转发路由的认证
  */
 
 import { NextResponse, type NextRequest } from 'next/server';
@@ -11,8 +11,9 @@ const SESSION_COOKIE_NAME = 'xinsd-api-session';
 // 需要认证的 API 路由前缀
 const PROTECTED_ROUTES = [
   '/api/database-instances',
-  '/api/db-harness/gepa',
-  '/api/db-harness/workspaces',
+  '/api/db-harness',
+  '/api/nl2data',
+  '/api/forwards',
 ];
 
 // 不需要认证的公共路由
