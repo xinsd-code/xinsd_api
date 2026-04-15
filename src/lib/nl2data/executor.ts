@@ -6,6 +6,7 @@ import { executeDbApi } from '@/lib/db-api';
 import { getAIModelProfileById, getDatabaseInstanceById } from '@/lib/db';
 import { getDatabaseSchema } from '@/lib/database-instances-server';
 import { normalizeSqlForExecution } from '@/lib/sql-normalize';
+import { normalizeMongoQueryText } from '@/lib/mongo-query-compat';
 import { AIModelProfile, DatabaseSchemaPayload, DbApiConfig } from '@/lib/types';
 import { createPendingTrace, HarnessTraceRole, HarnessTraceStep, HarnessTurnResponse } from './harness-types';
 
@@ -39,14 +40,14 @@ export interface Nl2DataExecutionPayload {
   rows: Record<string, unknown>[];
   summary?: string;
   datasource: string;
-  engine: 'mysql' | 'pgsql';
+  engine: 'mysql' | 'pgsql' | 'mongo';
   previewSql: string;
 }
 
 export interface Nl2DataAgentResult {
   message: string;
   sql: string;
-  execution: Nl2DataExecutionPayload;
+  execution?: Nl2DataExecutionPayload;
   prompt: string;
 }
 
@@ -292,7 +293,7 @@ function buildSchemaOverview(
   };
 }
 
-function sanitizeAiPayload(input: unknown, databaseEngine: 'mysql' | 'pgsql'): Nl2DataAiPayload {
+function sanitizeAiPayload(input: unknown, databaseEngine: 'mysql' | 'pgsql' | 'mongo'): Nl2DataAiPayload {
   const source = isRecord(input) ? input : {};
   const sql = typeof source.sql === 'string' ? source.sql.trim() : '';
 
@@ -304,7 +305,10 @@ function sanitizeAiPayload(input: unknown, databaseEngine: 'mysql' | 'pgsql'): N
     message: typeof source.message === 'string' && source.message.trim()
       ? source.message.trim()
       : '已根据你的描述生成查询 SQL。',
-    sql: normalizeSqlForExecution(databaseEngine, sql),
+    sql: normalizeSqlForExecution(
+      databaseEngine,
+      databaseEngine === 'mongo' ? normalizeMongoQueryText(sql) : sql
+    ),
   };
 }
 
@@ -415,19 +419,6 @@ function sanitizeNerPayload(input: unknown): Nl2DataNerPayload {
   };
 }
 
-const SENSITIVE_FIELD_PATTERNS = [
-  /password/i,
-  /token/i,
-  /secret/i,
-  /email/i,
-  /phone/i,
-  /mobile/i,
-  /身份证/,
-  /手机号/,
-  /id[_-]?card/i,
-  /ssn/i,
-];
-
 function inferHarnessIntent(question: string): string {
   const text = question.toLowerCase();
   if (/对比|同比|环比|compare/.test(text)) return 'comparison';
@@ -489,45 +480,8 @@ function buildFailureResponse(
   };
 }
 
-function extractSensitiveColumns(
-  sql: string,
-  schema: DatabaseSchemaPayload,
-  metricMappings: DatabaseMetricViewMap
-): string[] {
-  const normalizedSql = sql.toLowerCase();
-  const matches = new Set<string>();
-
-  schema.collections
-    .filter((collection) => collection.category === 'table')
-    .forEach((collection) => {
-      const tableMetric = metricMappings[collection.name];
-      (collection.columns || []).forEach((column) => {
-        const metric = tableMetric?.fields?.[column.name];
-        const candidates = [
-          column.name,
-          column.comment,
-          metric?.metricName,
-          metric?.description,
-          ...(metric?.aliases || []),
-        ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
-
-        const sensitive = candidates.some((value) => SENSITIVE_FIELD_PATTERNS.some((pattern) => pattern.test(value)));
-        if (!sensitive) return;
-
-        const identifier = column.name.toLowerCase();
-        if (normalizedSql.includes(identifier)) {
-          matches.add(column.name);
-        }
-      });
-    });
-
-  return Array.from(matches);
-}
-
 function assertHarnessGuardrails(
-  sql: string,
-  schema: DatabaseSchemaPayload,
-  metricMappings: DatabaseMetricViewMap
+  sql: string
 ) {
   const normalized = sql.trim();
   if (/(--|\/\*)/.test(normalized)) {
@@ -536,11 +490,6 @@ function assertHarnessGuardrails(
 
   if (/\b(insert|update|delete|drop|alter|truncate|create|grant|revoke)\b/i.test(normalized)) {
     throw new Error('当前回合未通过 Guardrail Agent 校验：SQL 包含危险关键字。');
-  }
-
-  const sensitiveColumns = extractSensitiveColumns(normalized, schema, metricMappings);
-  if (sensitiveColumns.length > 0) {
-    throw new Error(`当前回合已被安全网关阻断，命中了敏感字段：${sensitiveColumns.join('、')}。`);
   }
 }
 
@@ -652,6 +601,16 @@ function extractTimeRangeDays(question: string): number | null {
   return Number.isFinite(next) && next > 0 ? next : null;
 }
 
+function determineLimit(question: string, preferred?: number | null): number {
+  if (Number.isFinite(preferred) && preferred && preferred > 0) {
+    return Math.min(Math.trunc(Number(preferred)), 200);
+  }
+  const limit = question.match(/(\d+)\s*条|top\s*(\d+)/i);
+  const raw = limit?.[1] || limit?.[2];
+  const value = Number.parseInt(raw || '20', 10);
+  return Number.isFinite(value) && value > 0 ? Math.min(value, 200) : 20;
+}
+
 function buildFallbackNerPayload(
   question: string,
   schema: DatabaseSchemaPayload,
@@ -732,9 +691,31 @@ function pickBestColumn(
   return scored[0]?.column;
 }
 
+function filterMongoProjectionColumns(columns: string[]) {
+  const next: string[] = [];
+  columns.forEach((column) => {
+    const normalized = column.trim();
+    if (!normalized) return;
+    const hasAncestor = next.some((existing) => normalized.startsWith(`${existing}.`));
+    if (hasAncestor) return;
+    const hasDescendant = next.some((existing) => existing.startsWith(`${normalized}.`));
+    if (hasDescendant) {
+      for (let index = next.length - 1; index >= 0; index -= 1) {
+        if (next[index].startsWith(`${normalized}.`)) {
+          next.splice(index, 1);
+        }
+      }
+    }
+    if (!next.includes(normalized)) {
+      next.push(normalized);
+    }
+  });
+  return next;
+}
+
 function buildFallbackSqlPayload(
   question: string,
-  engine: 'mysql' | 'pgsql',
+  engine: 'mysql' | 'pgsql' | 'mongo',
   schema: DatabaseSchemaPayload,
   metricMappings: DatabaseMetricViewMap,
   nerPayload: Nl2DataNerPayload
@@ -744,8 +725,124 @@ function buildFallbackSqlPayload(
     throw new Error('规则引擎未能找到可用于生成 SQL 的表结构。');
   }
 
-  const keywords = buildKeywordSet(question, nerPayload.normalizedTerms.join(' '), nerPayload.matchedMetrics.map((item) => `${item.table} ${item.column}`).join(' '));
+  const keywords = buildKeywordSet(
+    question,
+    nerPayload.normalizedTerms.join(' '),
+    nerPayload.matchedMetrics.map((item) => `${item.table} ${item.column} ${item.metricName || ''}`).join(' ')
+  );
   const tableMetrics = metricMappings[table.name];
+
+  if (engine === 'mongo') {
+    const dimensionColumn = pickBestColumn(
+      table.columns,
+      keywords,
+      tableMetrics,
+      (column) => isTextLikeType(column.type) || isDateLikeType(column.type)
+    );
+    const metricColumn = pickBestColumn(
+      table.columns,
+      keywords,
+      tableMetrics,
+      (column) => isNumericType(column.type)
+    );
+    const timeColumn = pickBestColumn(
+      table.columns,
+      keywords,
+      tableMetrics,
+      (column) => isDateLikeType(column.type) || /date|time|day|dt|created|updated/i.test(column.name)
+    );
+    const aggregateMode = /平均|avg/i.test(question)
+      ? 'avg'
+      : /总和|合计|汇总|sum/i.test(question)
+        ? 'sum'
+        : /最大|最高|max/i.test(question)
+          ? 'max'
+          : /最小|最低|min/i.test(question)
+            ? 'min'
+            : /数量|总数|几条|count/i.test(question)
+              ? 'count'
+              : 'value';
+    const timeRangeDays = extractTimeRangeDays(question);
+    const limit = determineLimit(question, null);
+    const command: Record<string, unknown> = {
+      collection: table.name,
+      limit,
+      filter: {},
+    };
+
+    if (timeColumn && timeRangeDays) {
+      command.filter = {
+        [timeColumn.name]: { $gte: new Date(Date.now() - timeRangeDays * 24 * 60 * 60 * 1000) },
+      };
+    }
+
+    if (aggregateMode === 'count') {
+      command.operation = 'count';
+      if (dimensionColumn) {
+        command.operation = 'aggregate';
+        command.pipeline = [
+          { $match: command.filter },
+          { $group: { _id: `$${dimensionColumn.name}`, value: { $sum: 1 } } },
+          { $project: { _id: 0, dimension: '$_id', value: 1 } },
+          { $sort: { value: -1 } },
+          { $limit: limit },
+        ];
+      }
+    } else if (aggregateMode !== 'value' && metricColumn) {
+      command.operation = 'aggregate';
+      const aggregateExpr = aggregateMode === 'sum'
+        ? { $sum: `$${metricColumn.name}` }
+        : aggregateMode === 'avg'
+          ? { $avg: `$${metricColumn.name}` }
+          : aggregateMode === 'max'
+            ? { $max: `$${metricColumn.name}` }
+            : { $min: `$${metricColumn.name}` };
+      if (dimensionColumn) {
+        command.pipeline = [
+          { $match: command.filter },
+          { $group: { _id: `$${dimensionColumn.name}`, value: aggregateExpr } },
+          { $project: { _id: 0, dimension: '$_id', value: 1 } },
+          { $sort: { value: -1 } },
+          { $limit: limit },
+        ];
+      } else {
+        command.pipeline = [
+          { $match: command.filter },
+          { $group: { _id: null, value: aggregateExpr } },
+          { $project: { _id: 0, value: 1 } },
+          { $limit: 1 },
+        ];
+      }
+    } else {
+      command.operation = 'find';
+      const selectedColumns = [
+        timeColumn?.name,
+        dimensionColumn?.name,
+        metricColumn?.name,
+      ]
+        .filter((value): value is string => typeof value === 'string' && value.length > 0)
+        .filter((value, index, list) => list.indexOf(value) === index)
+        .slice(0, 4);
+      const fallbackColumns = selectedColumns.length > 0
+        ? selectedColumns
+        : table.columns.slice(0, 4).map((column) => column.name);
+      const projectionColumns = filterMongoProjectionColumns(fallbackColumns);
+      command.projection = projectionColumns.reduce<Record<string, unknown>>((accumulator, column) => {
+        accumulator[column] = 1;
+        return accumulator;
+      }, { _id: 1 });
+      command.sort = {
+        [metricColumn?.name || timeColumn?.name || projectionColumns[0]]: -1,
+      };
+    }
+
+    const sql = JSON.stringify(command, null, 2);
+    return {
+      message: `已使用规则引擎围绕 ${table.name} 生成只读 Mongo 查询命令。`,
+      sql,
+    };
+  }
+
   const aggregateMode = /平均|avg/i.test(question)
     ? 'avg'
     : /总和|合计|汇总|sum/i.test(question)
@@ -838,12 +935,13 @@ function buildFallbackSqlPayload(
   const fallbackColumns = selectedColumns.length > 0
     ? selectedColumns
     : table.columns.slice(0, 4).map((column) => column.name);
+  const projectionColumns = filterMongoProjectionColumns(fallbackColumns);
 
-  const selectClause = fallbackColumns
+  const selectClause = projectionColumns
     .map((column) => quoteHarnessIdentifier(engine, column))
     .join(', ');
 
-  const orderColumn = metricColumn?.name || timeColumn?.name || fallbackColumns[0];
+  const orderColumn = metricColumn?.name || timeColumn?.name || projectionColumns[0];
   const orderClause = orderColumn
     ? `\nORDER BY ${quoteHarnessIdentifier(engine, orderColumn)} DESC`
     : '';
@@ -873,7 +971,7 @@ function renderPromptTemplate(template: string, replacements: Record<string, str
 function buildNerPromptContext(
   databaseInstanceId: string,
   databaseName: string,
-  databaseEngine: 'mysql' | 'pgsql',
+  databaseEngine: 'mysql' | 'pgsql' | 'mongo',
   question: string,
   currentSql: string,
   candidates: ReturnType<typeof buildNerCandidateBundle>
@@ -894,7 +992,7 @@ function buildNerPromptContext(
 function buildSqlPromptContext(
   databaseInstanceId: string,
   databaseName: string,
-  databaseEngine: 'mysql' | 'pgsql',
+  databaseEngine: 'mysql' | 'pgsql' | 'mongo',
   schema: DatabaseSchemaPayload,
   metricMappings: DatabaseMetricViewMap,
   currentSql: string,
@@ -1032,8 +1130,8 @@ export async function runNl2DataExecutor(input: Nl2DataAgentRequest): Promise<Nl
     throw new Error('当前数据源不存在，请重新选择。');
   }
 
-  if (databaseInstance.type !== 'mysql' && databaseInstance.type !== 'pgsql') {
-    throw new Error('NL2DATA 暂时仅支持 MySQL 和 PostgreSQL 数据源。');
+  if (databaseInstance.type !== 'mysql' && databaseInstance.type !== 'pgsql' && databaseInstance.type !== 'mongo') {
+    throw new Error('NL2DATA 暂时仅支持 MySQL、PostgreSQL 和 MongoDB 数据源。');
   }
 
   const profile = getAIModelProfileById(selectedModel.profileId);
@@ -1138,7 +1236,10 @@ export async function runNl2DataExecutor(input: Nl2DataAgentRequest): Promise<Nl
   };
 }
 
-export async function executeNl2DataSql(databaseInstanceId: string, sql: string): Promise<Nl2DataExecutionPayload> {
+export async function executeNl2DataSql(
+  databaseInstanceId: string,
+  sql: string
+): Promise<Nl2DataExecutionPayload> {
   if (!databaseInstanceId) {
     throw new Error('请先选择数据源。');
   }
@@ -1148,9 +1249,11 @@ export async function executeNl2DataSql(databaseInstanceId: string, sql: string)
     throw new Error('当前数据源不存在，请重新选择。');
   }
 
-  if (databaseInstance.type !== 'mysql' && databaseInstance.type !== 'pgsql') {
-    throw new Error('NL2DATA 暂时仅支持 MySQL 和 PostgreSQL 数据源。');
+  if (databaseInstance.type !== 'mysql' && databaseInstance.type !== 'pgsql' && databaseInstance.type !== 'mongo') {
+    throw new Error('NL2DATA 暂时仅支持 MySQL、PostgreSQL 和 MongoDB 数据源。');
   }
+
+  assertHarnessGuardrails(sql);
 
   const execution = await executeDbApi(
     createExecutorDbApiConfig(sql, databaseInstance.id),
@@ -1190,8 +1293,8 @@ export async function runNl2DataHarnessExecutor(input: Nl2DataAgentRequest): Pro
     throw new Error('当前数据源不存在，请重新选择。');
   }
 
-  if (databaseInstance.type !== 'mysql' && databaseInstance.type !== 'pgsql') {
-    throw new Error('DB Harness 暂时仅支持 MySQL 和 PostgreSQL 数据源。');
+  if (databaseInstance.type !== 'mysql' && databaseInstance.type !== 'pgsql' && databaseInstance.type !== 'mongo') {
+    throw new Error('DB Harness 暂时仅支持 MySQL、PostgreSQL 和 MongoDB 数据源。');
   }
 
   const profile = getAIModelProfileById(selectedModel.profileId);
@@ -1319,7 +1422,7 @@ export async function runNl2DataHarnessExecutor(input: Nl2DataAgentRequest): Pro
 
   let execution: Nl2DataExecutionPayload;
   try {
-    assertHarnessGuardrails(aiPayload.sql, schema, metricMappings);
+    assertHarnessGuardrails(aiPayload.sql);
     const rawExecution = await executeDbApi(
       createExecutorDbApiConfig(aiPayload.sql, databaseInstance.id),
       databaseInstance,

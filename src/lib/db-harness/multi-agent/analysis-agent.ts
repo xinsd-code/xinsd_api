@@ -13,17 +13,22 @@ export async function runAnalysisAgent(
   guardrailResult: DBHarnessGuardrailResult,
   logger: DBHarnessAgentLogger
 ): Promise<DBHarnessAnalysisResult> {
+  const execution = guardrailResult.execution;
+  if (!execution) {
+    throw new Error('分析阶段缺少可用执行结果。');
+  }
+
   logger.log('Analysis Agent', 'Input', {
     question: session.latestUserMessage,
     sql: queryResult.aiPayload.sql,
-    rowCount: guardrailResult.execution.rows.length,
-    columns: guardrailResult.execution.columns,
+    rowCount: execution.rows.length,
+    columns: execution.columns,
   });
 
   const analysis = buildAnalysisResult(
     session.latestUserMessage,
     queryResult.aiPayload.message,
-    guardrailResult.execution
+    execution
   );
 
   logger.log('Analysis Agent', 'Output', analysis);

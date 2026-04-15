@@ -266,10 +266,11 @@ export async function executeDbApi(
   const previewLimit = normalizePreviewLimit(options?.previewLimit);
   const baseSql = trimTrailingSemicolon(normalizedSql);
   const basePreviewSql = trimTrailingSemicolon(normalizedPreviewSql);
-  const executableSql = previewLimit
+  const isMongo = instance.type === 'mongo';
+  const executableSql = previewLimit && !isMongo
     ? `SELECT * FROM (${baseSql}) AS __db_api_preview LIMIT ${previewLimit}`
     : normalizedSql;
-  const previewSql = previewLimit
+  const previewSql = previewLimit && !isMongo
     ? `SELECT * FROM (${basePreviewSql}) AS __db_api_preview LIMIT ${previewLimit}`
     : normalizedPreviewSql;
   let result: DatabaseQueryPayload;
@@ -278,7 +279,7 @@ export async function executeDbApi(
   try {
     result = await executeParameterizedDatabaseQuery(instance, executableSql, compiled.values);
   } catch (error) {
-    if (!previewLimit) {
+    if (!previewLimit || isMongo) {
       throw error;
     }
     const rawResult = await executeParameterizedDatabaseQuery(instance, normalizedSql, compiled.values);
@@ -290,7 +291,7 @@ export async function executeDbApi(
     usedFallbackPreview = true;
   }
 
-  if (previewLimit && result.rows.length === 0) {
+  if (previewLimit && result.rows.length === 0 && !isMongo) {
     const shouldFallback = /^with\b/i.test(baseSql) || /\{\{/.test(config.sqlTemplate) || trimLeadingWithClause(config.sqlTemplate) !== config.sqlTemplate;
     if (shouldFallback) {
       try {

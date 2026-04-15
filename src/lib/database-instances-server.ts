@@ -9,17 +9,43 @@ import {
   DatabaseQueryPayload,
   DatabaseSchemaPayload,
 } from './types';
-import { resolveRedisConnection, resolveSqlConnection } from './database-instances';
+import { resolveMongoConnection, resolveRedisConnection, resolveSqlConnection } from './database-instances';
+import { normalizeMongoQueryText } from './mongo-query-compat';
 
 type MySqlConnection = import('mysql2/promise').Connection;
 type PgClient = import('pg').Client;
 type AppRedisClient = ReturnType<(typeof import('redis'))['createClient']>;
+type MongoClient = import('mongodb').MongoClient;
+type MongoDb = import('mongodb').Db;
+type MongoDocument = Record<string, unknown>;
+
+function isMongoBsonScalar(value: unknown): boolean {
+  return Boolean(value)
+    && typeof value === 'object'
+    && (
+      '_bsontype' in (value as Record<string, unknown>)
+      || typeof (value as { toHexString?: () => string }).toHexString === 'function'
+    );
+}
 
 function serializeValue(value: unknown): unknown {
   if (typeof value === 'bigint') return value.toString();
   if (value instanceof Date) return value.toISOString();
-  if (Buffer.isBuffer(value)) return value.toString('utf8');
+  if (Buffer.isBuffer(value)) {
+    const preview = value.toString('hex');
+    const clipped = preview.length > 32 ? `${preview.slice(0, 32)}…` : preview;
+    return `Buffer(${value.length} bytes, hex:${clipped})`;
+  }
+  if (ArrayBuffer.isView(value) && !(value instanceof DataView)) {
+    const buffer = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+    const preview = buffer.toString('hex');
+    const clipped = preview.length > 32 ? `${preview.slice(0, 32)}…` : preview;
+    return `Buffer(${buffer.length} bytes, hex:${clipped})`;
+  }
   if (Array.isArray(value)) return value.map((item) => serializeValue(item));
+  if (isMongoBsonScalar(value)) {
+    return value instanceof Date ? value.toISOString() : (value as { toString?: () => string }).toString?.() || JSON.stringify(value);
+  }
   if (value && typeof value === 'object') {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, serializeValue(item)])
@@ -85,6 +111,58 @@ async function withRedis<T>(instance: DatabaseInstance | CreateDatabaseInstance,
   }
 }
 
+async function withMongo<T>(
+  instance: DatabaseInstance | CreateDatabaseInstance,
+  fn: (db: MongoDb, client: MongoClient, database: string) => Promise<T>
+): Promise<T> {
+  const { MongoClient } = await import('mongodb');
+  const target = resolveMongoConnection(instance.connectionUri);
+  const client = new MongoClient(instance.connectionUri, {
+    connectTimeoutMS: 5000,
+    serverSelectionTimeoutMS: 5000,
+  });
+  await client.connect();
+  try {
+    const database = await resolveMongoDatabase(client, target.database);
+    const db = client.db(database);
+    return await fn(db, client, database);
+  } finally {
+    await client.close();
+  }
+}
+
+async function resolveMongoDatabase(client: MongoClient, preferredDatabase?: string): Promise<string> {
+  const trimmedPreferred = preferredDatabase?.trim();
+  if (trimmedPreferred) {
+    return trimmedPreferred;
+  }
+
+  const systemDatabases = new Set(['admin', 'local', 'config']);
+  try {
+    const adminDb = client.db('admin');
+    const databaseList = await adminDb.admin().listDatabases();
+    const candidateNames = databaseList.databases
+      .map((item) => item.name)
+      .filter((name) => !systemDatabases.has(name))
+      .sort((left, right) => left.localeCompare(right));
+
+    for (const name of candidateNames) {
+      try {
+        const collections = await client.db(name).listCollections({}, { nameOnly: true }).toArray();
+        if (collections.length > 0) {
+          return name;
+        }
+      } catch {
+        // Continue probing other databases; the preferred database is not known yet.
+      }
+    }
+  } catch {
+    // Fall through to the default admin database when database discovery is unavailable.
+  }
+
+  return 'admin';
+}
+
 export async function verifyDatabaseInstanceConnection(input: CreateDatabaseInstance): Promise<{ ok: true; message: string } | { ok: false; message: string }> {
   try {
     if (input.type === 'mysql') {
@@ -94,6 +172,10 @@ export async function verifyDatabaseInstanceConnection(input: CreateDatabaseInst
     } else if (input.type === 'pgsql') {
       await withPg(input, async (client) => {
         await client.query('SELECT 1 AS ok');
+      });
+    } else if (input.type === 'mongo') {
+      await withMongo(input, async (db) => {
+        await db.command({ ping: 1 });
       });
     } else {
       await withRedis(input, async (client) => {
@@ -167,6 +249,175 @@ function rowsToPayloadRows(rows: Array<Record<string, unknown>>): Record<string,
       Object.entries(row).map(([key, value]) => [key, serializeValue(value)])
     )
   );
+}
+
+interface MongoQueryCommand {
+  collection: string;
+  operation: 'find' | 'aggregate' | 'count' | 'distinct';
+  filter?: Record<string, unknown>;
+  projection?: Record<string, unknown>;
+  sort?: Record<string, 1 | -1>;
+  limit?: number;
+  skip?: number;
+  field?: string;
+  pipeline?: unknown[];
+}
+
+function parseMongoQuery(query: string): MongoQueryCommand {
+  const normalized = normalizeMongoQueryText(query);
+  if (!normalized) {
+    throw new Error('请输入 Mongo 查询命令');
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(normalized);
+  } catch {
+    throw new Error('Mongo 查询请使用 JSON 命令格式');
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Mongo 查询命令格式不正确');
+  }
+
+  const source = parsed as Record<string, unknown>;
+  const collection = typeof source.collection === 'string' ? source.collection.trim() : '';
+  const operation = source.operation === 'aggregate' || source.operation === 'count' || source.operation === 'distinct'
+    ? source.operation
+    : 'find';
+
+  if (!collection) {
+    throw new Error('Mongo 查询命令缺少 collection 字段');
+  }
+
+  const limit = typeof source.limit === 'number' && Number.isFinite(source.limit) ? Math.max(1, Math.min(Math.trunc(source.limit), 200)) : undefined;
+  const skip = typeof source.skip === 'number' && Number.isFinite(source.skip) ? Math.max(0, Math.trunc(source.skip)) : undefined;
+  const filter = source.filter && typeof source.filter === 'object' && !Array.isArray(source.filter)
+    ? source.filter as Record<string, unknown>
+    : {};
+  const projection = source.projection && typeof source.projection === 'object' && !Array.isArray(source.projection)
+    ? source.projection as Record<string, unknown>
+    : undefined;
+  const sort = source.sort && typeof source.sort === 'object' && !Array.isArray(source.sort)
+    ? source.sort as Record<string, 1 | -1>
+    : undefined;
+  const field = typeof source.field === 'string' ? source.field.trim() : '';
+  const pipeline = Array.isArray(source.pipeline) ? source.pipeline : undefined;
+
+  return {
+    collection,
+    operation,
+    ...(Object.keys(filter).length > 0 ? { filter } : {}),
+    ...(projection && Object.keys(projection).length > 0 ? { projection } : {}),
+    ...(sort && Object.keys(sort).length > 0 ? { sort } : {}),
+    ...(typeof limit === 'number' ? { limit } : {}),
+    ...(typeof skip === 'number' ? { skip } : {}),
+    ...(field ? { field } : {}),
+    ...(pipeline && pipeline.length > 0 ? { pipeline } : {}),
+  };
+}
+
+function ensureMongoQueryIsReadonly(query: string): MongoQueryCommand {
+  const command = parseMongoQuery(query);
+  if (!['find', 'aggregate', 'count', 'distinct'].includes(command.operation)) {
+    throw new Error('当前仅允许执行只读 Mongo 查询命令');
+  }
+  return command;
+}
+
+function buildMongoPreviewRows(rows: MongoDocument[]): Record<string, unknown>[] {
+  return rowsToPayloadRows(rows);
+}
+
+function inferMongoValueType(value: unknown): string {
+  if (value === null || value === undefined) return 'null';
+  if (Array.isArray(value)) {
+    const sample = value.find((item) => item !== null && item !== undefined);
+    return `array<${inferMongoValueType(sample)}>`;
+  }
+  if (value instanceof Date) return 'date';
+  if (Buffer.isBuffer(value)) return 'binary';
+  if (typeof value === 'bigint') return 'bigint';
+  if (typeof value === 'boolean') return 'boolean';
+  if (typeof value === 'number') return Number.isInteger(value) ? 'int' : 'number';
+  if (typeof value === 'string') return 'string';
+  if (value && typeof value === 'object') return 'object';
+  return typeof value;
+}
+
+function isPlainMongoObject(value: unknown): value is MongoDocument {
+  return Boolean(value)
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && !(value instanceof Date)
+    && !Buffer.isBuffer(value)
+    && !isMongoBsonScalar(value);
+}
+
+function flattenMongoDocument(
+  value: unknown,
+  prefix = '',
+  depth = 0,
+  maxDepth = 2,
+  accumulator = new Map<string, { types: Set<string>; samples: unknown[]; nullable: boolean }>()
+): Map<string, { types: Set<string>; samples: unknown[]; nullable: boolean }> {
+  if (!isPlainMongoObject(value) || depth > maxDepth) {
+    return accumulator;
+  }
+
+  Object.entries(value).forEach(([key, child]) => {
+    const path = prefix ? `${prefix}.${key}` : key;
+
+    if (isPlainMongoObject(child) && depth < maxDepth) {
+      flattenMongoDocument(child, path, depth + 1, maxDepth, accumulator);
+      return;
+    }
+
+    if (Array.isArray(child) && depth < maxDepth) {
+      const entry = accumulator.get(path) || { types: new Set<string>(), samples: [], nullable: false };
+      entry.types.add(inferMongoValueType(child));
+      entry.nullable = entry.nullable || child.some((item) => item === null || item === undefined);
+      entry.samples.push(...child.slice(0, 3));
+      accumulator.set(path, entry);
+      const firstObject = child.find((item) => isPlainMongoObject(item));
+      if (firstObject) {
+        flattenMongoDocument(firstObject, `${path}[]`, depth + 1, maxDepth, accumulator);
+      }
+      return;
+    }
+
+    const entry = accumulator.get(path) || { types: new Set<string>(), samples: [], nullable: false };
+    entry.types.add(inferMongoValueType(child));
+    entry.nullable = entry.nullable || child === null || child === undefined;
+    entry.samples.push(child);
+    accumulator.set(path, entry);
+  });
+
+  return accumulator;
+}
+
+function inferMongoColumns(documents: MongoDocument[]): NonNullable<DatabaseCollectionInfo['columns']> {
+  const fieldMap = new Map<string, { types: Set<string>; samples: unknown[]; nullable: boolean }>();
+  documents.forEach((document) => {
+    flattenMongoDocument(document, '', 0, 2, fieldMap);
+  });
+
+  return Array.from(fieldMap.entries())
+    .sort(([left], [right]) => left.localeCompare(right))
+    .slice(0, 80)
+    .map(([name, meta]) => {
+      const sample = meta.samples.find((item) => item !== null && item !== undefined);
+      const serializedSample = serializeValue(sample);
+      return {
+        name,
+        type: Array.from(meta.types).sort().join(' | ') || 'unknown',
+        nullable: meta.nullable,
+        defaultValue: null,
+        isPrimary: name === '_id',
+        extra: '',
+        comment: sample === undefined ? '' : `示例：${typeof serializedSample === 'string' ? serializedSample : JSON.stringify(serializedSample)}`,
+      };
+    });
 }
 
 export async function getDatabaseSchema(instance: DatabaseInstance): Promise<DatabaseSchemaPayload> {
@@ -324,6 +575,36 @@ export async function getDatabaseSchema(instance: DatabaseInstance): Promise<Dat
     });
   }
 
+  if (instance.type === 'mongo') {
+    return withMongo(instance, async (db) => {
+      const list = await db.listCollections({}, { nameOnly: false }).toArray();
+      const collections: DatabaseCollectionInfo[] = [];
+
+      for (const collectionInfo of list) {
+        if (collectionInfo.type && collectionInfo.type !== 'collection') {
+          continue;
+        }
+
+        const collectionName = collectionInfo.name;
+        const collection = db.collection(collectionName);
+        const [documents, estimatedCount] = await Promise.all([
+          collection.find({}).limit(24).toArray(),
+          collection.estimatedDocumentCount(),
+        ]);
+        const columns = inferMongoColumns(documents as MongoDocument[]);
+        collections.push({
+          name: collectionName,
+          category: 'table',
+          detail: `${estimatedCount} 条文档 · ${columns.length} 个字段`,
+          columns,
+        });
+      }
+
+      collections.sort((left, right) => left.name.localeCompare(right.name));
+      return { engine: 'mongo', collections };
+    });
+  }
+
   return withRedis(instance, async (client) => {
     const keys: string[] = [];
     let cursor = '0';
@@ -447,6 +728,21 @@ export async function getDatabaseCollectionPreview(instance: DatabaseInstance, n
     });
   }
 
+  if (instance.type === 'mongo') {
+    return withMongo(instance, async (db) => {
+      const documents = await db.collection(name).find({}).limit(50).toArray();
+      const payloadRows = buildMongoPreviewRows(documents as MongoDocument[]);
+      return {
+        engine: 'mongo',
+        name,
+        category: 'table',
+        columns: payloadRows[0] ? Object.keys(payloadRows[0]) : [],
+        rows: payloadRows,
+        summary: `预览 ${name} 集合前 50 条记录`,
+      };
+    });
+  }
+
   return withRedis(instance, async (client) => getRedisKeyPreview(client, name));
 }
 
@@ -491,6 +787,67 @@ export async function executeParameterizedDatabaseQuery(
         columns,
         rows: payloadRows,
         summary: `共返回 ${payloadRows.length} 行`,
+      };
+    });
+  }
+
+  if (instance.type === 'mongo') {
+    const command = ensureMongoQueryIsReadonly(query);
+    return withMongo(instance, async (db) => {
+      const collection = db.collection(command.collection);
+      const limit = command.limit ? Math.min(command.limit, 200) : 20;
+      const skip = command.skip || 0;
+
+      if (command.operation === 'aggregate') {
+        const pipeline = Array.isArray(command.pipeline) ? [...command.pipeline] : [];
+        if (!pipeline.some((stage) => stage && typeof stage === 'object' && '$limit' in (stage as Record<string, unknown>))) {
+          pipeline.push({ $limit: limit });
+        }
+        const rows = buildMongoPreviewRows(await collection.aggregate(pipeline as never[]).toArray());
+        return {
+          engine: 'mongo',
+          columns: rows[0] ? Object.keys(rows[0]) : [],
+          rows,
+          summary: `集合 ${command.collection} 聚合返回 ${rows.length} 行`,
+        };
+      }
+
+      if (command.operation === 'count') {
+        const count = await collection.countDocuments(command.filter || {});
+        return {
+          engine: 'mongo',
+          columns: ['count'],
+          rows: [{ count }],
+          summary: `集合 ${command.collection} 命中 ${count} 条记录`,
+        };
+      }
+
+      if (command.operation === 'distinct') {
+        if (!command.field) {
+          throw new Error('distinct 命令缺少 field 字段');
+        }
+        const values = await collection.distinct(command.field, command.filter || {});
+        const rows = values.slice(skip, skip + limit).map((value) => ({ value: serializeValue(value) }));
+        return {
+          engine: 'mongo',
+          columns: ['value'],
+          rows,
+          summary: `集合 ${command.collection} 的 ${command.field} 去重返回 ${rows.length} 行`,
+        };
+      }
+
+      const cursor = collection.find(command.filter || {}, {
+        projection: command.projection,
+        sort: command.sort,
+        skip,
+        limit,
+      });
+      const rows = buildMongoPreviewRows(await cursor.toArray());
+      return {
+        engine: 'mongo',
+        columns: rows[0] ? Object.keys(rows[0]) : [],
+        rows,
+        summary: `集合 ${command.collection} 返回 ${rows.length} 行`,
       };
     });
   }

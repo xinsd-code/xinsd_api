@@ -1,5 +1,5 @@
 import { normalizeSqlForExecution } from '@/lib/sql-normalize';
-import { DatabaseSchemaPayload } from '@/lib/types';
+import { DatabaseInstanceType, DatabaseSchemaPayload } from '@/lib/types';
 import {
   DBHarnessAiPayload,
   DBHarnessPlanningHints,
@@ -31,9 +31,11 @@ import {
 } from '../core/utils';
 import { buildCatalogOverview, buildSemanticOverview } from './catalog-tools';
 import { buildKnowledgeOverview } from '../memory/knowledge-memory';
+import { normalizeMongoQueryText } from '@/lib/mongo-query-compat';
 
 type QueryAggregate = DBHarnessQueryPlanMetric['aggregate'];
 type QueryPromptCompressionLevel = 'standard' | 'compact' | 'minimal';
+const DEFAULT_SCHEMA_OVERVIEW_TABLE_LIMIT = 8;
 
 const QUERY_CONTEXT_LIMITS: Record<QueryPromptCompressionLevel, {
   rules: number;
@@ -122,7 +124,8 @@ function normalizeAggregate(value: unknown): QueryAggregate | null {
 function buildSchemaOverview(
   schema: DatabaseSchemaPayload,
   metricMappings: DatabaseMetricViewMap,
-  keywords: Set<string>
+  keywords: Set<string>,
+  tableLimit = DEFAULT_SCHEMA_OVERVIEW_TABLE_LIMIT
 ): unknown {
   const tables = (schema.collections || [])
     .filter((collection) => collection.category === 'table')
@@ -172,7 +175,7 @@ function buildSchemaOverview(
       };
     })
     .sort((left, right) => right.score - left.score || left.payload.table.localeCompare(right.payload.table))
-    .slice(0, 8)
+    .slice(0, Math.max(2, Math.min(tableLimit, 12)))
     .map((item) => item.payload);
 
   return {
@@ -277,6 +280,7 @@ export function buildIntentPromptContext(
   workspace: DBHarnessWorkspaceContext
 ): string {
   const keywords = buildKeywordSet(session.latestUserMessage, session.currentSql);
+  const runtimePromptStrategy = workspace.runtimeConfig?.promptStrategy?.trim() || '';
   return [
     '动态上下文如下：',
     `Workspace ID: ${workspace.workspaceId || '未提供'}`,
@@ -285,6 +289,8 @@ export function buildIntentPromptContext(
     `数据库类型: ${workspace.databaseInstance.type}`,
     'Workspace 规则：',
     compactText(workspace.workspaceRules || '未设置额外规则。', 1600),
+    'GEPA Prompt 策略：',
+    compactText(runtimePromptStrategy || '未启用额外 Prompt 策略。', 600),
     `用户原始问句: ${compactText(session.latestUserMessage, 320)}`,
     `最近 5 条问题: ${compactJson(session.recentQuestions, 1000)}`,
     '当前 SQL 草稿：',
@@ -298,19 +304,28 @@ export function buildIntentPromptContext(
   ].join('\n');
 }
 
-export function sanitizeAiPayload(input: unknown, databaseEngine: 'mysql' | 'pgsql'): DBHarnessAiPayload {
+export function sanitizeAiPayload(input: unknown, databaseEngine: DatabaseInstanceType): DBHarnessAiPayload {
   const source = isRecord(input) ? input : {};
-  const sql = typeof source.sql === 'string' ? source.sql.trim() : '';
+  const sql = typeof source.sql === 'string'
+    ? source.sql.trim()
+    : typeof source.query === 'string'
+      ? source.query.trim()
+      : '';
 
   if (!sql) {
-    throw new Error('AI 没有返回可用的 SQL');
+    throw new Error(databaseEngine === 'mongo' ? 'AI 没有返回可用的 Mongo 查询命令' : 'AI 没有返回可用的 SQL');
   }
 
   return {
     message: typeof source.message === 'string' && source.message.trim()
       ? source.message.trim()
-      : '已根据你的描述生成查询 SQL。',
-    sql: normalizeSqlForExecution(databaseEngine, sql),
+      : databaseEngine === 'mongo'
+        ? '已根据你的描述生成查询命令。'
+        : '已根据你的描述生成查询 SQL。',
+    sql: normalizeSqlForExecution(
+      databaseEngine,
+      databaseEngine === 'mongo' ? normalizeMongoQueryText(sql) : sql
+    ),
   };
 }
 
@@ -328,12 +343,60 @@ function scoreCandidate(candidate: DBHarnessNerCandidate, keywords: Set<string>)
   return score;
 }
 
-export function buildNerCandidateBundle(
+function buildExpandedKeywordSet(
   schema: DatabaseSchemaPayload,
   metricMappings: DatabaseMetricViewMap,
   keywords: Set<string>
+): Set<string> {
+  const expanded = new Set(keywords);
+
+  schema.collections
+    .filter((collection) => collection.category === 'table')
+    .forEach((collection) => {
+      const tableMetrics = metricMappings[collection.name];
+      (collection.columns || []).forEach((column) => {
+        const metric = tableMetrics?.fields?.[column.name];
+        const terms = dedupeStrings([
+          collection.name,
+          column.name,
+          column.comment,
+          metric?.metricName,
+          metric?.description,
+          ...(metric?.aliases || []),
+        ], 24);
+        if (!terms.some((term) => scoreTextByKeywords(term, keywords) > 0)) {
+          return;
+        }
+        terms.forEach((term) => {
+          const normalized = term.trim().toLowerCase();
+          if (normalized) {
+            expanded.add(normalized);
+          }
+        });
+      });
+    });
+
+  return expanded;
+}
+
+function determineNerCandidateLimit(keywordCount: number, totalAvailable: number, matchedCount: number): number {
+  const base = keywordCount >= 10 || matchedCount >= 12
+    ? 24
+    : keywordCount >= 6 || matchedCount >= 8
+      ? 20
+      : 16;
+  const scale = totalAvailable > 40 ? 4 : totalAvailable > 24 ? 2 : 0;
+  return Math.min(32, Math.max(12, base + scale));
+}
+
+export function buildNerCandidateBundle(
+  schema: DatabaseSchemaPayload,
+  metricMappings: DatabaseMetricViewMap,
+  keywords: Set<string>,
+  preferredLimit?: number | null
 ) {
   const allCandidates: DBHarnessNerCandidate[] = [];
+  const expandedKeywords = buildExpandedKeywordSet(schema, metricMappings, keywords);
 
   schema.collections
     .filter((collection) => collection.category === 'table')
@@ -362,13 +425,15 @@ export function buildNerCandidateBundle(
   const sorted = allCandidates
     .map((candidate) => ({
       candidate,
-      score: scoreCandidate(candidate, keywords),
+      score: scoreCandidate(candidate, expandedKeywords),
     }))
     .sort((left, right) => right.score - left.score
       || left.candidate.table.localeCompare(right.candidate.table)
       || left.candidate.column.localeCompare(right.candidate.column));
 
-  const hardLimit = 16;
+  const hardLimit = preferredLimit && Number.isFinite(preferredLimit)
+    ? Math.max(8, Math.min(Math.trunc(preferredLimit), 32))
+    : determineNerCandidateLimit(keywords.size, allCandidates.length, sorted.filter((item) => item.score > 0).length);
   const matched = keywords.size > 0 ? sorted.filter((item) => item.score > 0) : sorted;
   const chosen = (matched.length > 0 ? matched : sorted).slice(0, hardLimit).map((item) => item.candidate);
 
@@ -432,7 +497,11 @@ export function buildSchemaPromptContext(
   workspace: DBHarnessWorkspaceContext,
   candidates: ReturnType<typeof buildNerCandidateBundle>
 ): string {
-  const keywords = buildKeywordSet(session.latestUserMessage, session.currentSql);
+  const keywords = buildExpandedKeywordSet(
+    workspace.schema,
+    workspace.metricMappings,
+    buildKeywordSet(session.latestUserMessage, session.currentSql)
+  );
   return [
     '动态上下文如下：',
     `Workspace ID: ${workspace.workspaceId || '未提供'}`,
@@ -441,6 +510,8 @@ export function buildSchemaPromptContext(
     `数据库类型: ${workspace.databaseInstance.type}`,
     'Workspace 规则：',
     compactText(workspace.workspaceRules || '未设置额外规则。', 2000),
+    'GEPA Prompt 策略：',
+    compactText(workspace.runtimeConfig?.promptStrategy || '未启用额外 Prompt 策略。', 720),
     `用户原始问句: ${compactText(session.latestUserMessage, 320)}`,
     '当前 SQL 草稿：',
     compactText(session.currentSql, 1200),
@@ -463,16 +534,25 @@ export function buildQueryPromptContext(
   compressionLevel: QueryPromptCompressionLevel = 'standard'
 ): string {
   const limits = QUERY_CONTEXT_LIMITS[compressionLevel];
-  const keywords = buildKeywordSet(
-    session.latestUserMessage,
-    session.currentSql,
-    nerPayload.normalizedTerms.join(' '),
-    nerPayload.matchedMetrics.map((item) => `${item.term} ${item.metricName || ''} ${item.table} ${item.column}`).join(' '),
-    planningHints.candidateTables.join(' '),
-    planningHints.dimensions.join(' '),
-    planningHints.metrics.join(' ')
+  const keywords = buildExpandedKeywordSet(
+    workspace.schema,
+    workspace.metricMappings,
+    buildKeywordSet(
+      session.latestUserMessage,
+      session.currentSql,
+      nerPayload.normalizedTerms.join(' '),
+      nerPayload.matchedMetrics.map((item) => `${item.term} ${item.metricName || ''} ${item.table} ${item.column}`).join(' '),
+      planningHints.candidateTables.join(' '),
+      planningHints.dimensions.join(' '),
+      planningHints.metrics.join(' ')
+    )
   );
-  const schemaOverview = buildSchemaOverview(workspace.schema, workspace.metricMappings, keywords);
+  const schemaOverview = buildSchemaOverview(
+    workspace.schema,
+    workspace.metricMappings,
+    keywords,
+    workspace.runtimeConfig?.schemaOverviewTables || DEFAULT_SCHEMA_OVERVIEW_TABLE_LIMIT
+  );
   const resultColumns = Array.isArray(session.currentResult?.columns)
     ? session.currentResult.columns.slice(0, limits.resultColumnCount)
     : [];
@@ -488,6 +568,8 @@ export function buildQueryPromptContext(
     `数据库类型: ${workspace.databaseInstance.type}`,
     'Workspace 取数规则：',
     compactText(workspace.workspaceRules || '未设置额外规则。', limits.rules),
+    'GEPA Prompt 策略：',
+    compactText(workspace.runtimeConfig?.promptStrategy || '未启用额外 Prompt 策略。', Math.min(720, limits.planning)),
     `最近一次用户意图: ${compactText(session.latestUserMessage, 320)}`,
     `最近 5 条问题: ${compactJson(session.recentQuestions, limits.recentQuestions)}`,
     'Intent Agent 规划提示：',
@@ -516,10 +598,11 @@ export function buildQueryPromptContext(
 export function buildFallbackNerPayload(
   question: string,
   schema: DatabaseSchemaPayload,
-  metricMappings: DatabaseMetricViewMap
+  metricMappings: DatabaseMetricViewMap,
+  preferredLimit?: number | null
 ): DBHarnessNerPayload {
   const keywords = buildKeywordSet(question);
-  const candidates = buildNerCandidateBundle(schema, metricMappings, keywords).candidates;
+  const candidates = buildNerCandidateBundle(schema, metricMappings, keywords, preferredLimit).candidates;
 
   return {
     normalizedTerms: Array.from(keywords).slice(0, 8),
@@ -539,10 +622,10 @@ export function buildFallbackNerPayload(
 }
 
 function selectTargetTable(
-  question: string,
   workspace: DBHarnessWorkspaceContext,
   nerPayload: DBHarnessNerPayload,
-  planningHints: DBHarnessPlanningHints
+  planningHints: DBHarnessPlanningHints,
+  keywords: Set<string>
 ) {
   const matchedTable = nerPayload.matchedMetrics[0]?.table;
   if (matchedTable) {
@@ -556,12 +639,6 @@ function selectTargetTable(
     return workspace.schema.collections.find((collection) => collection.name === hintedTable) || null;
   }
 
-  const keywords = buildKeywordSet(
-    question,
-    planningHints.candidateTables.join(' '),
-    planningHints.dimensions.join(' '),
-    planningHints.metrics.join(' ')
-  );
   const scored = workspace.schema.collections
     .filter((collection) => collection.category === 'table')
     .map((collection) => {
@@ -585,23 +662,13 @@ function selectTargetTable(
 }
 
 function hasMeaningfulFieldSignals(
-  question: string,
   table: DatabaseSchemaPayload['collections'][number] | null,
   metricMappings: DatabaseMetricViewMap[string] | undefined,
-  planningHints: DBHarnessPlanningHints,
+  keywords: Set<string>,
   nerPayload: DBHarnessNerPayload
 ) {
   if (!table?.columns?.length) return false;
   if (nerPayload.matchedMetrics.some((item) => item.table === table.name)) return true;
-
-  const keywords = buildKeywordSet(
-    question,
-    planningHints.candidateTables.join(' '),
-    planningHints.dimensions.join(' '),
-    planningHints.metrics.join(' '),
-    planningHints.notes.join(' '),
-    nerPayload.normalizedTerms.join(' ')
-  );
 
   if (keywords.size === 0) return false;
 
@@ -659,6 +726,28 @@ function pickBestColumn(
     .sort((left, right) => right.score - left.score || left.column.name.localeCompare(right.column.name));
 
   return scored[0]?.column;
+}
+
+function filterMongoProjectionColumns(columns: string[]) {
+  const next: string[] = [];
+  columns.forEach((column) => {
+    const normalized = column.trim();
+    if (!normalized) return;
+    const hasAncestor = next.some((existing) => normalized.startsWith(`${existing}.`));
+    if (hasAncestor) return;
+    const hasDescendant = next.some((existing) => existing.startsWith(`${normalized}.`));
+    if (hasDescendant) {
+      for (let index = next.length - 1; index >= 0; index -= 1) {
+        if (next[index].startsWith(`${normalized}.`)) {
+          next.splice(index, 1);
+        }
+      }
+    }
+    if (!next.includes(normalized)) {
+      next.push(normalized);
+    }
+  });
+  return next;
 }
 
 function inferAggregateMode(
@@ -725,27 +814,179 @@ function buildPlanFromResolvedSelection(input: {
 
 export function buildFallbackQueryPlan(
   question: string,
-  engine: 'mysql' | 'pgsql',
+  engine: DatabaseInstanceType,
   workspace: DBHarnessWorkspaceContext,
   nerPayload: DBHarnessNerPayload,
   planningHints: DBHarnessPlanningHints
 ): DBHarnessQueryResult {
-  const table = selectTargetTable(question, workspace, nerPayload, planningHints);
+  const keywords = buildExpandedKeywordSet(
+    workspace.schema,
+    workspace.metricMappings,
+    buildKeywordSet(
+      question,
+      planningHints.candidateTables.join(' '),
+      planningHints.dimensions.join(' '),
+      planningHints.metrics.join(' '),
+      nerPayload.normalizedTerms.join(' '),
+      nerPayload.matchedMetrics.map((item) => `${item.table} ${item.column} ${item.metricName || ''}`).join(' ')
+    )
+  );
+  const table = selectTargetTable(workspace, nerPayload, planningHints, keywords);
   if (!table || !table.columns?.length) {
     throw new Error('当前问题没有匹配到对应的数据表，已中止 SQL 生成。请补充更明确的业务对象或表意图。');
   }
 
-  const keywords = buildKeywordSet(
-    question,
-    planningHints.candidateTables.join(' '),
-    planningHints.dimensions.join(' '),
-    planningHints.metrics.join(' '),
-    nerPayload.normalizedTerms.join(' '),
-    nerPayload.matchedMetrics.map((item) => `${item.table} ${item.column} ${item.metricName || ''}`).join(' ')
-  );
   const tableMetrics = workspace.metricMappings[table.name];
-  if (!hasMeaningfulFieldSignals(question, table, tableMetrics, planningHints, nerPayload)) {
+  const sqlEngine: 'mysql' | 'pgsql' = engine === 'mysql' ? 'mysql' : 'pgsql';
+  if (!hasMeaningfulFieldSignals(table, tableMetrics, keywords, nerPayload)) {
     throw new Error(`当前问题没有在表 ${table.name} 中匹配到可用字段，已中止 SQL 生成。请明确指标、维度或时间条件后再试。`);
+  }
+  if (engine === 'mongo') {
+    const dimensionColumn = pickBestColumn(
+      table.name,
+      table.columns,
+      keywords,
+      tableMetrics,
+      (column) => isTextLikeType(column.type) || isDateLikeType(column.type)
+    );
+    const metricColumn = pickBestColumn(
+      table.name,
+      table.columns,
+      keywords,
+      tableMetrics,
+      (column) => isNumericType(column.type)
+    );
+    const timeColumn = pickBestColumn(
+      table.name,
+      table.columns,
+      keywords,
+      tableMetrics,
+      (column) => isDateLikeType(column.type) || /date|time|day|dt|created|updated/i.test(column.name)
+    );
+    const aggregateMode = inferAggregateMode(question, planningHints, metricColumn, tableMetrics);
+    const timeRangeDays = planningHints.timeRangeDays || extractTimeRangeDays(question);
+    const safeLimit = determineLimit(question, null);
+    const filter: Record<string, unknown> = {};
+
+    if (timeColumn && timeRangeDays) {
+      filter[timeColumn.name] = { $gte: new Date(Date.now() - timeRangeDays * 24 * 60 * 60 * 1000) };
+    }
+
+    const command: Record<string, unknown> = {
+      collection: table.name,
+      operation: aggregateMode === 'count' || aggregateMode !== 'value' && metricColumn ? 'aggregate' : 'find',
+      filter,
+      limit: safeLimit,
+    };
+
+    if (aggregateMode === 'count') {
+      if (dimensionColumn) {
+        command.pipeline = [
+          { $match: filter },
+          { $group: { _id: `$${dimensionColumn.name}`, value: { $sum: 1 } } },
+          { $project: { _id: 0, dimension: '$_id', value: 1 } },
+          { $sort: { value: -1 } },
+          { $limit: safeLimit },
+        ];
+      } else {
+        command.pipeline = [
+          { $match: filter },
+          { $count: 'value' },
+        ];
+      }
+    } else if (aggregateMode !== 'value' && metricColumn) {
+      const aggregateField = metricColumn.name;
+      const aggregateExpr = aggregateMode === 'sum'
+        ? { $sum: `$${aggregateField}` }
+        : aggregateMode === 'avg'
+          ? { $avg: `$${aggregateField}` }
+          : aggregateMode === 'max'
+            ? { $max: `$${aggregateField}` }
+            : { $min: `$${aggregateField}` };
+      if (dimensionColumn) {
+        command.pipeline = [
+          { $match: filter },
+          { $group: { _id: `$${dimensionColumn.name}`, value: aggregateExpr } },
+          { $project: { _id: 0, dimension: '$_id', value: 1 } },
+          { $sort: { value: -1 } },
+          { $limit: safeLimit },
+        ];
+      } else {
+        command.pipeline = [
+          { $match: filter },
+          { $group: { _id: null, value: aggregateExpr } },
+          { $project: { _id: 0, value: 1 } },
+          { $limit: 1 },
+        ];
+      }
+    } else {
+      const selectedColumns = [
+        timeColumn?.name,
+        dimensionColumn?.name,
+        metricColumn?.name,
+      ]
+        .filter((value): value is string => typeof value === 'string' && value.length > 0)
+        .filter((value, index, list) => list.indexOf(value) === index)
+        .slice(0, 4);
+      const fallbackColumns = selectedColumns.length > 0
+        ? selectedColumns
+        : table.columns.slice(0, 4).map((column) => column.name);
+      const projectionColumns = filterMongoProjectionColumns(fallbackColumns);
+      command.projection = projectionColumns.reduce<Record<string, unknown>>((accumulator, column) => {
+        accumulator[column] = 1;
+        return accumulator;
+      }, { _id: 1 });
+      if (dimensionColumn || metricColumn || timeColumn) {
+        command.sort = {
+          [metricColumn?.name || timeColumn?.name || projectionColumns[0]]: -1,
+        };
+      }
+    }
+
+    const query = JSON.stringify(command, null, 2);
+    const plan = buildPlanFromResolvedSelection({
+      intent: planningHints.intent || inferIntent(question),
+      strategy: 'rule',
+      targetTable: table.name,
+      summary: `已使用规则引擎围绕 ${table.name} 生成只读 Mongo 查询命令。`,
+      dimensions: dimensionColumn ? [{
+        table: table.name,
+        column: dimensionColumn.name,
+        label: tableMetrics?.fields?.[dimensionColumn.name]?.metricName || dimensionColumn.comment || dimensionColumn.name,
+      }] : [],
+      metrics: metricColumn ? [{
+        table: table.name,
+        column: metricColumn.name,
+        label: tableMetrics?.fields?.[metricColumn.name]?.metricName || metricColumn.comment || metricColumn.name,
+        aggregate: aggregateMode,
+      }] : [],
+      filters: timeColumn && timeRangeDays ? [{
+        table: table.name,
+        column: timeColumn.name,
+        label: tableMetrics?.fields?.[timeColumn.name]?.metricName || timeColumn.comment || timeColumn.name,
+        operator: '>=',
+        value: `MongoDate(${timeRangeDays}d)`,
+        source: 'time-range',
+      }] : [],
+      orderBy: [],
+      limit: safeLimit,
+      notes: dedupeStrings([
+        ...planningHints.notes,
+        planningHints.candidateTables[0] ? `优先围绕 ${planningHints.candidateTables[0]}` : '',
+        planningHints.metrics[0] ? `优先确认指标 ${planningHints.metrics[0]}` : '',
+      ], 80).slice(0, 6),
+      compiledSql: query,
+    });
+
+    return {
+      aiPayload: {
+        message: `已使用规则引擎围绕 ${table.name} 生成只读 Mongo 查询命令。`,
+        sql: query,
+      },
+      plan,
+      detail: '模型规划不可用，已回退到规则引擎生成只读 Mongo 查询命令。',
+      usedFallback: true,
+    };
   }
   const dimensionColumn = pickBestColumn(
     table.name,
@@ -774,14 +1015,14 @@ export function buildFallbackQueryPlan(
   const aggregateMode = inferAggregateMode(question, planningHints, metricColumn, tableMetrics);
   const timeRangeDays = planningHints.timeRangeDays || extractTimeRangeDays(question);
   const safeLimit = determineLimit(question, null);
-  const tableSql = quoteIdentifier(engine, table.name);
+  const tableSql = quoteIdentifier(sqlEngine, table.name);
   const filterStatements: string[] = [];
   const filters: DBHarnessQueryPlanFilter[] = [];
 
   if (timeColumn && timeRangeDays) {
-    const quotedTime = quoteIdentifier(engine, timeColumn.name);
+    const quotedTime = quoteIdentifier(sqlEngine, timeColumn.name);
     filterStatements.push(
-      engine === 'mysql'
+      sqlEngine === 'mysql'
         ? `${quotedTime} >= DATE_SUB(CURRENT_DATE, INTERVAL ${timeRangeDays} DAY)`
         : `${quotedTime} >= CURRENT_DATE - INTERVAL '${timeRangeDays} day'`
     );
@@ -825,7 +1066,7 @@ export function buildFallbackQueryPlan(
 
   if (aggregateMode === 'count') {
     if (dimensionColumn) {
-      const quotedDimension = quoteIdentifier(engine, dimensionColumn.name);
+      const quotedDimension = quoteIdentifier(sqlEngine, dimensionColumn.name);
       sql = `SELECT ${quotedDimension} AS dimension, COUNT(*) AS value\nFROM ${tableSql}${whereClause}\nGROUP BY ${quotedDimension}\nORDER BY value DESC\nLIMIT ${safeLimit};`;
       orderBy = [{ column: 'value', label: 'value', direction: 'desc' }];
       message = `已使用规则引擎按 ${dimensionColumn.name} 统计数量。`;
@@ -833,10 +1074,10 @@ export function buildFallbackQueryPlan(
       sql = `SELECT COUNT(*) AS value\nFROM ${tableSql}${whereClause}\nLIMIT 1;`;
     }
   } else if (aggregateMode !== 'value' && metricColumn) {
-    const quotedMetric = quoteIdentifier(engine, metricColumn.name);
+    const quotedMetric = quoteIdentifier(sqlEngine, metricColumn.name);
     const aggregateFn = aggregateMode.toUpperCase();
     if (dimensionColumn) {
-      const quotedDimension = quoteIdentifier(engine, dimensionColumn.name);
+      const quotedDimension = quoteIdentifier(sqlEngine, dimensionColumn.name);
       sql = `SELECT ${quotedDimension} AS dimension, ${aggregateFn}(${quotedMetric}) AS value\nFROM ${tableSql}${whereClause}\nGROUP BY ${quotedDimension}\nORDER BY value DESC\nLIMIT ${safeLimit};`;
       orderBy = [{ column: 'value', label: 'value', direction: 'desc' }];
       message = `已使用规则引擎按 ${dimensionColumn.name} 聚合 ${metricColumn.name}。`;
@@ -856,10 +1097,10 @@ export function buildFallbackQueryPlan(
     const fallbackColumns = selectedColumns.length > 0
       ? selectedColumns
       : table.columns.slice(0, 4).map((column) => column.name);
-    const selectClause = fallbackColumns.map((column) => quoteIdentifier(engine, column)).join(', ');
+    const selectClause = fallbackColumns.map((column) => quoteIdentifier(sqlEngine, column)).join(', ');
     const orderColumn = metricColumn?.name || timeColumn?.name || fallbackColumns[0];
     const orderClause = orderColumn
-      ? `\nORDER BY ${quoteIdentifier(engine, orderColumn)} DESC`
+      ? `\nORDER BY ${quoteIdentifier(sqlEngine, orderColumn)} DESC`
       : '';
     sql = `SELECT ${selectClause}\nFROM ${tableSql}${whereClause}${orderClause}\nLIMIT ${safeLimit};`;
     orderBy = orderColumn ? [{ column: orderColumn, label: orderColumn, direction: 'desc' }] : [];
@@ -975,7 +1216,7 @@ export function parseSchemaAgentPayload(rawContent: string): DBHarnessNerPayload
 
 export function parseQueryAgentPayload(
   rawContent: string,
-  engine: 'mysql' | 'pgsql',
+  engine: DatabaseInstanceType,
   fallback: DBHarnessQueryPlan
 ) {
   const parsed = parseJsonSafely(rawContent);
@@ -1015,10 +1256,17 @@ export function parseQueryAgentPayload(
 
 export function buildPlaceholderQueryPlan(
   question: string,
-  engine: 'mysql' | 'pgsql',
+  engine: DatabaseInstanceType,
   intent?: string
 ): DBHarnessQueryPlan {
-  const normalizedSql = normalizeSqlForExecution(engine, 'SELECT 1 AS placeholder LIMIT 1;');
+  const normalizedSql = engine === 'mongo'
+    ? JSON.stringify({
+        collection: '__placeholder__',
+        operation: 'find',
+        filter: {},
+        limit: 1,
+      }, null, 2)
+    : normalizeSqlForExecution(engine, 'SELECT 1 AS placeholder LIMIT 1;');
   return {
     intent: intent || inferIntent(question),
     strategy: 'rule',

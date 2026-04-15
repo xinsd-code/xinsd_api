@@ -389,6 +389,12 @@ function findQuestionForAssistantMessage(messages: DBHarnessChatMessage[], assis
   return '';
 }
 
+function findLatestTraceMessageId(messages: DBHarnessChatMessage[]) {
+  return [...messages]
+    .reverse()
+    .find((message) => message.role === 'assistant' && message.trace?.length)?.id || null;
+}
+
 function createTransientSession(workspaceId: string): DBHarnessSessionRecord {
   const now = new Date().toISOString();
   return {
@@ -450,7 +456,7 @@ export default function DbHarnessPage() {
   const bootstrappedRef = useRef(false);
 
   const sqlDatabaseInstances = useMemo(
-    () => databaseInstances.filter((item) => item.type === 'mysql' || item.type === 'pgsql'),
+    () => databaseInstances.filter((item) => item.type === 'mysql' || item.type === 'pgsql' || item.type === 'mongo'),
     [databaseInstances]
   );
   const modelSelections = useMemo(() => flattenAIModelSelections(modelProfiles, 'chat'), [modelProfiles]);
@@ -762,7 +768,7 @@ export default function DbHarnessPage() {
     setMessages(currentSession.messages || []);
     setSelectedDatabaseId(currentSession.selectedDatabaseId || activeWorkspace?.databaseId || '');
     setSelectedModelKey(currentSession.selectedModel ? getAIModelSelectionKey(currentSession.selectedModel) : '');
-    setActiveTraceMessageId(null);
+    setActiveTraceMessageId(findLatestTraceMessageId(currentSession.messages || []));
   }, [activeWorkspace?.databaseId, selectedSessionId]);
 
   useEffect(() => {
@@ -1239,7 +1245,7 @@ export default function DbHarnessPage() {
     if (!hasDatasource || !selectedDatabase) {
       setBlockingPrompt({
         title: '需要先配置数据源',
-        description: 'DB Harness 在真正调用 Agent 前需要一个可用的 MySQL 或 PostgreSQL 数据源。',
+        description: 'DB Harness 在真正调用 Agent 前需要一个可用的 MySQL、PostgreSQL 或 MongoDB 数据源。',
         href: '/database-instances',
         actionLabel: '前往数据库实例',
       });
@@ -1300,6 +1306,7 @@ export default function DbHarnessPage() {
     setSending(true);
     setErrorMessage('');
     setBlockingPrompt(null);
+    setActiveTraceMessageId(assistantId);
 
     try {
       const response = await fetch('/api/db-harness/chat', {
@@ -1318,17 +1325,21 @@ export default function DbHarnessPage() {
           currentSql: latestArtifact?.sql || '',
           currentResult: latestArtifact
             ? {
-                columns: latestArtifact.columns,
-                rows: latestArtifact.previewRows,
-                summary: latestArtifact.summary,
-              }
+              columns: latestArtifact.columns,
+              rows: latestArtifact.previewRows,
+              summary: latestArtifact.summary,
+            }
             : null,
         }),
       });
 
       const payload = await response.json() as DBHarnessTurnResponse | { error?: string };
-      if (!response.ok || !('trace' in payload)) {
+      if (!response.ok) {
         throw new Error(payload && 'error' in payload && payload.error ? payload.error : 'DB Harness 执行失败');
+      }
+
+      if (!('trace' in payload)) {
+        throw new Error('DB Harness 执行失败');
       }
 
       await playTrace(assistantId, payload);
@@ -1373,6 +1384,11 @@ export default function DbHarnessPage() {
             <Icons.Plus size={16} />
             新建 Workspace
           </button>
+
+          <Link href="/db-harness/gepa" className={styles.sidebarSecondaryLink}>
+            <Icons.Sparkles size={15} />
+            GEPA 工作台
+          </Link>
 
           <div className={styles.workspaceList}>
             {workspaceItems.map((workspaceItem) => {

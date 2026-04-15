@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { deleteDBHarnessWorkspace, updateDBHarnessWorkspace } from '@/lib/db';
+import type { DBHarnessRuntimeConfig } from '@/lib/db-harness/core/types';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -14,12 +15,13 @@ export async function PUT(
       return NextResponse.json({ error: '缺少工作区 ID。' }, { status: 400 });
     }
 
-    const body = await request.json() as { name?: string; databaseId?: string; rules?: string };
+    const body = await request.json() as { name?: string; databaseId?: string; rules?: string; runtimeConfig?: DBHarnessRuntimeConfig };
     const updated = updateDBHarnessWorkspace({
       id,
       name: body.name,
       databaseId: body.databaseId,
       rules: body.rules,
+      runtimeConfig: body.runtimeConfig,
     });
 
     if (!updated) {

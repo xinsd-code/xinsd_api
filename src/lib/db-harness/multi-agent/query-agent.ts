@@ -24,7 +24,7 @@ export async function runQueryAgent(
   gateway: DBHarnessGateway,
   logger: DBHarnessAgentLogger
 ): Promise<DBHarnessQueryResult> {
-  const engine = workspace.databaseInstance.type as 'mysql' | 'pgsql';
+  const engine = workspace.databaseInstance.type as 'mysql' | 'pgsql' | 'mongo';
 
   logger.log('Query Agent', 'Input', {
     question: session.latestUserMessage,
@@ -49,13 +49,6 @@ export async function runQueryAgent(
   }
 
   try {
-    const promptContexts = (['standard', 'compact', 'minimal'] as const).map((level) => buildQueryPromptContext(
-      session,
-      workspace,
-      intentResult.planningHints,
-      schemaResult.nerPayload,
-      level
-    ));
     const condensedMessages = buildCondensedSessionMessages(session, {
       keepRecentMessages: 4,
       maxSummaryLength: 800,
@@ -65,13 +58,22 @@ export async function runQueryAgent(
       engine,
       intentResult.planningHints.intent
     );
-    const { content } = await gateway.runQueryPrompt(promptContexts, condensedMessages);
+    const { content } = await gateway.runQueryPrompt(
+      (level) => buildQueryPromptContext(
+        session,
+        workspace,
+        intentResult.planningHints,
+        schemaResult.nerPayload,
+        level
+      ),
+      condensedMessages
+    );
     const parsed = parseQueryAgentPayload(
       extractJsonPayload(content),
       engine,
       fallbackPlan
     );
-    const detail = `已基于 ${workspace.selectedModel.modelId} 生成只读 SQL，并围绕当前语义映射补齐排序、聚合和结果限制。`;
+    const detail = `已基于 ${workspace.selectedModel.modelId} 生成只读查询，并围绕当前语义映射补齐排序、聚合和结果限制。`;
 
     logger.log('Query Agent', 'Output', {
       detail,
@@ -96,7 +98,7 @@ export async function runQueryAgent(
       throw new Error(fallbackErrorMessage || '模型规划不可用，且规则引擎没有找到可映射字段。');
     }
 
-    const detail = '模型规划不可用，已回退到规则引擎生成只读 SQL。';
+    const detail = '模型规划不可用，已回退到规则引擎生成只读查询。';
 
     logger.log('Query Agent', 'Fallback Output', {
       reason: error instanceof Error ? error.message : String(error),

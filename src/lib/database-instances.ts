@@ -47,6 +47,24 @@ export function resolveSqlConnection(type: 'mysql' | 'pgsql', connectionUri: str
   };
 }
 
+export function resolveMongoConnection(connectionUri: string): ResolvedConnection {
+  const trimmed = normalizeConnectionUri(connectionUri);
+  if (!/^mongodb(\+srv)?:\/\//i.test(trimmed)) {
+    throw new Error('连接地址格式不正确，应以 mongodb:// 或 mongodb+srv:// 开头');
+  }
+
+  const url = new URL(trimmed);
+  if (!url.hostname) {
+    throw new Error('连接地址中缺少 host 信息');
+  }
+
+  return {
+    host: url.hostname,
+    port: url.port ? Number(url.port) : 27017,
+    database: url.pathname.replace(/^\/+/, '') || undefined,
+  };
+}
+
 export function resolveRedisConnection(connectionUri: string): ResolvedConnection {
   const trimmed = normalizeConnectionUri(connectionUri);
   if (trimmed.startsWith('redis://')) {
@@ -73,13 +91,16 @@ export function resolveRedisConnection(connectionUri: string): ResolvedConnectio
 }
 
 export function sanitizeDatabaseInstanceInput(input: Partial<CreateDatabaseInstance>): CreateDatabaseInstance {
-  const type: DatabaseInstanceType = input.type === 'pgsql' || input.type === 'redis' ? input.type : 'mysql';
+  const type: DatabaseInstanceType = input.type === 'pgsql' || input.type === 'redis' || input.type === 'mongo'
+    ? input.type
+    : 'mysql';
+  const isMongo = type === 'mongo';
   return {
     name: typeof input.name === 'string' ? input.name.trim() : '',
     type,
     connectionUri: typeof input.connectionUri === 'string' ? normalizeConnectionUri(input.connectionUri) : '',
-    username: typeof input.username === 'string' ? input.username.trim() : '',
-    password: typeof input.password === 'string' ? input.password : '',
+    username: isMongo ? '' : (typeof input.username === 'string' ? input.username.trim() : ''),
+    password: isMongo ? '' : (typeof input.password === 'string' ? input.password : ''),
     metricMappings: sanitizeDatabaseMetricMappings(input.metricMappings),
     semanticModel: sanitizeDatabaseSemanticModel(input.semanticModel) || undefined,
   };
@@ -95,6 +116,8 @@ export function validateDatabaseInstanceInput(input: CreateDatabaseInstance): st
   try {
     if (input.type === 'mysql' || input.type === 'pgsql') {
       resolveSqlConnection(input.type, input.connectionUri);
+    } else if (input.type === 'mongo') {
+      resolveMongoConnection(input.connectionUri);
     } else {
       resolveRedisConnection(input.connectionUri);
     }

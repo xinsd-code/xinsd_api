@@ -51,20 +51,22 @@ function toEditableInstance(instance: DatabaseInstance): EditableInstance {
     name: instance.name,
     type: instance.type,
     connectionUri: instance.connectionUri,
-    username: instance.username || '',
-    password: instance.password || '',
+    username: instance.type === 'mongo' ? '' : (instance.username || ''),
+    password: instance.type === 'mongo' ? '' : (instance.password || ''),
   };
 }
 
 function getConnectionPlaceholder(type: DatabaseInstanceType): string {
   if (type === 'mysql') return 'jdbc:mysql://localhost:3306/my_chat';
   if (type === 'pgsql') return 'jdbc:postgresql://localhost:5432/my_chat';
+  if (type === 'mongo') return 'mongodb://root:123456@localhost:27017/?authMechanism=DEFAULT';
   return 'localhost:6379';
 }
 
 function getConnectionExample(type: DatabaseInstanceType): string {
   if (type === 'mysql') return '示例：jdbc:mysql://localhost:3306/my_chat，用户 root / 密码 root';
   if (type === 'pgsql') return '示例：jdbc:postgresql://localhost:5432/my_chat，用户 root / 密码 root';
+  if (type === 'mongo') return '示例：mongodb://root:123456@localhost:27017/?authMechanism=DEFAULT，支持直接连接或带鉴权参数';
   return '示例：localhost:6379（无鉴权可留空用户名和密码）';
 }
 
@@ -85,6 +87,18 @@ function maskConnectionUri(connectionUri: string, type: DatabaseInstanceType): s
     return `${hostMasked}:${port}`;
   }
 
+  if (type === 'mongo') {
+    const match = value.match(/^(mongodb(?:\+srv)?:\/\/)([^/@]+@)?([^/:]+)(:\d+)?(?:\/([^?#]*))?(.*)$/i);
+    if (!match) return '已配置连接地址';
+    const [, prefix, auth, host, port, database = '', search = ''] = match;
+    const hostMasked = host.length <= 4 ? `${host[0] || '*'}***` : `${host.slice(0, 2)}***${host.slice(-1)}`;
+    const dbMasked = database
+      ? (database.length <= 3 ? `${database[0] || '*'}**` : `${database.slice(0, 2)}***${database.slice(-1)}`)
+      : '';
+    const querySuffix = search || '';
+    return `${prefix}${auth ? '***@' : ''}${hostMasked}${port || ''}${dbMasked ? `/${dbMasked}` : '/'}${querySuffix}`;
+  }
+
   const match = value.match(/^(jdbc:(?:mysql|postgresql):\/\/)([^/:]+)(:\d+\/)(.+)$/);
   if (!match) return '已配置连接地址';
   const [, prefix, host, portAndSlash, database] = match;
@@ -100,12 +114,25 @@ function getDefaultQuery(type: DatabaseInstanceType, collectionName?: string): s
   if (type === 'pgsql') {
     return collectionName ? `SELECT * FROM "${collectionName}" LIMIT 50;` : 'SELECT table_name FROM information_schema.tables WHERE table_schema = \'public\';';
   }
+  if (type === 'mongo') {
+    return JSON.stringify({
+      collection: collectionName || 'collection_name',
+      operation: 'find',
+      filter: {},
+      projection: { _id: 1 },
+      sort: { _id: -1 },
+      limit: 50,
+    }, null, 2);
+  }
   return collectionName ? `TYPE ${collectionName}` : 'SCAN 0 MATCH * COUNT 50';
 }
 
 function getQueryHint(type: DatabaseInstanceType): string {
   if (type === 'redis') {
     return '支持只读命令：GET / HGETALL / LRANGE / SMEMBERS / ZRANGE / TYPE / TTL / EXISTS / SCAN / KEYS';
+  }
+  if (type === 'mongo') {
+    return '支持只读 Mongo JSON 命令：find / aggregate / count / distinct';
   }
   return '当前仅允许执行只读 SQL：SELECT / SHOW / DESCRIBE / DESC / EXPLAIN / WITH';
 }
@@ -237,6 +264,7 @@ function DatabaseInstancesPageContent() {
   const engineCounts = useMemo(() => ({
     mysql: instances.filter((item) => item.type === 'mysql').length,
     pgsql: instances.filter((item) => item.type === 'pgsql').length,
+    mongo: instances.filter((item) => item.type === 'mongo').length,
     redis: instances.filter((item) => item.type === 'redis').length,
   }), [instances]);
   const payload = useMemo<CreateDatabaseInstance>(() => sanitizeDatabaseInstanceInput({
@@ -260,6 +288,12 @@ function DatabaseInstancesPageContent() {
     }),
     [activeDetail]
   );
+  const selectedSemanticDescription = useMemo(() => {
+    if (!selectedCollection) return '';
+    const fromSemanticModel = activeDetail?.semanticModel?.entities.find((entity) => entity.table === selectedCollection)?.description || '';
+    const fromMetricMappings = sanitizedMetricMappings[selectedCollection]?.description || '';
+    return fromSemanticModel || fromMetricMappings;
+  }, [activeDetail?.semanticModel?.entities, sanitizedMetricMappings, selectedCollection]);
   const selectedMetricMappings = useMemo(
     () => (selectedCollection ? sanitizedMetricMappings[selectedCollection]?.fields || {} : {}),
     [sanitizedMetricMappings, selectedCollection]
@@ -402,6 +436,11 @@ function DatabaseInstancesPageContent() {
       ...(key === 'type'
         ? {
             connectionUri: '',
+            username: '',
+            password: '',
+          } : {}),
+      ...(prev.type === 'mongo' || value === 'mongo'
+        ? {
             username: '',
             password: '',
           }
@@ -665,7 +704,7 @@ function DatabaseInstancesPageContent() {
           <div className={styles.sidebarTitle}>
             <div className={styles.sidebarTitleText}>
               <strong>数据库实例</strong>
-              <span>统一管理 MySQL / PostgreSQL / Redis 实例，先验证连接，再浏览结构与查询数据。</span>
+              <span>统一管理 MySQL / PostgreSQL / MongoDB / Redis 实例，先验证连接，再浏览结构与查询数据。</span>
             </div>
             <button className="btn btn-primary btn-icon" onClick={handleCreateNew} title="新增数据库实例">
               <Icons.Plus size={18} />
@@ -675,6 +714,7 @@ function DatabaseInstancesPageContent() {
             <span className={styles.softBadge}>{instances.length} 个实例</span>
             <span className={styles.softBadge}>MySQL {engineCounts.mysql}</span>
             <span className={styles.softBadge}>PgSQL {engineCounts.pgsql}</span>
+            <span className={`${styles.softBadge} ${styles.mongoBadge}`}>Mongo {engineCounts.mongo}</span>
             <span className={styles.softBadge}>Redis {engineCounts.redis}</span>
           </div>
         </div>
@@ -717,7 +757,7 @@ function DatabaseInstancesPageContent() {
             <div>
               <div className={styles.heroTitle}>把数据库连接、结构浏览和只读查询集中到一个工作台里。</div>
               <div className={styles.heroDesc}>
-                数据库实例管理页面向日常联调和排障场景：先配置实例并验证连接，再直接查看表 / Key 信息、预览数据，并在页内执行只读 SQL 或 Redis 查询。
+                数据库实例管理页面向日常联调和排障场景：先配置实例并验证连接，再直接查看表 / Key 信息、预览数据，并在页内执行只读 SQL、Mongo JSON 命令或 Redis 查询。
               </div>
               <div className={styles.heroMeta}>
                 <span className={styles.softBadge}><Icons.Check size={12} /> 保存前强制连接验证</span>
@@ -737,6 +777,10 @@ function DatabaseInstancesPageContent() {
               <div className={styles.statCard}>
                 <div className={styles.statLabel}>PostgreSQL</div>
                 <div className={styles.statValue}>{engineCounts.pgsql}</div>
+              </div>
+              <div className={styles.statCard}>
+                <div className={styles.statLabel}>MongoDB</div>
+                <div className={styles.statValue}>{engineCounts.mongo}</div>
               </div>
               <div className={styles.statCard}>
                 <div className={styles.statLabel}>Redis</div>
@@ -770,13 +814,15 @@ function DatabaseInstancesPageContent() {
                       <br />
                       PgSQL：{getConnectionPlaceholder('pgsql')}
                       <br />
+                      Mongo：{getConnectionPlaceholder('mongo')}
+                      <br />
                       Redis：{getConnectionPlaceholder('redis')}
                     </div>
                   </div>
                   <div className={styles.overviewCard}>
                     <div className={styles.overviewLabel}>查询约束</div>
                     <div className={styles.inlineHint}>
-                      SQL 仅支持只读语句，Redis 仅支持只读命令，适合日常排查与数据核对。
+                      SQL / Mongo 仅支持只读查询，Redis 仅支持只读命令，适合日常排查与数据核对。
                     </div>
                   </div>
                 </div>
@@ -860,6 +906,7 @@ function DatabaseInstancesPageContent() {
                       {([
                         ['mysql', 'MySQL'],
                         ['pgsql', 'PostgreSQL'],
+                        ['mongo', 'MongoDB'],
                         ['redis', 'Redis'],
                       ] as Array<[DatabaseInstanceType, string]>).map(([value, label]) => (
                         <button
@@ -887,7 +934,16 @@ function DatabaseInstancesPageContent() {
                     </div>
                   </label>
 
-                  {draft.type !== 'redis' && (
+                  {draft.type === 'mongo' && (
+                    <div className={styles.formSpan2}>
+                      <div className="form-label">认证方式</div>
+                      <div className={styles.inlineHint}>
+                        Mongo 账号密码请直接写在连接地址中，不再单独填写用户名和密码。
+                      </div>
+                    </div>
+                  )}
+
+                  {draft.type !== 'redis' && draft.type !== 'mongo' && (
                     <>
                       <label>
                         <div className="form-label">用户名</div>
@@ -900,18 +956,18 @@ function DatabaseInstancesPageContent() {
                       </label>
                       <label>
                         <div className="form-label">密码</div>
-                      <input
-                        className="form-input"
-                        type={showPassword ? 'text' : 'password'}
-                        value={draft.password}
-                        placeholder="root"
-                        onChange={(e) => updateDraft('password', e.target.value)}
-                      />
-                      <button className="btn btn-secondary btn-sm" type="button" onClick={() => setShowPassword((prev) => !prev)}>
-                        {showPassword ? '隐藏密码' : '显示密码'}
-                      </button>
-                    </label>
-                  </>
+                        <input
+                          className="form-input"
+                          type={showPassword ? 'text' : 'password'}
+                          value={draft.password}
+                          placeholder="root"
+                          onChange={(e) => updateDraft('password', e.target.value)}
+                        />
+                        <button className="btn btn-secondary btn-sm" type="button" onClick={() => setShowPassword((prev) => !prev)}>
+                          {showPassword ? '隐藏密码' : '显示密码'}
+                        </button>
+                      </label>
+                    </>
                   )}
 
                   {draft.type === 'redis' && (
@@ -1032,7 +1088,7 @@ function DatabaseInstancesPageContent() {
                   <div className={styles.panelHeader}>
                     <div className={styles.panelTitle}>
                       <strong>表结构属性</strong>
-                      <span>{`${getStructurePanelSubtitle(activeInstance.type, selectedCollectionInfo, selectedCollection)}${selectedMetricTotal ? ` · 已映射 ${selectedMetricCount}/${selectedMetricTotal} 个字段` : ''}`}</span>
+                      <span>{`${getStructurePanelSubtitle(activeInstance.type, selectedCollectionInfo, selectedCollection)}${selectedMetricTotal ? ` · 已映射 ${selectedMetricCount}/${selectedMetricTotal} 个字段` : ''}${selectedSemanticDescription ? ` · 表说明：${selectedSemanticDescription}` : ''}`}</span>
                     </div>
                     <div className={styles.panelHeaderActions}>
                       {selectedCollectionInfo?.category === 'table' && selectedMetricTotal > 0 && (
@@ -1066,6 +1122,17 @@ function DatabaseInstancesPageContent() {
                   </div>
                   {!isStructureCollapsed && (
                     <div className={styles.panelBody}>
+                      {selectedSemanticDescription && (
+                        <div className={styles.inlineNotice} style={{ marginBottom: 14 }}>
+                          <div className={styles.inlineNoticeTitle}>
+                            <Icons.Sparkles size={16} />
+                            当前表语义说明
+                          </div>
+                          <div className={styles.inlineNoticeText}>
+                            {selectedSemanticDescription}
+                          </div>
+                        </div>
+                      )}
                       {selectedCollectionInfo?.category === 'table' && selectedCollectionInfo.columns && selectedCollectionInfo.columns.length > 0 ? (
                         <>
                           <div className={styles.structureFilterBar}>

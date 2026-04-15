@@ -1,4 +1,4 @@
-import { DBHarnessChatTurnRequest, DBHarnessIntentResult, DBHarnessTurnResponse } from '../core/types';
+import { DBHarnessChatTurnRequest, DBHarnessExecutionPayload, DBHarnessIntentResult, DBHarnessTurnResponse } from '../core/types';
 import { buildFailureResponse, cloneTrace, createPendingTrace, updateTrace } from '../core/trace';
 import { DBHarnessAgentLogger } from '../memory/agent-logger';
 import { createDBHarnessSession } from '../session/session-context';
@@ -17,6 +17,7 @@ export class DBMultiAgent {
     const session = createDBHarnessSession(input);
     const logger = new DBHarnessAgentLogger(session.turnId);
     const trace = createPendingTrace();
+    const autoRetryEnabled = /^(1|true|yes|on)$/i.test(process.env.DB_HARNESS_EMPTY_RESULT_RETRY || '');
 
     logger.log('DB-Multi-Agent', 'Run started', {
       question: session.latestUserMessage,
@@ -84,16 +85,21 @@ export class DBMultiAgent {
       return buildFailureResponse(trace, 'query', detail);
     }
 
+    let guardrailExecution: DBHarnessExecutionPayload | undefined;
     let guardrailResult;
     try {
       guardrailResult = await runGuardrailAgent(workspace, queryResult, logger);
+      guardrailExecution = guardrailResult.execution;
+      if (!guardrailExecution) {
+        throw new Error('Guardrail Agent 执行失败。');
+      }
       updateTrace(trace, 'guardrail', 'completed', guardrailResult.detail, {
         title: '传给 Analysis Agent',
         payload: compactJson({
-          rowCount: guardrailResult.execution.rows.length,
-          columns: guardrailResult.execution.columns,
-          summary: guardrailResult.execution.summary,
-          previewRows: guardrailResult.execution.rows.slice(0, 3),
+          rowCount: guardrailExecution.rows.length,
+          columns: guardrailExecution.columns,
+          summary: guardrailExecution.summary,
+          previewRows: guardrailExecution.rows.slice(0, 3),
         }, 1800),
       });
     } catch (error) {
@@ -101,6 +107,65 @@ export class DBMultiAgent {
       logger.log('Guardrail Agent', 'Error', detail);
       return buildFailureResponse(trace, 'guardrail', detail, queryResult.aiPayload.sql);
     }
+
+    const initialExecution = guardrailExecution;
+    if (!initialExecution) {
+      throw new Error('Guardrail Agent 执行失败。');
+    }
+
+    if (
+      autoRetryEnabled
+      && initialExecution.rows.length === 0
+      && intentResult.planningHints.timeRangeDays
+      && intentResult.planningHints.timeRangeDays <= 30
+    ) {
+      const relaxedHints = {
+        ...intentResult.planningHints,
+        timeRangeDays: Math.min(intentResult.planningHints.timeRangeDays * 3, 3650),
+        notes: [
+          ...intentResult.planningHints.notes,
+          '空结果后已自动放宽时间范围重试一次。',
+        ].slice(0, 8),
+      };
+      try {
+        const retryIntentResult = {
+          ...intentResult,
+          planningHints: relaxedHints,
+        };
+        const retryQueryResult = await runQueryAgent(session, workspace, retryIntentResult, schemaResult, gateway, logger);
+        const retryGuardrailResult = await runGuardrailAgent(workspace, retryQueryResult, logger);
+        const retryGuardrailExecution = retryGuardrailResult.execution;
+        if (retryGuardrailExecution && retryGuardrailExecution.rows.length > 0) {
+          queryResult = retryQueryResult;
+          guardrailResult = retryGuardrailResult;
+          guardrailExecution = retryGuardrailExecution;
+          updateTrace(trace, 'query', 'completed', `${retryQueryResult.detail} 已触发空结果自动重试。`, {
+            title: '传给 Guardrail Agent',
+            payload: compactJson({
+              message: retryQueryResult.aiPayload.message,
+              sql: retryQueryResult.aiPayload.sql,
+              plan: retryQueryResult.plan,
+              usedFallback: retryQueryResult.usedFallback,
+            }, 1800),
+          });
+          updateTrace(trace, 'guardrail', 'completed', `${retryGuardrailResult.detail} 已用放宽条件结果替换原结果。`, {
+            title: '传给 Analysis Agent',
+            payload: compactJson({
+              rowCount: retryGuardrailExecution.rows.length,
+              columns: retryGuardrailExecution.columns,
+              summary: retryGuardrailExecution.summary,
+              previewRows: retryGuardrailExecution.rows.slice(0, 3),
+            }, 1800),
+          });
+        }
+      } catch (error) {
+        logger.log('DB-Multi-Agent', 'Empty result retry skipped', {
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    const finalExecution = guardrailExecution || initialExecution;
 
     try {
       const analysisResult = await runAnalysisAgent(session, queryResult, guardrailResult, logger);
@@ -121,15 +186,15 @@ export class DBMultiAgent {
       });
 
       const response: DBHarnessTurnResponse = {
-        outcome: guardrailResult.execution.rows.length === 0 ? 'empty' : 'success',
+        outcome: finalExecution.rows.length === 0 ? 'empty' : 'success',
         reply: analysisResult.reply,
         trace: cloneTrace(trace),
         artifacts: {
-          sql: guardrailResult.execution.sql,
+          sql: finalExecution.sql,
           summary: analysisResult.summary,
-          columns: guardrailResult.execution.columns,
-          previewRows: guardrailResult.execution.rows.slice(0, 12),
-          previewSql: guardrailResult.execution.previewSql,
+          columns: finalExecution.columns,
+          previewRows: finalExecution.rows.slice(0, 12),
+          previewSql: finalExecution.previewSql,
           planSummary: queryResult.plan.summary,
           queryPlan: queryResult.plan,
           catalogOverview,
@@ -149,7 +214,7 @@ export class DBMultiAgent {
     } catch (error) {
       const detail = error instanceof Error ? error.message : 'Analysis Agent 执行失败。';
       logger.log('Analysis Agent', 'Error', detail);
-      return buildFailureResponse(trace, 'analysis', detail, guardrailResult.execution.sql);
+      return buildFailureResponse(trace, 'analysis', detail, finalExecution.sql);
     }
   }
 }

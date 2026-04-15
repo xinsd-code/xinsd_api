@@ -43,7 +43,8 @@ function buildUpstreamPayload(systemPrompt: string, messages: DBHarnessSessionCo
 
 async function requestModelContent(
   endpoint: string,
-  workspace: DBHarnessWorkspaceContext,
+  profile: DBHarnessWorkspaceContext['profile'],
+  modelId: string,
   systemPrompt: string,
   messages: DBHarnessSessionContext['messages']
 ): Promise<string> {
@@ -51,8 +52,8 @@ async function requestModelContent(
   try {
     upstreamResponse = await fetch(endpoint, {
       method: 'POST',
-      headers: buildAIModelHeaders(workspace.profile),
-      body: JSON.stringify(buildUpstreamPayload(systemPrompt, messages, workspace.selectedModel.modelId)),
+      headers: buildAIModelHeaders(profile),
+      body: JSON.stringify(buildUpstreamPayload(systemPrompt, messages, modelId)),
       signal: AbortSignal.timeout(25000),
     });
   } catch (error) {
@@ -93,56 +94,88 @@ export class DBHarnessGateway {
     private readonly logger: DBHarnessAgentLogger
   ) {}
 
+  private getModelContext(useNer = false) {
+    if (useNer && this.workspace.nerSelectedModel && this.workspace.nerProfile && this.workspace.nerEndpoint) {
+      return {
+        selectedModel: this.workspace.nerSelectedModel,
+        profile: this.workspace.nerProfile,
+        endpoint: this.workspace.nerEndpoint,
+      };
+    }
+
+    return {
+      selectedModel: this.workspace.selectedModel,
+      profile: this.workspace.profile,
+      endpoint: this.workspace.endpoint,
+    };
+  }
+
   async runIntentPrompt(context: string, messages: DBHarnessSessionContext['messages']) {
+    const model = this.getModelContext(false);
     const prompt = renderPromptTemplate(
       await loadPromptTemplate('db-harness-intent-agent.md'),
       { DYNAMIC_CONTEXT: context }
     );
     this.logger.log('Gateway', 'Dispatching Intent Agent prompt', {
-      model: this.workspace.selectedModel.modelId,
+      model: model.selectedModel.modelId,
       datasource: this.workspace.databaseInstance.name,
       systemPromptChars: prompt.length,
       messageCount: messages.length,
       messageChars: messages.reduce((sum, message) => sum + message.content.length, 0),
     });
-    const content = await requestModelContent(this.workspace.endpoint, this.workspace, prompt, messages);
+    const content = await requestModelContent(model.endpoint, model.profile, model.selectedModel.modelId, prompt, messages);
     return { prompt, content };
   }
 
   async runSchemaPrompt(context: string, messages: DBHarnessSessionContext['messages']) {
+    const model = this.getModelContext(true);
     const prompt = renderPromptTemplate(
       await loadPromptTemplate('db-harness-schema-agent.md'),
       { DYNAMIC_CONTEXT: context }
     );
     this.logger.log('Gateway', 'Dispatching Schema Agent prompt', {
-      model: this.workspace.selectedModel.modelId,
+      model: model.selectedModel.modelId,
       datasource: this.workspace.databaseInstance.name,
       systemPromptChars: prompt.length,
       messageCount: messages.length,
       messageChars: messages.reduce((sum, message) => sum + message.content.length, 0),
     });
-    const content = await requestModelContent(this.workspace.endpoint, this.workspace, prompt, messages);
+    const content = await requestModelContent(model.endpoint, model.profile, model.selectedModel.modelId, prompt, messages);
     return { prompt, content };
   }
 
-  async runQueryPrompt(contexts: string | string[], messages: DBHarnessSessionContext['messages']) {
+  async runQueryPrompt(
+    contextBuilder: (level: 'standard' | 'compact' | 'minimal') => string,
+    messages: DBHarnessSessionContext['messages']
+  ) {
+    const model = this.getModelContext(false);
     const template = await loadPromptTemplate('db-harness-query-agent.md');
-    const contextVariants = Array.isArray(contexts) ? contexts : [contexts];
     const messageChars = messages.reduce((sum, message) => sum + message.content.length, 0);
     let compressionLevel: 'standard' | 'compact' | 'minimal' = 'standard';
-    let prompt = renderPromptTemplate(template, { DYNAMIC_CONTEXT: contextVariants[0] || '' });
+    const preferredLevel = this.workspace.runtimeConfig?.preferredCompressionLevel;
+    const startLevels = (() => {
+      if (preferredLevel === 'minimal') {
+        return ['minimal'] as const;
+      }
+      if (preferredLevel === 'compact') {
+        return ['compact', 'minimal'] as const;
+      }
+      return ['standard', 'compact', 'minimal'] as const;
+    })();
+    let prompt = '';
 
-    for (let index = 0; index < contextVariants.length; index += 1) {
-      const candidate = renderPromptTemplate(template, { DYNAMIC_CONTEXT: contextVariants[index] || '' });
+    for (const level of startLevels) {
+      const context = contextBuilder(level);
+      const candidate = renderPromptTemplate(template, { DYNAMIC_CONTEXT: context });
       prompt = candidate;
-      compressionLevel = index === 0 ? 'standard' : index === 1 ? 'compact' : 'minimal';
-      if (candidate.length + messageChars <= QUERY_PROMPT_CHAR_THRESHOLD || index === contextVariants.length - 1) {
+      compressionLevel = level;
+      if (candidate.length + messageChars <= QUERY_PROMPT_CHAR_THRESHOLD) {
         break;
       }
     }
 
     this.logger.log('Gateway', 'Dispatching Query Agent prompt', {
-      model: this.workspace.selectedModel.modelId,
+      model: model.selectedModel.modelId,
       datasource: this.workspace.databaseInstance.name,
       systemPromptChars: prompt.length,
       messageCount: messages.length,
@@ -150,7 +183,7 @@ export class DBHarnessGateway {
       compressionLevel,
       charThreshold: QUERY_PROMPT_CHAR_THRESHOLD,
     });
-    const content = await requestModelContent(this.workspace.endpoint, this.workspace, prompt, messages);
+    const content = await requestModelContent(model.endpoint, model.profile, model.selectedModel.modelId, prompt, messages);
     return { prompt, content };
   }
 }
