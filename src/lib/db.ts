@@ -189,6 +189,8 @@ function initializeDb(database: Database.Database) {
       connection_uri TEXT NOT NULL,
       username TEXT DEFAULT '',
       password TEXT DEFAULT '',
+      owner_id TEXT DEFAULT 'default-user',
+      workspace_id TEXT DEFAULT 'default-workspace',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -1221,9 +1223,9 @@ export function createDatabaseInstance(input: CreateDatabaseInstance): DatabaseI
 
   db.prepare(`
     INSERT INTO database_instances (
-      id, name, type, connection_uri, username, password, metric_mappings, semantic_model, created_at, updated_at
+      id, name, type, connection_uri, username, password, owner_id, workspace_id, metric_mappings, semantic_model, created_at, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     input.name,
@@ -1231,6 +1233,8 @@ export function createDatabaseInstance(input: CreateDatabaseInstance): DatabaseI
     input.connectionUri,
     input.username || '',
     input.password || '',
+    input.ownerId || 'default-user',
+    input.workspaceId || 'default-workspace',
     Object.keys(metricMappings).length > 0 ? JSON.stringify(metricMappings) : null,
     semanticModel ? JSON.stringify(semanticModel) : null,
     now,

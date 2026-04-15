@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getAIModelProfileById, getDatabaseInstanceById, updateDatabaseInstanceSemanticModel } from '@/lib/db';
 import { buildAIModelEndpoint, buildAIModelHeaders } from '@/lib/ai-models';
+import { requireSession, verifyDatabaseInstanceAccess } from '@/lib/auth';
 import { getEffectiveDatabaseMetricMappings, sanitizeDatabaseSemanticModel } from '@/lib/database-instances';
 import { getDatabaseCollectionPreview, getDatabaseSchema } from '@/lib/database-instances-server';
 import { deriveSemanticSnapshot } from '@/lib/db-harness/tools/catalog-tools';
@@ -317,6 +318,12 @@ export async function GET(
   try {
     const { id } = await context.params;
     const instance = getDatabaseInstanceById(id);
+    const session = await requireSession();
+    const hasAccess = await verifyDatabaseInstanceAccess(
+      instance?.workspaceId || 'default-workspace',
+      instance?.ownerId
+    );
+    if (!hasAccess) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     if (!instance) {
       return NextResponse.json({ error: '数据库实例不存在' }, { status: 404 });
     }
@@ -334,12 +341,24 @@ export async function POST(
   context: { params: Promise<{ id: string }> }
 ) {
   try {
+    // 1. 验证认证
+    const session = await requireSession();
+    
     const { id } = await context.params;
     const body = await request.json().catch(() => ({})) as SemanticGenerationRequestBody;
     const persist = body.persist === true;
     const instance = getDatabaseInstanceById(id);
     if (!instance) {
       return NextResponse.json({ error: '数据库实例不存在' }, { status: 404 });
+    }
+
+    // 2. 验证权限
+    const hasAccess = await verifyDatabaseInstanceAccess(
+      instance.workspaceId || 'default-workspace',
+      instance.ownerId
+    );
+    if (!hasAccess) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
     const schema = await getDatabaseSchema(instance);
@@ -402,6 +421,9 @@ export async function POST(
       message,
     });
   } catch (error) {
+    if (error instanceof Error && error.message.includes('Unauthorized')) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
     console.error('Failed to generate semantic model:', error);
     return NextResponse.json({ error: error instanceof Error ? error.message : '生成语义模型失败' }, { status: 500 });
   }
@@ -412,7 +434,24 @@ export async function PUT(
   context: { params: Promise<{ id: string }> }
 ) {
   try {
+    // 1. 验证认证
+    const session = await requireSession();
+    
     const { id } = await context.params;
+    const instance = getDatabaseInstanceById(id);
+    if (!instance) {
+      return NextResponse.json({ error: '数据库实例不存在' }, { status: 404 });
+    }
+
+    // 2. 验证权限
+    const hasAccess = await verifyDatabaseInstanceAccess(
+      instance.workspaceId || 'default-workspace',
+      instance.ownerId
+    );
+    if (!hasAccess) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
     const body = await request.json();
     const semanticModel = sanitizeDatabaseSemanticModel(body?.semanticModel);
     if (!semanticModel) {
@@ -430,6 +469,9 @@ export async function PUT(
 
     return NextResponse.json(updated.semanticModel);
   } catch (error) {
+    if (error instanceof Error && error.message.includes('Unauthorized')) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
     console.error('Failed to update semantic model:', error);
     return NextResponse.json({ error: error instanceof Error ? error.message : '保存语义模型失败' }, { status: 500 });
   }
