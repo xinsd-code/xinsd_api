@@ -192,50 +192,6 @@ export function useUnsavedChangesGuard({
     return () => window.removeEventListener('popstate', handlePopState);
   }, [enabled, isDirty]);
 
-  useEffect(() => {
-    const handleDocumentClick = (event: MouseEvent) => {
-      if (!(enabledRef.current && isDirtyRef.current)) return;
-      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
-        return;
-      }
-
-      const target = event.target;
-      if (!(target instanceof Element)) return;
-      const anchor = target.closest('a[href]');
-      if (!(anchor instanceof HTMLAnchorElement)) return;
-      if (anchor.target === '_blank' || anchor.hasAttribute('download')) return;
-
-      const href = anchor.href;
-      if (!href || href.startsWith('mailto:') || href.startsWith('tel:') || href.startsWith('javascript:')) return;
-
-      const currentUrl = new URL(window.location.href);
-      const nextUrl = new URL(href, currentUrl.href);
-      if (nextUrl.origin !== currentUrl.origin) return;
-      if (nextUrl.href === currentUrl.href) return;
-      if (isDescendantNavigation(currentUrl, nextUrl)) {
-        suppressBeforeUnloadRef.current = true;
-        if (suppressBeforeUnloadTimerRef.current !== null) {
-          window.clearTimeout(suppressBeforeUnloadTimerRef.current);
-        }
-        suppressBeforeUnloadTimerRef.current = window.setTimeout(() => {
-          suppressBeforeUnloadRef.current = false;
-          suppressBeforeUnloadTimerRef.current = null;
-        }, 1200);
-        return;
-      }
-
-      event.preventDefault();
-      event.stopPropagation();
-      pendingActionRef.current = () => {
-        window.location.assign(nextUrl.href);
-      };
-      setDialogOpen(true);
-    };
-
-    document.addEventListener('click', handleDocumentClick, true);
-    return () => document.removeEventListener('click', handleDocumentClick, true);
-  }, []);
-
   useEffect(() => () => {
     if (suppressBeforeUnloadTimerRef.current !== null) {
       window.clearTimeout(suppressBeforeUnloadTimerRef.current);

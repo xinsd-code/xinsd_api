@@ -1,60 +1,55 @@
 import { executeParameterizedDatabaseQuery } from '@/lib/database-instances-server';
 import { normalizeSqlForExecution } from '@/lib/sql-normalize';
 import { DatabaseSchemaPayload } from '@/lib/types';
-import { DatabaseMetricViewMap, DBHarnessExecutionPayload, DBHarnessQueryPlan, DBHarnessWorkspaceContext } from '../core/types';
+import { normalizeMongoQueryText } from '@/lib/mongo-query-compat';
+import { DBHarnessExecutionPayload, DBHarnessQueryPlan, DBHarnessWorkspaceContext } from '../core/types';
 
-const SENSITIVE_FIELD_PATTERNS = [
-  /password/i,
-  /token/i,
-  /secret/i,
-  /email/i,
-  /phone/i,
-  /mobile/i,
-  /身份证/,
-  /手机号/,
-  /id[_-]?card/i,
-  /ssn/i,
-];
+function isMongoCommandQuery(query: string): boolean {
+  const trimmed = query.trim();
+  if (!trimmed.startsWith('{')) return false;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return Boolean(parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'collection' in parsed);
+  } catch {
+    return false;
+  }
+}
 
-function extractSensitiveColumns(
-  sql: string,
-  schema: DatabaseSchemaPayload,
-  metricMappings: DatabaseMetricViewMap
-): string[] {
-  const normalizedSql = sql.toLowerCase();
-  const matches = new Set<string>();
+function assertMongoReadOnlyGuardrails(
+  query: string
+) {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(query);
+  } catch {
+    throw new Error('当前回合未通过 Guardrail Agent 校验：Mongo 查询必须使用 JSON 命令。');
+  }
 
-  schema.collections
-    .filter((collection) => collection.category === 'table')
-    .forEach((collection) => {
-      const tableMetric = metricMappings[collection.name];
-      (collection.columns || []).forEach((column) => {
-        const metric = tableMetric?.fields?.[column.name];
-        const candidates = [
-          column.name,
-          column.comment,
-          metric?.metricName,
-          metric?.description,
-          ...(metric?.aliases || []),
-        ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('当前回合未通过 Guardrail Agent 校验：Mongo 查询命令格式不正确。');
+  }
 
-        const sensitive = candidates.some((value) => SENSITIVE_FIELD_PATTERNS.some((pattern) => pattern.test(value)));
-        if (!sensitive) return;
+  const source = parsed as Record<string, unknown>;
+  const operation = typeof source.operation === 'string' ? source.operation : 'find';
+  if (!['find', 'aggregate', 'count', 'distinct'].includes(operation)) {
+    throw new Error('当前回合未通过 Guardrail Agent 校验：Mongo 查询只能使用只读操作。');
+  }
 
-        if (normalizedSql.includes(column.name.toLowerCase())) {
-          matches.add(column.name);
-        }
-      });
-    });
-
-  return Array.from(matches);
+  const collection = typeof source.collection === 'string' ? source.collection : '';
+  if (!collection) {
+    throw new Error('当前回合未通过 Guardrail Agent 校验：Mongo 查询缺少 collection。');
+  }
 }
 
 export function assertReadOnlyGuardrails(
-  sql: string,
-  schema: DatabaseSchemaPayload,
-  metricMappings: DatabaseMetricViewMap
+  sql: string
 ) {
+  const normalizedMongoSql = normalizeMongoQueryText(sql);
+  if (isMongoCommandQuery(normalizedMongoSql)) {
+    assertMongoReadOnlyGuardrails(normalizedMongoSql);
+    return;
+  }
+
   const normalized = sql.trim();
   if (!/^(select|with|show|desc|describe|explain)\b/i.test(normalized)) {
     throw new Error('当前回合未通过 Guardrail Agent 校验：仅允许执行只读 SQL。');
@@ -65,11 +60,6 @@ export function assertReadOnlyGuardrails(
 
   if (/\b(insert|update|delete|drop|alter|truncate|create|grant|revoke)\b/i.test(normalized)) {
     throw new Error('当前回合未通过 Guardrail Agent 校验：SQL 包含危险关键字。');
-  }
-
-  const sensitiveColumns = extractSensitiveColumns(normalized, schema, metricMappings);
-  if (sensitiveColumns.length > 0) {
-    throw new Error(`当前回合已被安全网关阻断，命中了敏感字段：${sensitiveColumns.join('、')}。`);
   }
 }
 
@@ -92,6 +82,10 @@ function buildColumnLookup(schema: DatabaseSchemaPayload) {
   return tableMap;
 }
 
+function isMongoSpecialColumn(schema: DatabaseSchemaPayload, column: string) {
+  return schema.engine === 'mongo' && column === '_id';
+}
+
 export function assertPlanResolvable(
   plan: DBHarnessQueryPlan,
   schema: DatabaseSchemaPayload
@@ -104,7 +98,7 @@ export function assertPlanResolvable(
     if (!tableColumns) {
       throw new Error(`当前回合已中止：${label} 引用了不存在的数据表 ${table}。`);
     }
-    if (!tableColumns.has(column)) {
+    if (!tableColumns.has(column) && !isMongoSpecialColumn(schema, column)) {
       throw new Error(`当前回合已中止：${label} 引用了不存在的字段 ${table}.${column}。`);
     }
   };

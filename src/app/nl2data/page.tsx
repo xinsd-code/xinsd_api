@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Icons } from '@/components/Icons';
 import { flattenAIModelSelections, getAIModelSelectionKey, getDefaultAIModelSelection } from '@/lib/ai-models';
 import { formatSqlDraft } from '@/lib/sql-format';
@@ -27,14 +27,14 @@ interface ExecutionPayload {
   rows: Record<string, unknown>[];
   summary?: string;
   datasource: string;
-  engine: 'mysql' | 'pgsql';
+  engine: 'mysql' | 'pgsql' | 'mongo';
   previewSql: string;
 }
 
 interface AgentResponse {
   message: string;
   sql: string;
-  execution: ExecutionPayload;
+  execution?: ExecutionPayload;
   prompt: string;
 }
 
@@ -47,7 +47,7 @@ interface SessionSnapshot {
   sql: string;
   summary?: string;
   datasource: string;
-  engine: 'mysql' | 'pgsql';
+  engine: 'mysql' | 'pgsql' | 'mongo';
   columns: string[];
   rows: Record<string, unknown>[];
   prompt?: string;
@@ -79,7 +79,7 @@ function generateFollowUpSuggestions(result: ExecutionPayload | null, sql: strin
     firstColumns.length >= 2 ? `按 ${firstColumns[0]} 分组，并统计 ${firstColumns[1]} 的数量` : '',
     '把范围缩小到最近 7 天',
     '帮我基于当前结果补充排序并过滤异常值',
-    sql ? '在当前 SQL 基础上继续优化字段和筛选条件' : '',
+    sql ? '在当前查询基础上继续优化字段和筛选条件' : '',
   ].filter(Boolean);
 
   return Array.from(new Set(suggestions)).slice(0, 4);
@@ -115,17 +115,17 @@ function buildHistoryTitle(mode: 'ai' | 'manual', sql: string, messages: ChatMes
     return latestUser.slice(0, 80);
   }
   if (mode === 'manual') {
-    return '手动执行 SQL';
+    return '手动执行查询';
   }
   return 'AI 取数';
 }
 
-export default function Nl2DataPage() {
+function Nl2DataPageContent() {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: createMessageId(),
       role: 'assistant',
-      content: '描述你想要的数据，我会结合当前数据源生成只读 SQL，并把结果直接同步到下方工作区。',
+      content: '描述你想要的数据，我会结合当前数据源生成只读查询，并把结果直接同步到下方工作区。',
     },
   ]);
   const [composer, setComposer] = useState('');
@@ -149,7 +149,7 @@ export default function Nl2DataPage() {
   const messageViewportRef = useRef<HTMLDivElement | null>(null);
 
   const sqlDatabaseInstances = useMemo(
-    () => databaseInstances.filter((item) => item.type === 'mysql' || item.type === 'pgsql'),
+    () => databaseInstances.filter((item) => item.type === 'mysql' || item.type === 'pgsql' || item.type === 'mongo'),
     [databaseInstances]
   );
   const modelSelections = useMemo(() => flattenAIModelSelections(modelProfiles, 'chat'), [modelProfiles]);
@@ -329,13 +329,22 @@ export default function Nl2DataPage() {
       });
 
       const payload = await response.json() as AgentResponse | { error?: string };
-      if (!response.ok || !('execution' in payload)) {
+      if (!response.ok) {
         throw new Error(payload && 'error' in payload && payload.error ? payload.error : 'NL2DATA 执行失败');
+      }
+
+      if (!('execution' in payload) || !payload.execution) {
+        throw new Error('NL2DATA 执行失败');
+      }
+
+      const execution = payload.execution;
+      if (!execution) {
+        throw new Error('NL2DATA 执行失败');
       }
 
       setCurrentSql(payload.sql);
       setPromptDebug(payload.prompt);
-      setResult(payload.execution);
+      setResult(execution);
       setMessages((current) => [
         ...current,
         {
@@ -343,12 +352,12 @@ export default function Nl2DataPage() {
           role: 'assistant',
           content: payload.message,
           sql: payload.sql,
-          summary: payload.execution.summary,
-          rows: payload.execution.rows.length,
-          followUps: generateFollowUpSuggestions(payload.execution, payload.sql),
+          summary: execution.summary,
+          rows: execution.rows.length,
+          followUps: generateFollowUpSuggestions(execution, payload.sql),
         },
       ]);
-      await appendHistory('ai', payload.execution, payload.prompt, content);
+      await appendHistory('ai', execution, payload.prompt, content);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'NL2DATA 执行失败';
       setErrorMessage(message);
@@ -377,13 +386,14 @@ export default function Nl2DataPage() {
       });
 
       const payload = await response.json() as ExecutionPayload | { error?: string };
+
       if (!response.ok || !('columns' in payload)) {
-        throw new Error(payload && 'error' in payload && payload.error ? payload.error : 'SQL 执行失败');
+        throw new Error(payload && 'error' in payload && payload.error ? payload.error : '查询执行失败');
       }
 
       setResult(payload);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'SQL 执行失败');
+      setErrorMessage(error instanceof Error ? error.message : '查询执行失败');
     } finally {
       setExecuteLoading(false);
     }
@@ -463,7 +473,7 @@ export default function Nl2DataPage() {
           <div className={styles.eyebrow}>Natural Language To Data</div>
           <div className={styles.title}>NL2DATA 控制台</div>
           <div className={styles.desc}>
-            让对话、SQL 和数据结果保持同一条研究轨迹。上层用于发问、追问和查看 Prompt，下层用于落地 SQL、比对结果与回看历史。
+            让对话、查询和数据结果保持同一条研究轨迹。上层用于发问、追问和查看 Prompt，下层用于落地查询、比对结果与回看历史。
           </div>
         </div>
         <div className={styles.heroActions}>
@@ -483,7 +493,7 @@ export default function Nl2DataPage() {
           <div>
             <div className={styles.selectorLabel}>
               <span>数据源</span>
-              <span className={styles.selectorHint}>当前仅支持 MySQL / PostgreSQL</span>
+              <span className={styles.selectorHint}>当前支持 MySQL / PostgreSQL / MongoDB</span>
             </div>
             <select
               className="form-select"
@@ -492,7 +502,7 @@ export default function Nl2DataPage() {
               onChange={(event) => setSelectedDatabaseId(event.target.value)}
               disabled={!hasDatasource}
             >
-              {!hasDatasource && <option value="">暂无可用 SQL 数据源</option>}
+              {!hasDatasource && <option value="">暂无可用数据源</option>}
               {sqlDatabaseInstances.map((item) => (
                 <option key={item.id} value={item.id}>
                   [{item.type.toUpperCase()}] {item.name}
@@ -533,7 +543,7 @@ export default function Nl2DataPage() {
               先新增可用数据源
             </div>
             <div className={styles.inlineNoticeText}>
-              当前没有可用的 SQL 数据源。NL2DATA 本次仅支持 MySQL 和 PostgreSQL，Redis 入口已预留，后续可直接扩展。
+              当前没有可用的数据源。NL2DATA 本次支持 MySQL、PostgreSQL 和 MongoDB，Redis 入口已预留，后续可直接扩展。
             </div>
             <div className={styles.inlineNoticeActions}>
               <Link href="/database-instances" className="btn btn-secondary btn-sm">
@@ -576,7 +586,7 @@ export default function Nl2DataPage() {
                   AI Chat
                 </div>
                 <div className={styles.chatPanelDesc}>
-                  基于当前数据源、模型、已有 SQL 和结果上下文，把自然语言需求持续转成可验证的取数 SQL。
+                  基于当前数据源、模型、已有查询和结果上下文，把自然语言需求持续转成可验证的取数查询。
                 </div>
               </div>
               <div className={styles.chatHeaderActions}>
@@ -605,7 +615,7 @@ export default function Nl2DataPage() {
                 <div className={styles.chatContextBar}>
                   <span>{selectedDatabase ? selectedDatabase.name : '未选择数据源'}</span>
                   <span>{selectedModel ? selectedModel.modelId : '未选择模型'}</span>
-                  <span>{currentSql.trim() ? '已有 SQL 草稿' : '等待首次生成 SQL'}</span>
+                  <span>{currentSql.trim() ? '已有查询草稿' : '等待首次生成查询'}</span>
                   <span>{result ? `${result.rows.length} 行当前结果` : '暂无结果集'}</span>
                 </div>
 
@@ -622,7 +632,7 @@ export default function Nl2DataPage() {
                           <div className={styles.chatSqlCard}>
                             <div className={styles.chatSqlCardHeader}>
                               <strong>当前结果同步</strong>
-                              {message.sql ? <span>SQL 已更新</span> : <span>仅同步结果摘要</span>}
+                              {message.sql ? <span>查询已更新</span> : <span>仅同步结果摘要</span>}
                             </div>
                             {message.sql && <pre className={styles.chatSqlCode}>{message.sql}</pre>}
                             {message.summary && (
@@ -653,7 +663,7 @@ export default function Nl2DataPage() {
                   {chatLoading && (
                     <div className={`${styles.chatMessage} ${styles.assistant}`}>
                       <div className={styles.chatMessageRole}>AI</div>
-                      <div className={styles.chatMessageBubble}>正在识别业务名词、补充字段语义并生成 SQL...</div>
+                      <div className={styles.chatMessageBubble}>正在识别业务名词、补充字段语义并生成查询...</div>
                     </div>
                   )}
                 </div>
@@ -673,7 +683,7 @@ export default function Nl2DataPage() {
                     }
                   />
                   <div className={styles.chatComposerFooter}>
-                    <span className={styles.chatComposerHint}>Ctrl / Command + Enter 发送，并自动同步到下层 SQL 工作区</span>
+                    <span className={styles.chatComposerHint}>Ctrl / Command + Enter 发送，并自动同步到下层查询工作区</span>
                     <div className={styles.chatComposerActions}>
                       <button
                         type="button"
@@ -718,7 +728,7 @@ export default function Nl2DataPage() {
                   <div className={styles.chatLatestSqlCard}>
                     <div className={styles.chatLatestSqlHeader}>
                       <div>
-                        <strong>最近一次生成的 SQL</strong>
+                        <strong>最近一次生成的查询</strong>
                         <span>{result ? '可直接继续调整后重新执行' : '等待执行结果返回'}</span>
                       </div>
                     </div>
@@ -734,7 +744,7 @@ export default function Nl2DataPage() {
                       <div>
                         <strong className={styles.chatDebugTitle}>本次生成 Prompt</strong>
                         <div className={styles.chatDebugDesc}>
-                          这里展示当前 NL2DATA 的两阶段上下文，包含第一轮 NER 和第二轮 SQL 生成内容，便于排查与校验。
+                          这里展示当前 NL2DATA 的两阶段上下文，包含第一轮 NER 和第二轮查询生成内容，便于排查与校验。
                         </div>
                       </div>
                     </div>
@@ -755,7 +765,7 @@ export default function Nl2DataPage() {
             <div className={styles.sectionHeader}>
               <div className={styles.sectionTitle}>
                 <div className={styles.eyebrow}>Generated SQL</div>
-                <div className={styles.sectionName}>取数 SQL</div>
+                <div className={styles.sectionName}>取数查询</div>
               </div>
               <div className={styles.toolbar}>
                 <button
@@ -765,7 +775,7 @@ export default function Nl2DataPage() {
                   disabled={!currentSql}
                 >
                   <Icons.Code size={16} />
-                  美化 SQL
+                  美化查询
                 </button>
                 <button
                   type="button"
@@ -776,7 +786,7 @@ export default function Nl2DataPage() {
                   }}
                   disabled={!currentSql}
                 >
-                  清空 SQL
+                    清空查询
                 </button>
                 <button
                   type="button"
@@ -794,7 +804,7 @@ export default function Nl2DataPage() {
               <div className={styles.questionPanel}>
                 <div className={styles.questionLabel}>用户问句</div>
                 <div className={styles.questionText}>
-                  {currentQuestion.trim() || '当前还没有关联问句。你可以从 AI Chat 发起取数，或者从会话历史同步一组问句与 SQL。'}
+                  {currentQuestion.trim() || '当前还没有关联问句。你可以从 AI Chat 发起取数，或者从会话历史同步一组问句与查询。'}
                 </div>
               </div>
               <textarea
@@ -802,7 +812,7 @@ export default function Nl2DataPage() {
                 name="nl2data-sql"
                 value={currentSql}
                 onChange={(event) => setCurrentSql(event.target.value)}
-                placeholder="这里仅存放最终 SQL。发送自然语言后，AI 生成的 SQL 会回填到这里。"
+                placeholder="这里仅存放最终查询。发送自然语言后，AI 生成的查询会回填到这里。"
               />
             </div>
           </div>
@@ -882,7 +892,7 @@ export default function Nl2DataPage() {
                   <Icons.Search size={34} />
                   <div className={styles.emptyStateTitle}>等待第一次查询</div>
                   <div className={styles.emptyStateDesc}>
-                    先在上层 AI Chat 发起取数，或者直接在上方 SQL 面板填写只读 SQL 并执行。
+                    先在上层 AI Chat 发起取数，或者直接在上方查询面板填写只读查询并执行。
                   </div>
                 </div>
               </div>
@@ -915,7 +925,7 @@ export default function Nl2DataPage() {
                       <div className={styles.emptyStateInner}>
                         <div className={styles.emptyStateTitle}>当前结果没有可展示数据</div>
                         <div className={styles.emptyStateDesc}>
-                          本轮 SQL 已执行成功，但没有返回行。你可以继续追问、调整筛选条件，或者用历史结果做对比。
+                          本轮查询已执行成功，但没有返回行。你可以继续追问、调整筛选条件，或者用历史结果做对比。
                         </div>
                       </div>
                     </div>
@@ -958,7 +968,7 @@ export default function Nl2DataPage() {
               </div>
 
               <div className={styles.historyDetailSection}>
-                <div className={styles.historyDetailLabel}>SQL</div>
+                <div className={styles.historyDetailLabel}>查询</div>
                 <pre className={styles.historyDetailCode}>{selectedHistory.sql}</pre>
               </div>
 
@@ -985,12 +995,20 @@ export default function Nl2DataPage() {
                 onClick={() => handleSyncHistory(selectedHistory)}
               >
                 <Icons.Activity size={14} />
-                同步 SQL
+                同步查询
               </button>
             </div>
           </aside>
         </div>
       )}
     </div>
+  );
+}
+
+export default function Nl2DataPage() {
+  return (
+    <Suspense fallback={null}>
+      <Nl2DataPageContent />
+    </Suspense>
   );
 }

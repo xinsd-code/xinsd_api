@@ -14,9 +14,9 @@
 | **API 接入 (Client)** | 类 Postman 接口调试工具，内置代理解决跨域，支持 JSON Body 表单化编辑 |
 | **API 转发 & 高级编排** | 虚拟接口层 + 数据处理流水线，支持筛选 / 映射 / 计算 / 排序节点串联，AI Chat 驱动编排生成 |
 | **DB API** | 将只读 SQL 封装为标准化接口，支持变量绑定与 Redis 缓存 |
-| **NL2DATA** | 两阶段 NER + SQL 自然语言取数工作台，会话历史持久化 |
-| **DB Harness** | 五阶段多智能体 NL2SQL 问答链路，含只读执行网关与知识记忆 |
-| **数据库实例管理** | 统一管理 MySQL / PostgreSQL / Redis 实例，含语义配置与结构浏览 |
+| **NL2DATA** | 两阶段 NER + SQL 自然语言取数工作台，会话历史持久化，支持 MySQL / PostgreSQL / MongoDB |
+| **DB Harness** | 五阶段多智能体 NL2SQL 问答链路，含只读执行网关、知识记忆与 GEPA 离线评估 |
+| **数据库实例管理** | 统一管理 MySQL / PostgreSQL / Redis / MongoDB 实例，含语义配置、结构浏览与语义自动生成 |
 | **模型管理** | 管理 OpenAI Compatible 模型来源，支持 Chat / Embedding 两类 |
 
 ---
@@ -103,6 +103,7 @@
 - 会话记录持久化到 SQLite，包含：用户问句 / SQL / 完整 Prompt
 - 点击历史记录可查看完整上下文，并一键"同步 SQL"回填到编辑区
 - 重新执行已有 SQL 不会产生重复历史条目
+- MongoDB 以 JSON 命令方式执行，只读查询会自动归一化为可执行命令
 
 ---
 
@@ -135,7 +136,8 @@
 
 - 支持多 Workspace：每个 Workspace 绑定独立的数据源 + 工作规则
 - 每个 Workspace 下可维护多条独立会话（Session）
-- 每轮对话完整记录 trace 链路，可展开查看各 Agent 的中间产物
+- 每轮对话完整记录 trace 链路，可展开查看各 Agent 的中间产物，右侧链路详情会跟随最新问句自动展开
+- 支持 MySQL / PostgreSQL / MongoDB 数据源，Mongo 查询走只读 JSON 命令链路
 
 **知识记忆系统**
 
@@ -145,8 +147,8 @@
 **安全保障**
 
 - Guardrail Agent 强制执行只读校验：只允许 `SELECT / WITH / SHOW / DESC / EXPLAIN`
-- 自动检测敏感字段（password / token / email / phone / 身份证等），命中则阻断
 - 规则引擎作为 LLM Fallback，在模型不可用时仍可基于 schema 生成基础 SQL
+- Mongo 规则回退会自动避免祖先 / 子路径冲突字段，减少 `_id.buffer` 这类嵌套字段碰撞
 
 ---
 
@@ -166,6 +168,12 @@
 ### 语义配置（Semantic Config）
 - 图形化逐字段编辑：语义名称、描述、别名、语义角色（指标 / 维度 / 时间 / 标识符）、计算口径、NER 开关
 - 保存后自动派生各消费链路（DB Harness / NL2DATA / DB API / SQL 编辑器）所需的字段映射
+- 支持按库表结构与样本数据调用模型自动生成语义草稿，再人工微调保存
+
+### GEPA 离线评估
+- 对 DB Harness 的 Prompt / Policy 策略做离线回放评估
+- 支持手动创建 run、查看候选对比、人工审核并应用到运行时配置
+- 默认不自动切流，保留回滚与 run history 删除
 
 ---
 

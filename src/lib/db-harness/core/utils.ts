@@ -124,7 +124,7 @@ export function isTextLikeType(type: string): boolean {
   return /char|text|json|uuid|enum|set/i.test(type);
 }
 
-export function quoteIdentifier(engine: 'mysql' | 'pgsql', name: string): string {
+export function quoteIdentifier(engine: DatabaseInstanceType, name: string): string {
   const parts = name.split('.');
   return parts.map((part) => (engine === 'mysql' ? `\`${part}\`` : `"${part}"`)).join('.');
 }
@@ -144,3 +144,4 @@ export function summarizeTopValues(row: Record<string, unknown> | undefined, col
     .map((column) => `${column}=${compactText(String(row[column] ?? '—'), 24)}`)
     .join('，');
 }
+import type { DatabaseInstanceType } from '@/lib/types';

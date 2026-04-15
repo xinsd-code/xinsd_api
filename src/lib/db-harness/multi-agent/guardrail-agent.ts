@@ -14,7 +14,8 @@ export async function runGuardrailAgent(
   });
 
   assertPlanResolvable(queryResult.plan, workspace.schema);
-  assertReadOnlyGuardrails(queryResult.plan.compiled.text, workspace.schema, workspace.metricMappings);
+  assertReadOnlyGuardrails(queryResult.plan.compiled.text);
+
   const execution = await executeReadOnlyPlan(queryResult.plan, workspace);
   const detail = `已通过只读执行网关校验，并返回 ${execution.rows.length} 行预览结果。`;
 

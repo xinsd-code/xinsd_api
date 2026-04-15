@@ -4,10 +4,12 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import UnsavedChangesDialog from '@/components/UnsavedChangesDialog';
+import { getAIModelSelectionKey } from '@/lib/ai-models';
 import { getEffectiveDatabaseMetricMappings, sanitizeDatabaseSemanticModel } from '@/lib/database-instances';
 import { useUnsavedChangesGuard } from '@/hooks/use-unsaved-changes-guard';
 import { isDateLikeType, isNumericType, isTextLikeType } from '@/lib/db-harness/core/utils';
 import {
+  AIModelProfileSummary,
   DatabaseCollectionInfo,
   DatabaseFieldMetricMapping,
   DatabaseInstance,
@@ -140,6 +142,24 @@ function rebuildSemanticModel(model: DatabaseSemanticModel): DatabaseSemanticMod
   };
 }
 
+interface SemanticGenerationModelSelection {
+  profileId: string;
+  profileName: string;
+  modelId: string;
+  isDefault: boolean;
+}
+
+function flattenSemanticGenerationSelections(profiles: AIModelProfileSummary[]): SemanticGenerationModelSelection[] {
+  return profiles
+    .filter((profile) => profile.modelType === 'chat')
+    .flatMap((profile) => profile.modelIds.map((modelId) => ({
+      profileId: profile.id,
+      profileName: profile.name,
+      modelId,
+      isDefault: profile.isDefault && profile.defaultModelId === modelId,
+    })));
+}
+
 function DatabaseSemanticConfigPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -154,6 +174,9 @@ function DatabaseSemanticConfigPageContent() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [refreshingSemantic, setRefreshingSemantic] = useState(false);
+  const [modelProfiles, setModelProfiles] = useState<AIModelProfileSummary[]>([]);
+  const [modelProfilesLoading, setModelProfilesLoading] = useState(true);
+  const [selectedGenerationModelKey, setSelectedGenerationModelKey] = useState('');
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
   const tableCollections = useMemo(
@@ -237,6 +260,14 @@ function DatabaseSemanticConfigPageContent() {
     [selectedInfo, selectedSemanticFieldMap]
   );
   const totalConfiguredCount = sanitizedSemanticModel.configuredFieldCount;
+  const generationModelSelections = useMemo(
+    () => flattenSemanticGenerationSelections(modelProfiles),
+    [modelProfiles]
+  );
+  const selectedGenerationModel = useMemo(
+    () => generationModelSelections.find((item) => getAIModelSelectionKey(item) === selectedGenerationModelKey) || null,
+    [generationModelSelections, selectedGenerationModelKey]
+  );
 
   const mutateSemanticModel = useCallback((updater: (current: DatabaseSemanticModel) => DatabaseSemanticModel) => {
     setSemanticModel((prev) => rebuildSemanticModel(updater(sanitizeDatabaseSemanticModel(prev) || buildEmptySemanticModel())));
@@ -331,6 +362,45 @@ function DatabaseSemanticConfigPageContent() {
     const timer = window.setTimeout(() => setToast(null), 2600);
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      setModelProfilesLoading(true);
+      try {
+        const response = await fetch('/api/ai-models');
+        if (!response.ok) {
+          throw new Error('读取模型配置失败');
+        }
+        const payload = await readApiJson<AIModelProfileSummary[]>(response, '读取模型配置失败');
+        if (!cancelled) {
+          setModelProfiles(payload);
+        }
+      } catch {
+        if (!cancelled) {
+          setModelProfiles([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setModelProfilesLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (selectedGenerationModelKey) return;
+    if (!generationModelSelections.length) return;
+    const defaultSelection = generationModelSelections.find((item) => item.isDefault) || generationModelSelections[0];
+    if (defaultSelection) {
+      setSelectedGenerationModelKey(getAIModelSelectionKey(defaultSelection));
+    }
+  }, [generationModelSelections, selectedGenerationModelKey]);
 
   useEffect(() => {
     if (!instanceId) {
@@ -455,29 +525,37 @@ function DatabaseSemanticConfigPageContent() {
   });
 
   const handleRefreshSemanticModel = useCallback(async () => {
-    if (!instanceId) return;
+    if (!instanceId || !selectedInfo) return;
 
     setRefreshingSemantic(true);
     try {
       const response = await fetch(`/api/database-instances/${instanceId}/semantic-model`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ persist: false }),
+        body: JSON.stringify({
+          persist: false,
+          collection: selectedInfo.name,
+          selectedModel: selectedGenerationModel ? {
+            profileId: selectedGenerationModel.profileId,
+            modelId: selectedGenerationModel.modelId,
+          } : null,
+        }),
       });
-      const payload = await readApiJson<DatabaseSemanticModel & { error?: string }>(response, '更新语义模型失败');
+      const payload = await readApiJson<DatabaseSemanticModel & { error?: string; message?: string }>(response, '更新语义模型失败');
       if (!response.ok) {
         throw new Error(getApiErrorMessage(payload, '更新语义模型失败'));
       }
 
       const nextSemanticModel = sanitizeDatabaseSemanticModel(payload as DatabaseSemanticModel) || buildEmptySemanticModel();
       setSemanticModel(nextSemanticModel);
-      showToast('已按当前 schema 重新生成语义草稿');
+      setInstance((prev) => (prev ? { ...prev, semanticModel: nextSemanticModel } : prev));
+      showToast(payload.message || (selectedGenerationModel ? '已按所选模型生成语义草稿' : '已按当前 schema 重新生成语义草稿'));
     } catch (error) {
       showToast(error instanceof Error ? error.message : '更新语义模型失败', 'error');
     } finally {
       setRefreshingSemantic(false);
     }
-  }, [instanceId, showToast]);
+  }, [instanceId, selectedGenerationModel, selectedInfo, showToast]);
 
   if (!instanceId) {
     return (
@@ -614,13 +692,37 @@ function DatabaseSemanticConfigPageContent() {
                       {isDirty && <span className={styles.metricBadgePending}>存在未保存修改</span>}
                     </div>
                     <div className={styles.panelActionRow}>
+                      <div className={styles.generationPicker}>
+                        <select
+                          className={`form-select ${styles.generationSelect}`}
+                          value={selectedGenerationModelKey}
+                          onChange={(event) => setSelectedGenerationModelKey(event.target.value)}
+                          disabled={modelProfilesLoading || generationModelSelections.length === 0 || refreshingSemantic}
+                        >
+                          <option value="">
+                            {modelProfilesLoading
+                              ? '正在加载模型...'
+                              : generationModelSelections.length > 0
+                                ? '选择自动生成模型'
+                                : '暂无可用对话模型'}
+                          </option>
+                          {generationModelSelections.map((option) => {
+                            const optionKey = getAIModelSelectionKey(option);
+                            return (
+                              <option key={optionKey} value={optionKey}>
+                                {option.profileName} / {option.modelId}
+                              </option>
+                            );
+                          })}
+                        </select>
+                      </div>
                       <button
                         className="btn btn-secondary btn-sm"
                         type="button"
                         onClick={handleRefreshSemanticModel}
                         disabled={refreshingSemantic}
                       >
-                        <Icons.Refresh size={14} /> {refreshingSemantic ? '刷新中...' : '手动更新语义模型'}
+                        <Icons.Refresh size={14} /> {refreshingSemantic ? '生成中...' : '自动生成语义'}
                       </button>
                       <button
                         className="btn btn-secondary btn-sm"

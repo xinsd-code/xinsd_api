@@ -30,8 +30,8 @@ export async function resolveDBHarnessWorkspace(input: DBHarnessChatTurnRequest)
     throw new Error('当前数据源不存在，请重新选择。');
   }
 
-  if (databaseInstance.type !== 'mysql' && databaseInstance.type !== 'pgsql') {
-    throw new Error('DB-Multi-Agent 暂时仅支持 MySQL 和 PostgreSQL 数据源。');
+  if (databaseInstance.type !== 'mysql' && databaseInstance.type !== 'pgsql' && databaseInstance.type !== 'mongo') {
+    throw new Error('DB-Multi-Agent 暂时仅支持 MySQL、PostgreSQL 和 MongoDB 数据源。');
   }
 
   const profile = getAIModelProfileById(selectedModel.profileId);

@@ -261,17 +261,36 @@
 
 .panelHeaderMeta {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: flex-end;
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: 10px;
+  width: min(100%, 980px);
 }
 
 .panelActionRow {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 10px;
+  gap: 12px;
+  align-items: center;
+  width: 100%;
+}
+
+.generationPicker {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  min-width: 0;
+}
+
+.generationSelect {
+  min-width: 250px;
+  height: 34px;
+  padding-top: 0;
+  padding-bottom: 0;
+  line-height: 1;
 }
 
 .panelTitle {

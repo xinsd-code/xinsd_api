@@ -356,8 +356,8 @@ export interface DBHarnessQueryResult {
 }
 
 export interface DBHarnessGuardrailResult {
-  execution: DBHarnessExecutionPayload;
   detail: string;
+  execution?: DBHarnessExecutionPayload;
 }
 
 export interface DBHarnessAnalysisResult {

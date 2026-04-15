@@ -179,7 +179,7 @@ export interface AIModelSelection {
   isDefault?: boolean;
 }
 
-export type DatabaseInstanceType = 'mysql' | 'pgsql' | 'redis';
+export type DatabaseInstanceType = 'mysql' | 'pgsql' | 'redis' | 'mongo';
 
 export type DatabaseSemanticRole = 'metric' | 'dimension' | 'time' | 'identifier' | 'attribute';
 export type DatabaseSemanticFieldSource = 'mapping' | 'schema' | 'manual';
