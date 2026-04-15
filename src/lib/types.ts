@@ -225,6 +225,8 @@ export interface DatabaseInstance {
   connectionUri: string;
   username?: string;
   password?: string;
+  ownerId?: string;
+  workspaceId?: string;
   metricMappings?: DatabaseMetricMappings;
   semanticModel?: DatabaseSemanticModel;
   createdAt: string;

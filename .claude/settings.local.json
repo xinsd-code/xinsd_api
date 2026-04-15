@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -E \"\\\\.ts$\")",
+      "Bash(cat)",
+      "Bash(node /tmp/test_regex.js)",
+      "Bash(node /tmp/test_injection.js)",
+      "Bash(node /tmp/bypass_test.js)",
+      "Bash(node /tmp/function_test.js)",
+      "Bash(grep -E \"\\\\.\\(ts|tsx\\)$\")",
+      "Bash(git log *)",
+      "Bash(grep *)"
+    ]
+  }
+}

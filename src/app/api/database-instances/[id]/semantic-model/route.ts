@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getAIModelProfileById, getDatabaseInstanceById, updateDatabaseInstanceSemanticModel } from '@/lib/db';
 import { buildAIModelEndpoint, buildAIModelHeaders } from '@/lib/ai-models';
+import { requireSession, verifyDatabaseInstanceAccess } from '@/lib/auth';
 import { getEffectiveDatabaseMetricMappings, sanitizeDatabaseSemanticModel } from '@/lib/database-instances';
 import { getDatabaseCollectionPreview, getDatabaseSchema } from '@/lib/database-instances-server';
 import { deriveSemanticSnapshot } from '@/lib/db-harness/tools/catalog-tools';
@@ -317,6 +318,12 @@ export async function GET(
   try {
     const { id } = await context.params;
     const instance = getDatabaseInstanceById(id);
+    const session = await requireSession();
+    const hasAccess = await verifyDatabaseInstanceAccess(
+      instance?.workspaceId || 'default-workspace',
+      instance?.ownerId
+    );
+    if (!hasAccess) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     if (!instance) {
       return NextResponse.json({ error: '数据库实例不存在' }, { status: 404 });
     }
@@ -338,6 +345,12 @@ export async function POST(
     const body = await request.json().catch(() => ({})) as SemanticGenerationRequestBody;
     const persist = body.persist === true;
     const instance = getDatabaseInstanceById(id);
+    const session = await requireSession();
+    const hasAccess = await verifyDatabaseInstanceAccess(
+      instance?.workspaceId || 'default-workspace',
+      instance?.ownerId
+    );
+    if (!hasAccess) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     if (!instance) {
       return NextResponse.json({ error: '数据库实例不存在' }, { status: 404 });
     }
