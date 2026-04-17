@@ -11,6 +11,12 @@ import type {
   DBHarnessRuntimeConfigDiffEntry,
   DBHarnessWorkspaceRecord,
 } from '@/lib/db-harness/core/types';
+import {
+  GEPA_POLICY_CANDIDATE_PRESETS,
+  GEPA_PROMPT_CANDIDATE_PRESETS,
+  getDefaultGepaPolicyCandidateIds,
+  getDefaultGepaPromptCandidateIds,
+} from '@/lib/db-harness/gepa/candidate-presets';
 import { DatabaseInstanceSummary } from '@/lib/types';
 import styles from './page.module.css';
 
@@ -80,6 +86,40 @@ function parseAppliedCandidateLabels(run: DBHarnessGepaRun | null): string[] {
     .filter(Boolean);
 }
 
+function getWorkspaceSelectLabel(workspace: DBHarnessWorkspaceRecord) {
+  const latestSession = [...workspace.sessions]
+    .sort((left, right) => Date.parse(right.lastMessageAt) - Date.parse(left.lastMessageAt))[0];
+  const sessionTitle = latestSession?.title?.trim();
+  return sessionTitle ? `${workspace.name} · ${sessionTitle}` : workspace.name;
+}
+
+function parseReportObject(run: DBHarnessGepaRun | null): Record<string, unknown> {
+  return run?.report && typeof run.report === 'object' && !Array.isArray(run.report)
+    ? run.report as Record<string, unknown>
+    : {};
+}
+
+function parsePatternSummary(run: DBHarnessGepaRun | null): Record<string, unknown> | null {
+  const raw = parseReportObject(run).patternSummary;
+  return raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? raw as Record<string, unknown>
+    : null;
+}
+
+function parseCandidateSources(run: DBHarnessGepaRun | null): Record<string, unknown> | null {
+  const raw = parseReportObject(run).candidateSources;
+  return raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? raw as Record<string, unknown>
+    : null;
+}
+
+function parseRealMetrics(run: DBHarnessGepaRun | null): Array<Record<string, unknown>> {
+  const raw = parseReportObject(run).realMetrics;
+  return Array.isArray(raw)
+    ? raw.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object' && !Array.isArray(item))
+    : [];
+}
+
 function formatRuntimeValue(value: unknown) {
   if (value === undefined || value === null || value === '') return '未设置';
   if (typeof value === 'string') return value;
@@ -90,6 +130,41 @@ function getPrimaryCandidates(run: DBHarnessGepaRun) {
   const promptCandidate = run.candidateSet.find((candidate) => candidate.kind === 'prompt') || null;
   const policyCandidate = run.candidateSet.find((candidate) => candidate.kind === 'policy') || null;
   return [promptCandidate, policyCandidate].filter((item): item is DBHarnessGepaCandidate => Boolean(item));
+}
+
+function getCandidateAverageScore(candidate: DBHarnessGepaCandidate) {
+  const scoreNote = candidate.notes.find((note) => note.startsWith('平均分：')) || '';
+  const score = Number.parseFloat(scoreNote.replace('平均分：', '').trim());
+  return Number.isFinite(score) ? score : null;
+}
+
+function buildRunExecutiveSummary(run: DBHarnessGepaRun | null) {
+  if (!run) return null;
+  const recommendedPrompt = run.candidateSet.find((candidate) => candidate.kind === 'prompt') || null;
+  const recommendedPolicy = run.candidateSet.find((candidate) => candidate.kind === 'policy') || null;
+  const promptScore = recommendedPrompt ? getCandidateAverageScore(recommendedPrompt) : null;
+  const policyScore = recommendedPolicy ? getCandidateAverageScore(recommendedPolicy) : null;
+  const delta = typeof run.scoreCard.baselineBalancedScore === 'number'
+    ? run.scoreCard.balancedScore - run.scoreCard.baselineBalancedScore
+    : null;
+
+  return {
+    recommendedPrompt,
+    recommendedPolicy,
+    promptScore,
+    policyScore,
+    delta,
+    headline: [
+      recommendedPrompt ? `推荐 Prompt：${recommendedPrompt.title}` : '当前没有推荐 Prompt',
+      recommendedPolicy ? `推荐 Policy：${recommendedPolicy.title}` : '当前没有推荐 Policy',
+    ].join('；'),
+  };
+}
+
+function toggleCandidateSelection(current: string[], candidateId: string) {
+  return current.includes(candidateId)
+    ? current.filter((item) => item !== candidateId)
+    : [...current, candidateId];
 }
 
 function buildRuntimeConfigPreview(
@@ -189,11 +264,17 @@ export default function GepaPage() {
     sampleLimit: 12,
     promptCandidateCount: 2,
     policyCandidateCount: 3,
+    selectedPromptCandidateIds: getDefaultGepaPromptCandidateIds(),
+    selectedPolicyCandidateIds: getDefaultGepaPolicyCandidateIds(),
   });
 
   const selectedRun = useMemo(
     () => runs.find((item) => item.id === selectedRunId) || runs[0] || null,
     [runs, selectedRunId]
+  );
+  const supportedDatabases = useMemo(
+    () => databases.filter((item) => item.type === 'mysql' || item.type === 'pgsql' || item.type === 'mongo'),
+    [databases]
   );
   const selectedWorkspace = useMemo(
     () => workspaces.find((item) => item.id === createDraft.workspaceId) || null,
@@ -204,13 +285,17 @@ export default function GepaPage() {
     [selectedRun?.workspaceId, workspaces]
   );
   const selectedRunDatabase = useMemo(
-    () => databases.find((item) => item.id === selectedRun?.databaseId) || null,
-    [selectedRun?.databaseId, databases]
+    () => supportedDatabases.find((item) => item.id === selectedRun?.databaseId) || null,
+    [selectedRun?.databaseId, supportedDatabases]
   );
   const runtimeConfigDiff = useMemo(() => parseRuntimeConfigDiff(selectedRun), [selectedRun]);
   const runtimeConfigBefore = useMemo(() => parseRuntimeConfigSnapshot(selectedRun, 'runtimeConfigBefore'), [selectedRun]);
   const runtimeConfigAfter = useMemo(() => parseRuntimeConfigSnapshot(selectedRun, 'runtimeConfigAfter'), [selectedRun]);
   const appliedCandidateLabels = useMemo(() => parseAppliedCandidateLabels(selectedRun), [selectedRun]);
+  const patternSummary = useMemo(() => parsePatternSummary(selectedRun), [selectedRun]);
+  const candidateSources = useMemo(() => parseCandidateSources(selectedRun), [selectedRun]);
+  const realMetrics = useMemo(() => parseRealMetrics(selectedRun), [selectedRun]);
+  const executiveSummary = useMemo(() => buildRunExecutiveSummary(selectedRun), [selectedRun]);
 
   async function loadDependencies() {
     const [workspaceRes, databaseRes] = await Promise.all([
@@ -265,21 +350,27 @@ export default function GepaPage() {
   useEffect(() => {
     if (createDraft.workspaceId) return;
     const firstWorkspace = workspaces[0];
-    const firstDatabase = databases[0];
+    const firstDatabase = supportedDatabases[0];
     setCreateDraft((current) => ({
       ...current,
       workspaceId: firstWorkspace?.id || '',
       databaseId: firstWorkspace?.databaseId || firstDatabase?.id || '',
     }));
-  }, [workspaces, databases, createDraft.workspaceId]);
+  }, [workspaces, supportedDatabases, createDraft.workspaceId]);
 
   useEffect(() => {
     if (!selectedWorkspace) return;
     setCreateDraft((current) => ({
       ...current,
-      databaseId: selectedWorkspace.databaseId || current.databaseId || databases[0]?.id || '',
+      databaseId:
+        (selectedWorkspace.databaseId
+          && supportedDatabases.some((item) => item.id === selectedWorkspace.databaseId)
+          ? selectedWorkspace.databaseId
+          : current.databaseId && supportedDatabases.some((item) => item.id === current.databaseId)
+            ? current.databaseId
+            : supportedDatabases[0]?.id || ''),
     }));
-  }, [selectedWorkspace, databases]);
+  }, [selectedWorkspace, supportedDatabases]);
 
   async function refreshRuns() {
     setRefreshing(true);
@@ -425,6 +516,12 @@ export default function GepaPage() {
           <Link href="/db-harness" className="btn btn-secondary btn-sm">
             返回对话页
           </Link>
+          <Link href="/db-harness/gepa/intro" className="btn btn-secondary btn-sm">
+            功能介绍
+          </Link>
+          <Link href="/db-harness/metrics" className="btn btn-secondary btn-sm">
+            指标看板
+          </Link>
           <button type="button" className="btn btn-primary btn-sm" onClick={() => void refreshRuns()} disabled={refreshing}>
             <Icons.Refresh size={14} />
             {refreshing ? '刷新中...' : '刷新任务'}
@@ -441,7 +538,7 @@ export default function GepaPage() {
               <div className={styles.cardLabel}>创建任务</div>
               <h2 className={styles.cardTitle}>离线回放 + 人工审核</h2>
             </div>
-            <span className={styles.cardMeta}>{workspaces.length} 个 workspace · {databases.length} 个数据源</span>
+            <span className={styles.cardMeta}>{workspaces.length} 个 workspace · {supportedDatabases.length} 个数据源</span>
           </div>
 
           <div className={styles.formGrid}>
@@ -455,7 +552,7 @@ export default function GepaPage() {
                 <option value="">不绑定 Workspace</option>
                 {workspaces.map((workspace) => (
                   <option key={workspace.id} value={workspace.id}>
-                    {workspace.name}{workspace.databaseId ? ` · ${workspace.databaseId}` : ''}
+                    {getWorkspaceSelectLabel(workspace)}
                   </option>
                 ))}
               </select>
@@ -469,7 +566,7 @@ export default function GepaPage() {
                 onChange={(event) => setCreateDraft((current) => ({ ...current, databaseId: event.target.value }))}
               >
                 <option value="">请选择数据源</option>
-                {databases.map((database) => (
+                {supportedDatabases.map((database) => (
                   <option key={database.id} value={database.id}>
                     {database.name} · {database.type}
                   </option>
@@ -489,34 +586,70 @@ export default function GepaPage() {
               />
             </label>
 
-            <label className={styles.field}>
+            <label className={`${styles.field} ${styles.fieldFullRow}`}>
               <span>Prompt 候选</span>
-              <input
-                className="form-input"
-                type="number"
-                min={1}
-                max={6}
-                value={createDraft.promptCandidateCount}
-                onChange={(event) => setCreateDraft((current) => ({ ...current, promptCandidateCount: Number(event.target.value) || 2 }))}
-              />
+              <div className={styles.optionGroup}>
+                {GEPA_PROMPT_CANDIDATE_PRESETS.map((candidate) => {
+                  const checked = createDraft.selectedPromptCandidateIds.includes(candidate.id);
+                  return (
+                    <label key={candidate.id} className={`${styles.optionCard} ${checked ? styles.optionCardActive : ''}`}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => setCreateDraft((current) => ({
+                          ...current,
+                          selectedPromptCandidateIds: toggleCandidateSelection(current.selectedPromptCandidateIds, candidate.id),
+                          promptCandidateCount: Math.max(1, toggleCandidateSelection(current.selectedPromptCandidateIds, candidate.id).length),
+                        }))}
+                      />
+                      <div className={styles.optionCardBody}>
+                        <div className={styles.optionCardTop}>
+                          <strong>{candidate.title}</strong>
+                          <span className={styles.optionBadge}>{candidate.compressionLevel}</span>
+                        </div>
+                        <p className={styles.optionDesc}>{candidate.description}</p>
+                        {candidate.promptPatch ? <code className={styles.optionCode}>{candidate.promptPatch}</code> : null}
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
             </label>
 
-            <label className={styles.field}>
+            <label className={`${styles.field} ${styles.fieldFullRow}`}>
               <span>Policy 候选</span>
-              <input
-                className="form-input"
-                type="number"
-                min={1}
-                max={6}
-                value={createDraft.policyCandidateCount}
-                onChange={(event) => setCreateDraft((current) => ({ ...current, policyCandidateCount: Number(event.target.value) || 3 }))}
-              />
+              <div className={styles.optionGroup}>
+                {GEPA_POLICY_CANDIDATE_PRESETS.map((candidate) => {
+                  const checked = createDraft.selectedPolicyCandidateIds.includes(candidate.id);
+                  return (
+                    <label key={candidate.id} className={`${styles.optionCard} ${checked ? styles.optionCardActive : ''}`}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => setCreateDraft((current) => ({
+                          ...current,
+                          selectedPolicyCandidateIds: toggleCandidateSelection(current.selectedPolicyCandidateIds, candidate.id),
+                          policyCandidateCount: Math.max(1, toggleCandidateSelection(current.selectedPolicyCandidateIds, candidate.id).length),
+                        }))}
+                      />
+                      <div className={styles.optionCardBody}>
+                        <div className={styles.optionCardTop}>
+                          <strong>{candidate.title}</strong>
+                          <span className={styles.optionBadge}>{candidate.nerTopK ? `topK ${candidate.nerTopK}` : candidate.compressionLevel}</span>
+                        </div>
+                        <p className={styles.optionDesc}>{candidate.description}</p>
+                        {candidate.policyPatch ? <code className={styles.optionCode}>{JSON.stringify(candidate.policyPatch)}</code> : null}
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
             </label>
           </div>
 
           <div className={styles.formFooter}>
             <p className={styles.helperText}>
-              第一版使用 heuristic 回放生成候选与评分，后续可无缝替换成真实 LLM replay。
+              创建前可直接勾选要参与评估的 Prompt / Policy 候选；模板候选与模式候选仍会根据历史反馈和 query metrics 自动追加。
             </p>
             <button type="button" className="btn btn-primary btn-sm" onClick={() => void handleCreateRun()} disabled={creating}>
               <Icons.Sparkles size={14} />
@@ -629,7 +762,7 @@ export default function GepaPage() {
                   <div className={styles.summaryHint}>相对 baseline：{scoreTrend(selectedRun.scoreCard)}</div>
                 </div>
                 <div className={styles.summaryCard}>
-                  <div className={styles.summaryLabel}>SQL 成功率</div>
+                  <div className={styles.summaryLabel}>查询成功率</div>
                   <div className={styles.summaryValue}>{formatPercent(selectedRun.scoreCard.sqlSuccessRate)}</div>
                   <div className={styles.summaryHint}>Empty Rate {formatPercent(selectedRun.scoreCard.emptyRate)}</div>
                 </div>
@@ -643,141 +776,283 @@ export default function GepaPage() {
                   <div className={styles.summaryValue}>{formatNumber(selectedRun.scoreCard.tokenCost)}</div>
                   <div className={styles.summaryHint}>候选总数 {selectedRun.candidateSet.length}</div>
                 </div>
+                {candidateSources ? (
+                  <div className={styles.summaryCard}>
+                    <div className={styles.summaryLabel}>Candidate Sources</div>
+                    <div className={styles.summaryValue}>
+                      {Object.values(candidateSources)
+                        .reduce((sum: number, value) => sum + (typeof value === 'number' ? value : 0), 0)}
+                    </div>
+                    <div className={styles.summaryHint}>
+                      Policy {formatNumber(candidateSources.policy as number | undefined)} · Template {formatNumber(candidateSources.template as number | undefined)} · Pattern {formatNumber(candidateSources.pattern as number | undefined)}
+                    </div>
+                  </div>
+                ) : null}
               </section>
 
-              {(runtimeConfigDiff.length > 0 || runtimeConfigBefore || runtimeConfigAfter) ? (
+              {executiveSummary ? (
                 <section className={styles.blockCard}>
                   <div className={styles.cardHeader}>
                     <div>
-                      <div className={styles.cardLabel}>运行时配置</div>
-                      <h3 className={styles.cardTitle}>应用前后配置对比</h3>
+                      <div className={styles.cardLabel}>概述总结</div>
+                      <h3 className={styles.cardTitle}>推荐策略</h3>
                     </div>
-                    <span className={styles.cardMeta}>{runtimeConfigDiff.length} 项变更</span>
+                    <span className={styles.cardMeta}>
+                      {executiveSummary.delta !== null ? `相对 baseline ${executiveSummary.delta >= 0 ? '+' : ''}${executiveSummary.delta.toFixed(2)}` : '仅供人工审核参考'}
+                    </span>
                   </div>
-
-                  {appliedCandidateLabels.length > 0 ? (
-                    <div className={styles.noteChips}>
-                      {appliedCandidateLabels.map((label) => (
-                        <span key={label} className={styles.noteChip}>{label}</span>
-                      ))}
-                    </div>
-                  ) : null}
-
-                  {runtimeConfigDiff.length > 0 ? (
-                    <div className={styles.configDiffList}>
-                      {runtimeConfigDiff.map((item) => (
-                        <article key={item.key} className={styles.configDiffItem}>
-                          <div className={styles.configDiffLabel}>{item.label}</div>
-                          <div className={styles.configDiffValues}>
-                            <div className={styles.configDiffColumn}>
-                              <span className={styles.configDiffTag}>Before</span>
-                              <code className={styles.configDiffCode}>{item.before}</code>
-                            </div>
-                            <div className={styles.configDiffColumn}>
-                              <span className={styles.configDiffTag}>After</span>
-                              <code className={styles.configDiffCode}>{item.after}</code>
-                            </div>
+                  <div className={styles.dialogSummary}>{executiveSummary.headline}</div>
+                  <div className={styles.recommendGrid}>
+                    <article className={styles.recommendCard}>
+                      <div className={styles.sampleCompareLabel}>推荐 Prompt</div>
+                      {executiveSummary.recommendedPrompt ? (
+                        <>
+                          <div className={styles.recommendTitle}>{executiveSummary.recommendedPrompt.title}</div>
+                          <p className={styles.recommendText}>{executiveSummary.recommendedPrompt.description}</p>
+                          <div className={styles.noteChips}>
+                            {executiveSummary.recommendedPrompt.compressionLevel ? <span className={styles.noteChip}>{executiveSummary.recommendedPrompt.compressionLevel}</span> : null}
+                            {executiveSummary.promptScore !== null ? <span className={styles.noteChip}>平均分 {executiveSummary.promptScore.toFixed(2)}</span> : null}
+                            {executiveSummary.recommendedPrompt.source ? <span className={styles.noteChip}>{executiveSummary.recommendedPrompt.source}</span> : null}
                           </div>
-                        </article>
-                      ))}
-                    </div>
-                  ) : null}
-
-                  <div className={styles.configSnapshotGrid}>
-                    <div className={styles.configSnapshotCard}>
-                      <div className={styles.sampleCompareLabel}>Before</div>
-                      <pre className={styles.configSnapshotCode}>{JSON.stringify(runtimeConfigBefore || {}, null, 2)}</pre>
-                    </div>
-                    <div className={styles.configSnapshotCard}>
-                      <div className={styles.sampleCompareLabel}>After</div>
-                      <pre className={styles.configSnapshotCode}>{JSON.stringify(runtimeConfigAfter || {}, null, 2)}</pre>
-                    </div>
+                        </>
+                      ) : (
+                        <p className={styles.recommendText}>当前没有足够强的 Prompt 候选。</p>
+                      )}
+                    </article>
+                    <article className={styles.recommendCard}>
+                      <div className={styles.sampleCompareLabel}>推荐 Policy</div>
+                      {executiveSummary.recommendedPolicy ? (
+                        <>
+                          <div className={styles.recommendTitle}>{executiveSummary.recommendedPolicy.title}</div>
+                          <p className={styles.recommendText}>{executiveSummary.recommendedPolicy.description}</p>
+                          <div className={styles.noteChips}>
+                            {executiveSummary.recommendedPolicy.nerTopK ? <span className={styles.noteChip}>NER topK {executiveSummary.recommendedPolicy.nerTopK}</span> : null}
+                            {executiveSummary.policyScore !== null ? <span className={styles.noteChip}>平均分 {executiveSummary.policyScore.toFixed(2)}</span> : null}
+                            {executiveSummary.recommendedPolicy.source ? <span className={styles.noteChip}>{executiveSummary.recommendedPolicy.source}</span> : null}
+                          </div>
+                        </>
+                      ) : (
+                        <p className={styles.recommendText}>当前没有足够强的 Policy 候选。</p>
+                      )}
+                    </article>
                   </div>
                 </section>
               ) : null}
 
-              <section className={styles.blockCard}>
-                <div className={styles.cardHeader}>
-                  <div>
-                    <div className={styles.cardLabel}>候选集</div>
-                    <h3 className={styles.cardTitle}>Prompt / Policy</h3>
-                  </div>
-                  <span className={styles.cardMeta}>{selectedRun.candidateSet.length} 个候选</span>
-                </div>
-
-                <div className={styles.candidateGrid}>
-                  {selectedRun.candidateSet.map((candidate, index) => (
-                    <article key={candidate.id || `${candidate.kind}-${index}`} className={styles.candidateCard}>
-                      <div className={styles.candidateTop}>
-                        <div>
-                          <div className={styles.candidateKind}>{candidateKindLabel(candidate)}</div>
-                          <div className={styles.candidateTitle}>{candidate.title}</div>
-                        </div>
-                        {candidate.compressionLevel ? (
-                          <span className={styles.candidateBadge}>{candidate.compressionLevel}</span>
-                        ) : null}
+              {patternSummary ? (
+                <details className={styles.foldCard}>
+                  <summary className={styles.foldSummary}>
+                    <span>
+                      <span className={styles.cardLabel}>模式抽取</span>
+                      <strong className={styles.foldTitle}>真实 metrics 触发信号</strong>
+                    </span>
+                    <span className={styles.cardMeta}>{String(patternSummary.totalMetrics || 0)} 条 metrics</span>
+                  </summary>
+                  <div className={styles.foldBody}>
+                    <div className={styles.foldContent}>
+                      <div className={styles.noteChips}>
+                        <span className={styles.noteChip}>success {String(patternSummary.successCount || 0)}</span>
+                        <span className={styles.noteChip}>empty {String(patternSummary.emptyCount || 0)}</span>
+                        <span className={styles.noteChip}>error {String(patternSummary.errorCount || 0)}</span>
+                        <span className={styles.noteChip}>cache {String(patternSummary.fromCacheCount || 0)}</span>
+                        <span className={styles.noteChip}>avg confidence {Number(patternSummary.averageConfidence || 0).toFixed(3)}</span>
                       </div>
-                      <p className={styles.candidateDesc}>{candidate.description}</p>
-                      {candidate.nerTopK ? (
+
+                      {Array.isArray(patternSummary.notes) && patternSummary.notes.length > 0 ? (
                         <div className={styles.noteChips}>
-                          <span className={styles.noteChip}>NER topK {candidate.nerTopK}</span>
-                          {candidate.compressionLevel ? <span className={styles.noteChip}>{candidate.compressionLevel}</span> : null}
-                        </div>
-                      ) : null}
-                      {candidate.promptPatch ? (
-                        <pre className={styles.candidateCode}>{candidate.promptPatch}</pre>
-                      ) : null}
-                      {candidate.policyPatch ? (
-                        <pre className={styles.candidateCode}>{JSON.stringify(candidate.policyPatch, null, 2)}</pre>
-                      ) : null}
-                      {candidate.notes?.length ? (
-                        <div className={styles.noteChips}>
-                          {candidate.notes.map((note) => (
-                            <span key={`${candidate.id}-${note}`} className={styles.noteChip}>{note}</span>
+                          {patternSummary.notes.map((note) => (
+                            <span key={note as string} className={styles.noteChip}>{String(note)}</span>
                           ))}
                         </div>
                       ) : null}
-                    </article>
-                  ))}
-                </div>
-              </section>
-
-              <section className={styles.blockCard}>
-                <div className={styles.cardHeader}>
-                  <div>
-                    <div className={styles.cardLabel}>样本对比</div>
-                    <h3 className={styles.cardTitle}>Baseline vs Candidate</h3>
+                    </div>
                   </div>
-                  <span className={styles.cardMeta}>{selectedRun.samples.length} 个样本</span>
-                </div>
+                </details>
+              ) : null}
 
-                <div className={styles.sampleList}>
-                  {selectedRun.samples.map((sample) => (
-                    <article key={sample.sampleId} className={styles.sampleCard}>
-                      <div className={styles.sampleQuestion}>{sample.question}</div>
-                      <div className={styles.sampleCompare}>
-                        <div className={styles.sampleCompareCard}>
-                          <div className={styles.sampleCompareLabel}>Baseline</div>
-                          <div className={styles.sampleCompareStatus}>{sample.baseline.status}</div>
-                          <div className={styles.sampleCompareMeta}>{sample.baseline.detail}</div>
-                          <div className={styles.sampleCompareMeta}>{formatNumber(sample.baseline.latencyMs)} ms · {formatNumber(sample.baseline.tokenCost)} tokens</div>
+              {(runtimeConfigDiff.length > 0 || runtimeConfigBefore || runtimeConfigAfter) ? (
+                <details className={styles.foldCard}>
+                  <summary className={styles.foldSummary}>
+                    <span>
+                      <span className={styles.cardLabel}>运行时配置</span>
+                      <strong className={styles.foldTitle}>应用前后配置对比</strong>
+                    </span>
+                    <span className={styles.cardMeta}>{runtimeConfigDiff.length} 项变更</span>
+                  </summary>
+                  <div className={styles.foldBody}>
+                    <div className={styles.foldContent}>
+                      {appliedCandidateLabels.length > 0 ? (
+                        <div className={styles.noteChips}>
+                          {appliedCandidateLabels.map((label) => (
+                            <span key={label} className={styles.noteChip}>{label}</span>
+                          ))}
                         </div>
-                        <div className={styles.sampleCompareCard}>
-                          <div className={styles.sampleCompareLabel}>Candidate</div>
-                          <div className={styles.sampleCompareStatus}>{sample.candidate.status}</div>
-                          <div className={styles.sampleCompareMeta}>{sample.candidate.detail}</div>
-                          <div className={styles.sampleCompareMeta}>{formatNumber(sample.candidate.latencyMs)} ms · {formatNumber(sample.candidate.tokenCost)} tokens</div>
+                      ) : null}
+
+                      {runtimeConfigDiff.length > 0 ? (
+                        <div className={styles.configDiffList}>
+                          {runtimeConfigDiff.map((item) => (
+                            <article key={item.key} className={styles.configDiffItem}>
+                              <div className={styles.configDiffLabel}>{item.label}</div>
+                              <div className={styles.configDiffValues}>
+                                <div className={styles.configDiffColumn}>
+                                  <span className={styles.configDiffTag}>Before</span>
+                                  <code className={styles.configDiffCode}>{item.before}</code>
+                                </div>
+                                <div className={styles.configDiffColumn}>
+                                  <span className={styles.configDiffTag}>After</span>
+                                  <code className={styles.configDiffCode}>{item.after}</code>
+                                </div>
+                              </div>
+                            </article>
+                          ))}
+                        </div>
+                      ) : null}
+
+                      <div className={styles.configSnapshotGrid}>
+                        <div className={styles.configSnapshotCard}>
+                          <div className={styles.sampleCompareLabel}>Before</div>
+                          <pre className={styles.configSnapshotCode}>{JSON.stringify(runtimeConfigBefore || {}, null, 2)}</pre>
+                        </div>
+                        <div className={styles.configSnapshotCard}>
+                          <div className={styles.sampleCompareLabel}>After</div>
+                          <pre className={styles.configSnapshotCode}>{JSON.stringify(runtimeConfigAfter || {}, null, 2)}</pre>
                         </div>
                       </div>
-                      <div className={styles.sampleDelta}>
-                        <span>Score Δ {sample.delta.score.toFixed(2)}</span>
-                        <span>Latency Δ {formatNumber(sample.delta.latencyMs)} ms</span>
-                        <span>Token Δ {formatNumber(sample.delta.tokenCost)}</span>
-                      </div>
-                    </article>
-                  ))}
+                    </div>
+                  </div>
+                </details>
+              ) : null}
+
+              <details className={styles.foldCard}>
+                <summary className={styles.foldSummary}>
+                  <span>
+                    <span className={styles.cardLabel}>候选集</span>
+                    <strong className={styles.foldTitle}>Prompt / Policy</strong>
+                  </span>
+                  <span className={styles.cardMeta}>{selectedRun.candidateSet.length} 个候选</span>
+                </summary>
+                <div className={styles.foldBody}>
+                  <div className={styles.foldContent}>
+                    <div className={styles.candidateGrid}>
+                      {selectedRun.candidateSet.map((candidate, index) => (
+                        <article key={candidate.id || `${candidate.kind}-${index}`} className={styles.candidateCard}>
+                          <div className={styles.candidateTop}>
+                            <div>
+                              <div className={styles.candidateKind}>{candidateKindLabel(candidate)}</div>
+                              <div className={styles.candidateTitle}>{candidate.title}</div>
+                            </div>
+                            <div className={styles.noteChips}>
+                              {candidate.source ? <span className={styles.candidateBadge}>{candidate.source}</span> : null}
+                              {typeof candidate.confidence === 'number' ? (
+                                <span className={styles.candidateBadge}>{candidate.confidence.toFixed(2)}</span>
+                              ) : null}
+                              {candidate.compressionLevel ? (
+                                <span className={styles.candidateBadge}>{candidate.compressionLevel}</span>
+                              ) : null}
+                            </div>
+                          </div>
+                          <p className={styles.candidateDesc}>{candidate.description}</p>
+                          {candidate.nerTopK ? (
+                            <div className={styles.noteChips}>
+                              <span className={styles.noteChip}>NER topK {candidate.nerTopK}</span>
+                              {candidate.compressionLevel ? <span className={styles.noteChip}>{candidate.compressionLevel}</span> : null}
+                            </div>
+                          ) : null}
+                          {candidate.promptPatch ? (
+                            <pre className={styles.candidateCode}>{candidate.promptPatch}</pre>
+                          ) : null}
+                          {candidate.policyPatch ? (
+                            <pre className={styles.candidateCode}>{JSON.stringify(candidate.policyPatch, null, 2)}</pre>
+                          ) : null}
+                          {candidate.notes?.length ? (
+                            <div className={styles.noteChips}>
+                              {candidate.notes.map((note) => (
+                                <span key={`${candidate.id}-${note}`} className={styles.noteChip}>{note}</span>
+                              ))}
+                            </div>
+                          ) : null}
+                        </article>
+                      ))}
+                    </div>
+                  </div>
                 </div>
-              </section>
+              </details>
+
+              <details className={styles.foldCard}>
+                <summary className={styles.foldSummary}>
+                  <span>
+                    <span className={styles.cardLabel}>样本对比</span>
+                    <strong className={styles.foldTitle}>Baseline vs Candidate</strong>
+                  </span>
+                  <span className={styles.cardMeta}>{selectedRun.samples.length} 个样本</span>
+                </summary>
+                <div className={styles.foldBody}>
+                  <div className={styles.foldContent}>
+                    <div className={styles.sampleList}>
+                      {selectedRun.samples.map((sample) => (
+                        <article key={sample.sampleId} className={styles.sampleCard}>
+                          <div className={styles.sampleQuestion}>{sample.question}</div>
+                          <div className={styles.sampleCompare}>
+                            <div className={styles.sampleCompareCard}>
+                              <div className={styles.sampleCompareLabel}>Baseline</div>
+                              <div className={styles.sampleCompareStatus}>{sample.baseline.status}</div>
+                              <div className={styles.sampleCompareMeta}>{sample.baseline.detail}</div>
+                              <div className={styles.sampleCompareMeta}>{formatNumber(sample.baseline.latencyMs)} ms · {formatNumber(sample.baseline.tokenCost)} tokens</div>
+                            </div>
+                            <div className={styles.sampleCompareCard}>
+                              <div className={styles.sampleCompareLabel}>Candidate</div>
+                              <div className={styles.sampleCompareStatus}>{sample.candidate.status}</div>
+                              <div className={styles.sampleCompareMeta}>{sample.candidate.detail}</div>
+                              <div className={styles.sampleCompareMeta}>{formatNumber(sample.candidate.latencyMs)} ms · {formatNumber(sample.candidate.tokenCost)} tokens</div>
+                            </div>
+                          </div>
+                          <div className={styles.sampleDelta}>
+                            <span>Score Δ {sample.delta.score.toFixed(2)}</span>
+                            <span>Latency Δ {formatNumber(sample.delta.latencyMs)} ms</span>
+                            <span>Token Δ {formatNumber(sample.delta.tokenCost)}</span>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </details>
+
+              {realMetrics.length > 0 ? (
+                <details className={styles.foldCard}>
+                  <summary className={styles.foldSummary}>
+                    <span>
+                      <span className={styles.cardLabel}>真实样本</span>
+                      <strong className={styles.foldTitle}>最近 query metrics</strong>
+                    </span>
+                    <span className={styles.cardMeta}>{realMetrics.length} 条</span>
+                  </summary>
+                  <div className={styles.foldBody}>
+                    <div className={styles.foldContent}>
+                      <div className={styles.sampleList}>
+                        {realMetrics.slice(0, 6).map((metric) => (
+                          <article key={String(metric.turnId || metric.question)} className={styles.sampleCard}>
+                            <div className={styles.sampleQuestion}>{String(metric.question || '')}</div>
+                            <div className={styles.sampleDelta}>
+                              <span>{String(metric.outcome || 'unknown')}</span>
+                              <span>confidence {Number(metric.confidence || 0).toFixed(2)}</span>
+                              <span>{String(metric.fromCache ? 'from-cache' : 'live')}</span>
+                            </div>
+                            {Array.isArray(metric.labels) && metric.labels.length > 0 ? (
+                              <div className={styles.noteChips}>
+                                {metric.labels.map((label) => (
+                                  <span key={String(label)} className={styles.noteChip}>{String(label)}</span>
+                                ))}
+                              </div>
+                            ) : null}
+                          </article>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </details>
+              ) : null}
 
               <details className={styles.rawBlock}>
                 <summary>原始报告</summary>
