@@ -15,6 +15,7 @@ import {
   buildSchemaPromptContext,
   parseSchemaAgentPayload,
 } from '../tools/planning-tools';
+import { rankSemanticEmbeddingMatches } from '../memory/embedding-index';
 
 export async function runSchemaAgent(
   session: DBHarnessSessionContext,
@@ -23,11 +24,16 @@ export async function runSchemaAgent(
   logger: DBHarnessAgentLogger
 ): Promise<DBHarnessSchemaResult> {
   const keywords = buildKeywordSet(session.latestUserMessage, session.currentSql);
+  const semanticMatches = await rankSemanticEmbeddingMatches(
+    session.latestUserMessage,
+    workspace.semanticEmbeddingIndex
+  );
   const candidateBundle = buildNerCandidateBundle(
     workspace.schema,
     workspace.metricMappings,
     keywords,
-    workspace.runtimeConfig?.nerCandidateLimit
+    workspace.runtimeConfig?.nerCandidateLimit,
+    semanticMatches
   );
 
   logger.log('Schema Agent', 'Input', {
@@ -38,8 +44,8 @@ export async function runSchemaAgent(
   });
 
   try {
-    const promptContext = buildSchemaPromptContext(session, workspace, candidateBundle);
-    const { content } = await gateway.runSchemaPrompt(promptContext, [{ role: 'user', content: session.latestUserMessage }]);
+    const promptContext = buildSchemaPromptContext(session, workspace, candidateBundle, semanticMatches);
+    const { content, telemetry } = await gateway.runSchemaPrompt(promptContext, [{ role: 'user', content: session.latestUserMessage }]);
     const nerPayload = parseSchemaAgentPayload(extractJsonPayload(content));
     const knowledgeEntries = mergeKnowledgeEntries(
       workspace.knowledge,
@@ -59,6 +65,7 @@ export async function runSchemaAgent(
       knowledgeEntries,
       detail,
       usedFallback: false,
+      telemetry,
     };
   } catch (error) {
     if (!isLikelyModelUnavailable(error)) {
@@ -70,7 +77,8 @@ export async function runSchemaAgent(
       session.latestUserMessage,
       workspace.schema,
       workspace.metricMappings,
-      workspace.runtimeConfig?.nerCandidateLimit
+      workspace.runtimeConfig?.nerCandidateLimit,
+      semanticMatches
     );
     const knowledgeEntries = mergeKnowledgeEntries(
       workspace.knowledge,
@@ -91,6 +99,7 @@ export async function runSchemaAgent(
       knowledgeEntries,
       detail,
       usedFallback: true,
+      telemetry: undefined,
     };
   }
 }

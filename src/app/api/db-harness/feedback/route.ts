@@ -1,10 +1,12 @@
 import { NextResponse } from 'next/server';
-import { upsertDBHarnessKnowledgeMemory } from '@/lib/db';
+import { createHash } from 'node:crypto';
+import { upsertDBHarnessKnowledgeMemory, upsertDBHarnessPromptTemplate } from '@/lib/db';
 import {
   DBHarnessKnowledgeFeedbackRequest,
   DBHarnessKnowledgeFeedbackResponse,
 } from '@/lib/db-harness/core/types';
 import { createFeedbackKnowledgeEntry } from '@/lib/db-harness/memory/knowledge-memory';
+import { buildPromptTemplateRecord, shouldPersistPromptTemplate } from '@/lib/db-harness/memory/prompt-template';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -42,9 +44,46 @@ export async function POST(request: Request) {
         question: body.question,
         reply: body.reply,
         note: body.note || '',
+        questionHash: createHash('sha256').update(body.question.trim()).digest('hex'),
+        confidence: Number(body.confidence || 0),
+        fromCache: body.fromCache === true,
         artifact: body.artifacts || null,
+        correctionRule: entry.correctionRule || null,
       },
     });
+
+    if (shouldPersistPromptTemplate({
+      feedbackType,
+      confidence: body.confidence,
+      fromCache: body.fromCache,
+    })) {
+      const promptTemplate = buildPromptTemplateRecord({
+        knowledgeEntry,
+        databaseId: body.databaseInstanceId,
+        workspaceId: body.workspaceId,
+        confidence: body.confidence,
+        fromCache: body.fromCache,
+        source: 'feedback',
+      });
+      upsertDBHarnessPromptTemplate({
+        templateKey: promptTemplate.templateKey,
+        workspaceId: promptTemplate.workspaceId,
+        databaseId: promptTemplate.databaseId,
+        source: promptTemplate.source,
+        title: promptTemplate.title,
+        description: promptTemplate.description,
+        promptPatch: promptTemplate.promptPatch,
+        compressionLevel: promptTemplate.compressionLevel,
+        nerCandidateLimit: promptTemplate.nerCandidateLimit,
+        questionHash: createHash('sha256').update(body.question.trim()).digest('hex'),
+        queryFingerprint: body.artifacts?.sql
+          ? createHash('sha256').update(`${body.databaseInstanceId}|${body.artifacts.sql}`).digest('hex')
+          : undefined,
+        confidence: promptTemplate.confidence,
+        labels: promptTemplate.labels,
+        usageCount: 0,
+      });
+    }
 
     const response: DBHarnessKnowledgeFeedbackResponse = {
       feedback: {

@@ -2,6 +2,8 @@ import type { DatabaseInstance } from '@/lib/types';
 import type {
   DBHarnessCatalogSnapshot,
   DBHarnessKnowledgeMemoryEntry,
+  DBHarnessPromptTemplateRecord,
+  DBHarnessSemanticEmbeddingIndex,
   DBHarnessSemanticSnapshot,
   DatabaseMetricViewMap,
 } from '../core/types';
@@ -18,6 +20,8 @@ export interface DBHarnessWorkspaceCacheEntry {
   catalog: DBHarnessCatalogSnapshot;
   semantic: DBHarnessSemanticSnapshot;
   knowledge: DBHarnessKnowledgeMemoryEntry[];
+  promptTemplates?: DBHarnessPromptTemplateRecord[];
+  semanticEmbeddingIndex?: DBHarnessSemanticEmbeddingIndex | null;
 }
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
@@ -28,12 +32,16 @@ export function buildWorkspaceCacheKey(input: {
   databaseId: string;
   workspaceUpdatedAt?: string;
   databaseUpdatedAt?: string;
+  semanticModelUpdatedAt?: string;
+  promptTemplatesUpdatedAt?: string;
 }): string {
   return [
     input.workspaceId || '',
     input.databaseId,
     input.workspaceUpdatedAt || '',
     input.databaseUpdatedAt || '',
+    input.semanticModelUpdatedAt || '',
+    input.promptTemplatesUpdatedAt || '',
   ].join('|');
 }
 

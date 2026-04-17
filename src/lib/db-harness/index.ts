@@ -7,5 +7,7 @@ export type {
   DBHarnessChatTurnRequest,
   DBHarnessTurnResponse,
   DBMultiAgentTraceStep,
+  DBHarnessQueryMetricRecord,
+  DBHarnessPromptTemplateRecord,
 } from './core/types';
 export { runDBHarnessChatTurn } from './multi-agent/db-multi-agent';

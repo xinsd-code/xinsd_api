@@ -12,6 +12,7 @@ import {
   DBHarnessQueryResult,
   DBHarnessSessionContext,
   DBHarnessWorkspaceContext,
+  DBHarnessSemanticEmbeddingMatch,
   DatabaseMetricViewMap,
 } from '../core/types';
 import {
@@ -30,7 +31,9 @@ import {
   truncateText,
 } from '../core/utils';
 import { buildCatalogOverview, buildSemanticOverview } from './catalog-tools';
-import { buildKnowledgeOverview } from '../memory/knowledge-memory';
+import { buildCorrectionRuleOverview, buildKnowledgeOverview } from '../memory/knowledge-memory';
+import { buildSemanticEmbeddingOverview } from '../memory/embedding-index';
+import { buildPromptTemplateOverview } from '../memory/prompt-template';
 import { normalizeMongoQueryText } from '@/lib/mongo-query-compat';
 
 type QueryAggregate = DBHarnessQueryPlanMetric['aggregate'];
@@ -289,6 +292,10 @@ export function buildIntentPromptContext(
     `数据库类型: ${workspace.databaseInstance.type}`,
     'Workspace 规则：',
     compactText(workspace.workspaceRules || '未设置额外规则。', 1600),
+    'Schema 新鲜度：',
+    compactJson(workspace.freshness, 900),
+    '记忆质量概览：',
+    compactJson(workspace.knowledgeQuality, 900),
     'GEPA Prompt 策略：',
     compactText(runtimePromptStrategy || '未启用额外 Prompt 策略。', 600),
     `用户原始问句: ${compactText(session.latestUserMessage, 320)}`,
@@ -297,6 +304,8 @@ export function buildIntentPromptContext(
     compactText(session.currentSql, 1200),
     '知识记忆摘要：',
     compactJson(buildKnowledgeOverview(workspace.knowledge, keywords), 1800),
+    '模板库：',
+    compactJson(buildPromptTemplateOverview(workspace.promptTemplates || []), 1400),
     '轻量目录摘要：',
     compactJson(buildCatalogOverview(workspace.catalog, keywords), 3200),
     '轻量语义摘要：',
@@ -341,6 +350,17 @@ function scoreCandidate(candidate: DBHarnessNerCandidate, keywords: Set<string>)
   if (candidate.metricName) score += 1;
   if (candidate.description) score += 1;
   return score;
+}
+
+function buildSemanticMatchMap(matches: DBHarnessSemanticEmbeddingMatch[] | undefined) {
+  const matchMap = new Map<string, number>();
+  (matches || []).forEach((match) => {
+    if (!match.table || !match.column || !Number.isFinite(match.score)) return;
+    const key = `${match.table}.${match.column}`;
+    const nextScore = Math.max(matchMap.get(key) || 0, match.score);
+    matchMap.set(key, nextScore);
+  });
+  return matchMap;
 }
 
 function buildExpandedKeywordSet(
@@ -393,10 +413,12 @@ export function buildNerCandidateBundle(
   schema: DatabaseSchemaPayload,
   metricMappings: DatabaseMetricViewMap,
   keywords: Set<string>,
-  preferredLimit?: number | null
+  preferredLimit?: number | null,
+  semanticMatches?: DBHarnessSemanticEmbeddingMatch[]
 ) {
   const allCandidates: DBHarnessNerCandidate[] = [];
   const expandedKeywords = buildExpandedKeywordSet(schema, metricMappings, keywords);
+  const semanticMatchMap = buildSemanticMatchMap(semanticMatches);
 
   schema.collections
     .filter((collection) => collection.category === 'table')
@@ -425,7 +447,8 @@ export function buildNerCandidateBundle(
   const sorted = allCandidates
     .map((candidate) => ({
       candidate,
-      score: scoreCandidate(candidate, expandedKeywords),
+      score: scoreCandidate(candidate, expandedKeywords)
+        + Math.round((semanticMatchMap.get(`${candidate.table}.${candidate.column}`) || 0) * 12),
     }))
     .sort((left, right) => right.score - left.score
       || left.candidate.table.localeCompare(right.candidate.table)
@@ -495,7 +518,8 @@ export function buildSchemaDetail(
 export function buildSchemaPromptContext(
   session: DBHarnessSessionContext,
   workspace: DBHarnessWorkspaceContext,
-  candidates: ReturnType<typeof buildNerCandidateBundle>
+  candidates: ReturnType<typeof buildNerCandidateBundle>,
+  semanticMatches?: DBHarnessSemanticEmbeddingMatch[]
 ): string {
   const keywords = buildExpandedKeywordSet(
     workspace.schema,
@@ -510,6 +534,10 @@ export function buildSchemaPromptContext(
     `数据库类型: ${workspace.databaseInstance.type}`,
     'Workspace 规则：',
     compactText(workspace.workspaceRules || '未设置额外规则。', 2000),
+    'Schema 新鲜度：',
+    compactJson(workspace.freshness, 900),
+    '记忆质量概览：',
+    compactJson(workspace.knowledgeQuality, 900),
     'GEPA Prompt 策略：',
     compactText(workspace.runtimeConfig?.promptStrategy || '未启用额外 Prompt 策略。', 720),
     `用户原始问句: ${compactText(session.latestUserMessage, 320)}`,
@@ -517,6 +545,12 @@ export function buildSchemaPromptContext(
     compactText(session.currentSql, 1200),
     '知识记忆摘要：',
     compactJson(buildKnowledgeOverview(workspace.knowledge, keywords), 1800),
+    '纠正规则：',
+    compactJson(buildCorrectionRuleOverview(workspace.knowledge, keywords), 1600),
+    '语义向量候选：',
+    compactJson(buildSemanticEmbeddingOverview(semanticMatches || []), 1600),
+    '模板库：',
+    compactJson(buildPromptTemplateOverview(workspace.promptTemplates || []), 1400),
     '轻量目录摘要：',
     compactJson(buildCatalogOverview(workspace.catalog, keywords), 2600),
     '轻量语义摘要：',
@@ -568,6 +602,10 @@ export function buildQueryPromptContext(
     `数据库类型: ${workspace.databaseInstance.type}`,
     'Workspace 取数规则：',
     compactText(workspace.workspaceRules || '未设置额外规则。', limits.rules),
+    'Schema 新鲜度：',
+    compactJson(workspace.freshness, Math.min(900, limits.planning)),
+    '记忆质量概览：',
+    compactJson(workspace.knowledgeQuality, Math.min(900, limits.knowledge)),
     'GEPA Prompt 策略：',
     compactText(workspace.runtimeConfig?.promptStrategy || '未启用额外 Prompt 策略。', Math.min(720, limits.planning)),
     `最近一次用户意图: ${compactText(session.latestUserMessage, 320)}`,
@@ -586,6 +624,8 @@ export function buildQueryPromptContext(
     compactJson(resultRows, limits.resultRows),
     '知识记忆摘要：',
     compactJson(buildKnowledgeOverview(workspace.knowledge, keywords), limits.knowledge),
+    '模板库：',
+    compactJson(buildPromptTemplateOverview(workspace.promptTemplates || []), Math.min(1400, limits.knowledge)),
     '轻量目录摘要：',
     compactJson(buildCatalogOverview(workspace.catalog, keywords), limits.catalog),
     '轻量语义摘要：',
@@ -599,10 +639,11 @@ export function buildFallbackNerPayload(
   question: string,
   schema: DatabaseSchemaPayload,
   metricMappings: DatabaseMetricViewMap,
-  preferredLimit?: number | null
+  preferredLimit?: number | null,
+  semanticMatches?: DBHarnessSemanticEmbeddingMatch[]
 ): DBHarnessNerPayload {
   const keywords = buildKeywordSet(question);
-  const candidates = buildNerCandidateBundle(schema, metricMappings, keywords, preferredLimit).candidates;
+  const candidates = buildNerCandidateBundle(schema, metricMappings, keywords, preferredLimit, semanticMatches).candidates;
 
   return {
     normalizedTerms: Array.from(keywords).slice(0, 8),

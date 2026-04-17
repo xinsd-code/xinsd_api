@@ -58,7 +58,7 @@ export async function runQueryAgent(
       engine,
       intentResult.planningHints.intent
     );
-    const { content } = await gateway.runQueryPrompt(
+    const { content, telemetry } = await gateway.runQueryPrompt(
       (level) => buildQueryPromptContext(
         session,
         workspace,
@@ -87,6 +87,7 @@ export async function runQueryAgent(
       plan: parsed.plan,
       detail,
       usedFallback: false,
+      telemetry,
     };
   } catch (error) {
     if (!isLikelyModelUnavailable(error)) {
@@ -112,6 +113,7 @@ export async function runQueryAgent(
       plan: fallbackResult.plan,
       detail,
       usedFallback: true,
+      telemetry: undefined,
     };
   }
 }

@@ -32,6 +32,8 @@ export async function POST(request: Request) {
       sampleLimit: body.sampleLimit,
       promptCandidateCount: body.promptCandidateCount,
       policyCandidateCount: body.policyCandidateCount,
+      selectedPromptCandidateIds: body.selectedPromptCandidateIds,
+      selectedPolicyCandidateIds: body.selectedPolicyCandidateIds,
     });
     return NextResponse.json({ run });
   } catch (error) {

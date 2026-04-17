@@ -1,14 +1,17 @@
-import { buildAiChatEndpoint } from '@/lib/ai-models';
+import { buildAIModelEndpoint, buildAiChatEndpoint } from '@/lib/ai-models';
 import {
   getAIModelProfileById,
   getDatabaseInstanceById,
   getDBHarnessWorkspaceById,
   listDBHarnessKnowledgeMemory,
+  listDBHarnessPromptTemplates,
 } from '@/lib/db';
 import { getEffectiveDatabaseMetricMappings, sanitizeDatabaseSemanticModel } from '@/lib/database-instances';
 import { getDatabaseSchema } from '@/lib/database-instances-server';
 import { DBHarnessChatTurnRequest, DBHarnessWorkspaceContext, DatabaseMetricViewMap } from '../core/types';
+import { buildSemanticEmbeddingIndex } from '../memory/embedding-index';
 import { deriveCatalogSnapshot, deriveSemanticSnapshot } from '../tools/catalog-tools';
+import { buildKnowledgeQualitySnapshot, buildWorkspaceFreshnessSnapshot } from './workspace-insights';
 import {
   buildWorkspaceCacheKey,
   getCachedWorkspaceContext,
@@ -51,6 +54,18 @@ export async function resolveDBHarnessWorkspace(input: DBHarnessChatTurnRequest)
   const workspaceRecord = input.workspaceId
     ? getDBHarnessWorkspaceById(input.workspaceId)
     : null;
+  const promptTemplates = listDBHarnessPromptTemplates({
+    workspaceId: workspaceRecord?.id || input.workspaceId,
+    databaseId: databaseInstance.id,
+    limit: 12,
+  });
+  const promptTemplatesUpdatedAt = promptTemplates.reduce((latest, item) => {
+    const current = Date.parse(item.updatedAt || '');
+    const previous = Date.parse(latest || '');
+    if (!Number.isFinite(current)) return latest;
+    if (!Number.isFinite(previous)) return item.updatedAt;
+    return current > previous ? item.updatedAt : latest;
+  }, '');
   const nerSelectedModel = input.nerSelectedModel || null;
   const nerProfile = nerSelectedModel ? getAIModelProfileById(nerSelectedModel.profileId) : profile;
   if (nerSelectedModel && !nerProfile) {
@@ -60,7 +75,7 @@ export async function resolveDBHarnessWorkspace(input: DBHarnessChatTurnRequest)
     throw new Error('NER 模型来源未包含所选 Model ID。');
   }
   const resolvedNerProfile = nerSelectedModel ? nerProfile || undefined : undefined;
-  const nerEndpoint = resolvedNerProfile ? buildAiChatEndpoint(resolvedNerProfile.baseUrl) : endpoint;
+  const nerEndpoint = resolvedNerProfile ? buildAIModelEndpoint(resolvedNerProfile.baseUrl, resolvedNerProfile.modelType) : endpoint;
   if (nerSelectedModel && !nerEndpoint) {
     throw new Error('NER 模型的 Base URL 无效。');
   }
@@ -70,13 +85,24 @@ export async function resolveDBHarnessWorkspace(input: DBHarnessChatTurnRequest)
     databaseId: databaseInstance.id,
     workspaceUpdatedAt: workspaceRecord?.updatedAt || '',
     databaseUpdatedAt: databaseInstance.updatedAt || '',
+    semanticModelUpdatedAt: databaseInstance.semanticModel?.updatedAt || '',
+    promptTemplatesUpdatedAt,
   });
   const cached = getCachedWorkspaceContext(cacheKey);
   if (cached) {
+    const freshness = buildWorkspaceFreshnessSnapshot({
+      workspaceUpdatedAt: workspaceRecord?.updatedAt || '',
+      databaseUpdatedAt: databaseInstance.updatedAt || '',
+      semanticModelUpdatedAt: databaseInstance.semanticModel?.updatedAt || '',
+      cacheBuiltAt: cached.cachedAt,
+    });
+    const knowledgeQuality = buildKnowledgeQualitySnapshot(cached.knowledge);
     return {
       workspaceId: cached.workspaceId,
       workspaceRules: cached.workspaceRules,
       runtimeConfig: workspaceRecord?.runtimeConfig || {},
+      freshness,
+      knowledgeQuality,
       databaseInstance: cached.databaseInstance,
       profile,
       selectedModel,
@@ -89,6 +115,8 @@ export async function resolveDBHarnessWorkspace(input: DBHarnessChatTurnRequest)
       catalog: cached.catalog,
       semantic: cached.semantic,
       knowledge: cached.knowledge,
+      promptTemplates: cached.promptTemplates,
+      semanticEmbeddingIndex: cached.semanticEmbeddingIndex,
     };
   }
 
@@ -104,6 +132,29 @@ export async function resolveDBHarnessWorkspace(input: DBHarnessChatTurnRequest)
     databaseId: databaseInstance.id,
     limit: 24,
   });
+  const freshness = buildWorkspaceFreshnessSnapshot({
+    workspaceUpdatedAt: workspaceRecord?.updatedAt || '',
+    databaseUpdatedAt: databaseInstance.updatedAt || '',
+    semanticModelUpdatedAt: databaseInstance.semanticModel?.updatedAt || '',
+  });
+  const knowledgeQuality = buildKnowledgeQualitySnapshot(knowledge);
+  let semanticEmbeddingIndex = null;
+  if (resolvedNerProfile?.modelType === 'embedding' && nerEndpoint) {
+    try {
+      semanticEmbeddingIndex = await buildSemanticEmbeddingIndex({
+        profile: resolvedNerProfile,
+        modelId: nerSelectedModel?.modelId || resolvedNerProfile.defaultModelId || resolvedNerProfile.modelIds[0] || '',
+        endpoint: nerEndpoint,
+        schema,
+        metricMappings,
+        knowledge,
+        runtimeConfig: workspaceRecord?.runtimeConfig || {},
+      });
+    } catch (error) {
+      console.warn('DB Harness semantic embedding index build skipped:', error instanceof Error ? error.message : String(error));
+      semanticEmbeddingIndex = null;
+    }
+  }
 
   const cacheEntry = {
     cacheKey,
@@ -116,6 +167,10 @@ export async function resolveDBHarnessWorkspace(input: DBHarnessChatTurnRequest)
     catalog,
     semantic,
     knowledge,
+    promptTemplates,
+    freshness,
+    knowledgeQuality,
+    semanticEmbeddingIndex,
   };
   setCachedWorkspaceContext(cacheEntry);
 
@@ -135,5 +190,9 @@ export async function resolveDBHarnessWorkspace(input: DBHarnessChatTurnRequest)
     catalog,
     semantic,
     knowledge,
+    promptTemplates,
+    freshness,
+    knowledgeQuality,
+    semanticEmbeddingIndex,
   };
 }

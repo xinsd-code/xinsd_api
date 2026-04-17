@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { buildAIModelHeaders } from '@/lib/ai-models';
-import { DBHarnessSessionContext, DBHarnessWorkspaceContext } from '../core/types';
+import { DBHarnessAgentTelemetry, DBHarnessSessionContext, DBHarnessWorkspaceContext } from '../core/types';
 import { DBHarnessAgentLogger } from '../memory/agent-logger';
 import { getModelErrorMessage, isRecord, parseJsonSafely } from '../core/utils';
 
@@ -47,7 +47,8 @@ async function requestModelContent(
   modelId: string,
   systemPrompt: string,
   messages: DBHarnessSessionContext['messages']
-): Promise<string> {
+): Promise<{ content: string; telemetry: DBHarnessAgentTelemetry }> {
+  const startedAt = Date.now();
   let upstreamResponse: Response;
   try {
     upstreamResponse = await fetch(endpoint, {
@@ -73,19 +74,33 @@ async function requestModelContent(
 
   const upstreamText = await upstreamResponse.text();
   const upstreamJson = parseJsonSafely(upstreamText);
+  const latencyMs = Math.max(0, Date.now() - startedAt);
+  const usage = isRecord(upstreamJson) && isRecord(upstreamJson.usage)
+    ? {
+        promptTokens: typeof upstreamJson.usage.prompt_tokens === 'number' ? upstreamJson.usage.prompt_tokens : undefined,
+        completionTokens: typeof upstreamJson.usage.completion_tokens === 'number' ? upstreamJson.usage.completion_tokens : undefined,
+        totalTokens: typeof upstreamJson.usage.total_tokens === 'number' ? upstreamJson.usage.total_tokens : undefined,
+      }
+    : undefined;
 
   if (!upstreamResponse.ok) {
     throw new Error(getModelErrorMessage(upstreamJson));
   }
 
-  return isRecord(upstreamJson)
+  return {
+    content: isRecord(upstreamJson)
     && Array.isArray(upstreamJson.choices)
     && upstreamJson.choices.length > 0
     && isRecord(upstreamJson.choices[0])
     && isRecord(upstreamJson.choices[0].message)
     && typeof upstreamJson.choices[0].message.content === 'string'
-    ? upstreamJson.choices[0].message.content
-    : '';
+      ? upstreamJson.choices[0].message.content
+      : '',
+    telemetry: {
+      usage,
+      latencyMs,
+    },
+  };
 }
 
 export class DBHarnessGateway {
@@ -123,8 +138,8 @@ export class DBHarnessGateway {
       messageCount: messages.length,
       messageChars: messages.reduce((sum, message) => sum + message.content.length, 0),
     });
-    const content = await requestModelContent(model.endpoint, model.profile, model.selectedModel.modelId, prompt, messages);
-    return { prompt, content };
+    const { content, telemetry } = await requestModelContent(model.endpoint, model.profile, model.selectedModel.modelId, prompt, messages);
+    return { prompt, content, telemetry };
   }
 
   async runSchemaPrompt(context: string, messages: DBHarnessSessionContext['messages']) {
@@ -140,8 +155,8 @@ export class DBHarnessGateway {
       messageCount: messages.length,
       messageChars: messages.reduce((sum, message) => sum + message.content.length, 0),
     });
-    const content = await requestModelContent(model.endpoint, model.profile, model.selectedModel.modelId, prompt, messages);
-    return { prompt, content };
+    const { content, telemetry } = await requestModelContent(model.endpoint, model.profile, model.selectedModel.modelId, prompt, messages);
+    return { prompt, content, telemetry };
   }
 
   async runQueryPrompt(
@@ -183,7 +198,7 @@ export class DBHarnessGateway {
       compressionLevel,
       charThreshold: QUERY_PROMPT_CHAR_THRESHOLD,
     });
-    const content = await requestModelContent(model.endpoint, model.profile, model.selectedModel.modelId, prompt, messages);
-    return { prompt, content };
+    const { content, telemetry } = await requestModelContent(model.endpoint, model.profile, model.selectedModel.modelId, prompt, messages);
+    return { prompt, content, telemetry };
   }
 }

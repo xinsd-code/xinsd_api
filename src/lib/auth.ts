@@ -21,10 +21,11 @@ const sessions = new Map<string, Session>();
 
 /**
  * 创建新会话
+ * 默认使用 default-user/default-workspace 以兼容单用户模式和历史数据
  */
 export async function createSession(
-  userId: string = `user-${nanoid()}`,
-  workspaceId: string = `workspace-${nanoid()}`
+  userId: string = 'default-user',
+  workspaceId: string = 'default-workspace'
 ): Promise<string> {
   const sessionId = nanoid();
   const session: Session = {
@@ -49,6 +50,8 @@ export async function createSession(
 
 /**
  * 获取当前会话
+ * 如果 cookie 存在但内存中无对应 session（如中间件刚创建的 lazy session），
+ * 则自动在内存中初始化该 session，确保首次请求不会 401。
  */
 export async function getSession(request?: Request): Promise<Session | null> {
   try {
@@ -59,9 +62,17 @@ export async function getSession(request?: Request): Promise<Session | null> {
       return null;
     }
 
-    const session = sessions.get(sessionId);
+    let session = sessions.get(sessionId);
+
+    // 中间件可能已设置 cookie 但内存中尚无 session，自动创建
+    // 使用固定默认值以兼容单用户模式和历史数据（owner_id='default-user' 的记录）
     if (!session) {
-      return null;
+      session = {
+        userId: 'default-user',
+        workspaceId: 'default-workspace',
+        createdAt: Date.now(),
+      };
+      sessions.set(sessionId, session);
     }
 
     // 检查会话是否过期
@@ -128,4 +139,25 @@ export async function requireSession(): Promise<Session> {
   }
 
   return session;
+}
+
+/**
+ * 通用资源所有权验证
+ * 用于 db-apis、forwards、workspaces 等资源级权限检查
+ * default-user/default-workspace 视为公共资源，所有人可访问
+ */
+export async function verifyResourceOwnership(
+  resourceOwnerId?: string,
+  resourceWorkspaceId?: string
+): Promise<boolean> {
+  const session = await getSession();
+  if (!session) return false;
+
+  if (resourceOwnerId && resourceOwnerId !== 'default-user' && resourceOwnerId !== session.userId) {
+    return false;
+  }
+  if (resourceWorkspaceId && resourceWorkspaceId !== 'default-workspace' && resourceWorkspaceId !== session.workspaceId) {
+    return false;
+  }
+  return true;
 }

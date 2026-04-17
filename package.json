@@ -9,7 +9,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:db-harness": "node --test tests/db-harness-api.test.mjs"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
