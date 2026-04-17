@@ -14,6 +14,7 @@ import type {
   DBHarnessCatalogOverview,
   DBHarnessChatMessage,
   DBHarnessKnowledgeFeedbackResponse,
+  DBHarnessProgressEvent,
   DBHarnessQueryPlan,
   DBHarnessSemanticOverview,
   DBHarnessSessionRecord,
@@ -37,10 +38,6 @@ function createId() {
   return Math.random().toString(36).slice(2, 10);
 }
 
-function wait(ms: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
 function formatCell(value: unknown) {
   if (value === null || value === undefined) return '—';
   if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
@@ -61,6 +58,18 @@ function getCurrentTraceTitle(trace: DBMultiAgentTraceStep[] | undefined) {
   if (runningStep) return runningStep.title;
   const latestCompleted = [...trace].reverse().find((step) => step.status === 'completed');
   return latestCompleted?.title || trace[0]?.title || '';
+}
+
+function getValidationStatusLabel(status: 'pass' | 'review' | 'fail') {
+  if (status === 'pass') return '校验通过';
+  if (status === 'review') return '建议复核';
+  return '结果风险较高';
+}
+
+function getValidationStatusClass(status: 'pass' | 'review' | 'fail') {
+  if (status === 'pass') return styles.validationBadgePass;
+  if (status === 'review') return styles.validationBadgeReview;
+  return styles.validationBadgeFail;
 }
 
 function renderPlanMetric(metric: DBHarnessQueryPlan['metrics'][number]) {
@@ -86,6 +95,25 @@ function parseTracePayload(payload: string | undefined): Record<string, unknown>
   } catch {
     return null;
   }
+}
+
+function parseSseBlock(block: string): { event: string; data: string } | null {
+  const lines = block.split('\n');
+  let event = '';
+  const dataLines: string[] = [];
+
+  lines.forEach((line) => {
+    if (line.startsWith('event:')) {
+      event = line.slice(6).trim();
+      return;
+    }
+    if (line.startsWith('data:')) {
+      dataLines.push(line.slice(5).trim());
+    }
+  });
+
+  if (!event || dataLines.length === 0) return null;
+  return { event, data: dataLines.join('\n') };
 }
 
 function renderTraceArrayChips(values: unknown) {
@@ -923,38 +951,19 @@ export default function DbHarnessPage() {
     )));
   }
 
-  async function playTrace(
-    assistantId: string,
-    finalResponse: DBHarnessTurnResponse
-  ) {
-    const traceState = createPendingTrace();
-
-    for (let index = 0; index < finalResponse.trace.length; index += 1) {
-      const currentStep = finalResponse.trace[index];
-      traceState[index] = {
-        ...traceState[index],
-        status: 'running',
-        detail: `正在执行 ${currentStep.title}…`,
+  function appendAssistantProgress(assistantId: string, event: DBHarnessProgressEvent) {
+    updateAssistantMessage(assistantId, (message) => {
+      const progress = [...(message.meta?.progress || []), event].slice(-20);
+      return {
+        ...message,
+        content: event.status === 'error' ? message.content : event.message || message.content,
+        trace: event.trace || message.trace,
+        meta: {
+          ...(message.meta || {}),
+          progress,
+        },
       };
-      updateAssistantMessage(assistantId, (message) => ({
-        ...message,
-        trace: [...traceState],
-      }));
-
-      await wait(360);
-
-      traceState[index] = currentStep;
-      updateAssistantMessage(assistantId, (message) => ({
-        ...message,
-        trace: [...traceState],
-      }));
-
-      await wait(280);
-
-      if (currentStep.status === 'failed') {
-        break;
-      }
-    }
+    });
   }
 
   async function handleCopyArtifact(message: DBHarnessChatMessage) {
@@ -1004,18 +1013,20 @@ export default function DbHarnessPage() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          workspaceId: activeWorkspace?.id,
-          sessionId: activeSession?.id,
-          messageId: message.id,
-          databaseInstanceId: databaseId,
-          question,
-          reply: message.content,
-          feedbackType,
-          note,
-          artifacts: message.artifacts,
-        }),
-      });
+      body: JSON.stringify({
+        workspaceId: activeWorkspace?.id,
+        sessionId: activeSession?.id,
+        messageId: message.id,
+        databaseInstanceId: databaseId,
+        question,
+        reply: message.content,
+        feedbackType,
+        note,
+        confidence: message.meta?.confidence,
+        fromCache: message.meta?.fromCache,
+        artifacts: message.artifacts,
+      }),
+    });
 
       const payload = await response.json() as DBHarnessKnowledgeFeedbackResponse | { error?: string };
       if (!response.ok || !('feedback' in payload)) {
@@ -1313,6 +1324,7 @@ export default function DbHarnessPage() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          Accept: 'text/event-stream',
         },
         body: JSON.stringify({
           workspaceId: activeWorkspace?.id,
@@ -1326,32 +1338,110 @@ export default function DbHarnessPage() {
           currentResult: latestArtifact
             ? {
               columns: latestArtifact.columns,
-              rows: latestArtifact.previewRows,
-              summary: latestArtifact.summary,
-            }
+            rows: latestArtifact.previewRows,
+            summary: latestArtifact.summary,
+          }
             : null,
+          stream: true,
         }),
       });
 
-      const payload = await response.json() as DBHarnessTurnResponse | { error?: string };
       if (!response.ok) {
+        const payload = await response.json() as DBHarnessTurnResponse | { error?: string };
         throw new Error(payload && 'error' in payload && payload.error ? payload.error : 'DB Harness 执行失败');
       }
 
-      if (!('trace' in payload)) {
-        throw new Error('DB Harness 执行失败');
+      const contentType = response.headers.get('content-type') || '';
+      if (contentType.includes('text/event-stream') && response.body) {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let finalPayload: DBHarnessTurnResponse | null = null;
+        let streamErrorMessage = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let splitIndex = buffer.indexOf('\n\n');
+          while (splitIndex !== -1) {
+            const block = buffer.slice(0, splitIndex).trim();
+            buffer = buffer.slice(splitIndex + 2);
+            splitIndex = buffer.indexOf('\n\n');
+            if (!block) continue;
+            const parsed = parseSseBlock(block);
+            if (!parsed) continue;
+            if (parsed.event === 'progress') {
+              try {
+                const progress = JSON.parse(parsed.data) as DBHarnessProgressEvent;
+                appendAssistantProgress(assistantId, progress);
+              } catch {
+                // 忽略单条进度事件解析失败，不中断整轮回答。
+              }
+              continue;
+            }
+            if (parsed.event === 'final') {
+              try {
+                finalPayload = JSON.parse(parsed.data) as DBHarnessTurnResponse;
+              } catch {
+                finalPayload = null;
+              }
+              continue;
+            }
+            if (parsed.event === 'error') {
+              try {
+                const errorPayload = JSON.parse(parsed.data) as { error?: string };
+                streamErrorMessage = errorPayload.error || 'DB Harness 流式执行失败';
+              } catch {
+                streamErrorMessage = 'DB Harness 流式执行失败';
+              }
+            }
+          }
+        }
+
+        if (streamErrorMessage) {
+          throw new Error(streamErrorMessage);
+        }
+
+        if (!finalPayload) {
+          throw new Error('DB Harness 流式响应失败');
+        }
+
+        updateAssistantMessage(assistantId, (message) => ({
+          ...message,
+          content: finalPayload.reply,
+          status: finalPayload.outcome === 'error' ? 'error' : 'done',
+          trace: finalPayload.trace as DBMultiAgentTraceStep[],
+          artifacts: finalPayload.artifacts,
+          followUps: finalPayload.followUps,
+          meta: {
+            ...(message.meta || {}),
+            confidence: finalPayload.confidence,
+            fromCache: finalPayload.fromCache,
+            progress: finalPayload.progress || message.meta?.progress,
+          },
+        }));
+      } else {
+        const payload = await response.json() as DBHarnessTurnResponse | { error?: string };
+        if (!('trace' in payload)) {
+          throw new Error('DB Harness 执行失败');
+        }
+
+        updateAssistantMessage(assistantId, (message) => ({
+          ...message,
+          content: payload.reply,
+          status: payload.outcome === 'error' ? 'error' : 'done',
+          trace: payload.trace as DBMultiAgentTraceStep[],
+          artifacts: payload.artifacts,
+          followUps: payload.followUps,
+          meta: {
+            ...(message.meta || {}),
+            confidence: payload.confidence,
+            fromCache: payload.fromCache,
+            progress: payload.progress || message.meta?.progress,
+          },
+        }));
       }
-
-      await playTrace(assistantId, payload);
-
-      updateAssistantMessage(assistantId, (message) => ({
-        ...message,
-        content: payload.reply,
-        status: payload.outcome === 'error' ? 'error' : 'done',
-        trace: payload.trace as DBMultiAgentTraceStep[],
-        artifacts: payload.artifacts,
-        followUps: payload.followUps,
-      }));
     } catch (error) {
       const nextError = error instanceof Error ? error.message : 'DB Harness 回合执行失败';
       setErrorMessage(nextError);
@@ -1359,6 +1449,10 @@ export default function DbHarnessPage() {
         ...message,
         content: nextError,
         status: 'error',
+        meta: {
+          ...(message.meta || {}),
+          progress: message.meta?.progress || [],
+        },
       }));
     } finally {
       setSending(false);
@@ -1388,6 +1482,11 @@ export default function DbHarnessPage() {
           <Link href="/db-harness/gepa" className={styles.sidebarSecondaryLink}>
             <Icons.Sparkles size={15} />
             GEPA 工作台
+          </Link>
+
+          <Link href="/db-harness/metrics" className={styles.sidebarSecondaryLink}>
+            <Icons.Activity size={15} />
+            指标看板
           </Link>
 
           <div className={styles.workspaceList}>
@@ -1604,6 +1703,26 @@ export default function DbHarnessPage() {
                           <div className={styles.messageBubble}>
                             <p className={styles.messageContent}>{message.content}</p>
 
+                            {message.meta?.progress && message.meta.progress.length > 0 ? (
+                              <div style={{ marginTop: 12, fontSize: 12, lineHeight: 1.6, opacity: 0.86 }}>
+                                <div style={{ fontWeight: 600, marginBottom: 6 }}>执行进度</div>
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                                  {message.meta.progress.slice(-5).map((event) => (
+                                    <span
+                                      key={event.id}
+                                      style={{
+                                        padding: '4px 8px',
+                                        borderRadius: 999,
+                                        background: 'rgba(0,0,0,0.06)',
+                                      }}
+                                    >
+                                      {event.message}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            ) : null}
+
                             {message.artifacts ? (
                               <section className={styles.resultCard}>
                                 <div className={styles.resultHeader}>
@@ -1623,6 +1742,34 @@ export default function DbHarnessPage() {
                                     </button>
                                   ) : null}
                                 </div>
+
+                                {message.artifacts.validation ? (
+                                  <section className={styles.validationCard}>
+                                    <div className={styles.validationHeader}>
+                                      <div>
+                                        <div className={styles.artifactLabel}>结果校验</div>
+                                        <p className={styles.resultSummary}>{message.artifacts.validation.summary}</p>
+                                      </div>
+                                      <span className={`${styles.validationBadge} ${getValidationStatusClass(message.artifacts.validation.status)}`}>
+                                        {getValidationStatusLabel(message.artifacts.validation.status)}
+                                      </span>
+                                    </div>
+                                    <div className={styles.validationMeta}>
+                                      <span>score {message.artifacts.validation.score.toFixed(3)}</span>
+                                      <span>{message.artifacts.validation.issues.length} 个信号</span>
+                                    </div>
+                                    {message.artifacts.validation.issues.length > 0 ? (
+                                      <div className={styles.validationIssueList}>
+                                        {message.artifacts.validation.issues.map((issue, index) => (
+                                          <div key={`${message.id}-validation-${issue.code}-${index}`} className={styles.validationIssue}>
+                                            <span className={styles.validationIssueLevel}>{issue.severity === 'warning' ? '提醒' : '信息'}</span>
+                                            <span>{issue.message}</span>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    ) : null}
+                                  </section>
+                                ) : null}
 
                                 {message.artifacts.columns && message.artifacts.previewRows ? (
                                   message.artifacts.previewRows.length === 0 ? (

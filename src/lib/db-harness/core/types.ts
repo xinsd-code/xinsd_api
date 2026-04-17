@@ -1,13 +1,48 @@
-import { AIModelProfile, DatabaseInstance, DatabaseSchemaPayload } from '@/lib/types';
+import { AIModelProfile, DatabaseInstance, DatabaseInstanceType, DatabaseSchemaPayload } from '@/lib/types';
 
 export type DBMultiAgentRole = 'intent' | 'schema' | 'query' | 'guardrail' | 'analysis';
 export type DBMultiAgentStatus = 'pending' | 'running' | 'completed' | 'failed';
+
+export interface DBHarnessModelUsage {
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+}
+
+export interface DBHarnessAgentTelemetry {
+  usage?: DBHarnessModelUsage;
+  latencyMs?: number;
+}
+
+export type DBHarnessProgressStage =
+  | 'session'
+  | 'workspace'
+  | DBMultiAgentRole
+  | 'cache'
+  | 'retry'
+  | 'final';
+
+export type DBHarnessProgressStatus = 'start' | 'running' | 'update' | 'complete' | 'error' | 'info';
+
+export interface DBHarnessProgressEvent {
+  id: string;
+  turnId: string;
+  stage: DBHarnessProgressStage;
+  status: DBHarnessProgressStatus;
+  message: string;
+  detail?: string;
+  trace?: DBMultiAgentTraceStep[];
+  timestamp: string;
+}
 
 export interface DBMultiAgentTraceStep {
   role: DBMultiAgentRole;
   title: string;
   status: DBMultiAgentStatus;
   detail: string;
+  startedAt?: string;
+  completedAt?: string;
+  durationMs?: number;
   handoff?: {
     title: string;
     payload: string;
@@ -24,6 +59,7 @@ export interface DBHarnessTurnArtifact {
   queryPlan?: DBHarnessQueryPlan;
   catalogOverview?: DBHarnessCatalogOverview;
   semanticOverview?: DBHarnessSemanticOverview;
+  validation?: DBHarnessExecutionValidation;
 }
 
 export interface DBHarnessTurnResponse {
@@ -32,6 +68,9 @@ export interface DBHarnessTurnResponse {
   artifacts?: DBHarnessTurnArtifact;
   followUps: string[];
   outcome: 'success' | 'empty' | 'error';
+  confidence: number;
+  fromCache?: boolean;
+  progress?: DBHarnessProgressEvent[];
 }
 
 export interface DBHarnessChatMessage {
@@ -46,6 +85,9 @@ export interface DBHarnessChatMessage {
   meta?: {
     datasourceName?: string;
     modelLabel?: string;
+    confidence?: number;
+    fromCache?: boolean;
+    progress?: DBHarnessProgressEvent[];
     feedback?: DBHarnessFeedbackState;
   };
 }
@@ -70,6 +112,7 @@ export interface DBHarnessChatTurnRequest {
     rows?: Record<string, unknown>[];
     summary?: string;
   } | null;
+  stream?: boolean;
 }
 
 export interface DBHarnessExecutionPayload {
@@ -78,7 +121,7 @@ export interface DBHarnessExecutionPayload {
   rows: Record<string, unknown>[];
   summary?: string;
   datasource: string;
-  engine: 'mysql' | 'pgsql';
+  engine: DatabaseInstanceType;
   previewSql: string;
 }
 
@@ -134,6 +177,67 @@ export interface DBHarnessKnowledgeMemoryEntry {
   source?: 'schema' | 'feedback';
   feedbackType?: 'positive' | 'corrective';
   updatedAt?: string;
+  correctionRule?: DBHarnessFeedbackCorrectionRule;
+  payload?: Record<string, unknown>;
+}
+
+export interface DBHarnessPromptTemplateRecord {
+  id: string;
+  templateKey: string;
+  workspaceId?: string;
+  databaseId: string;
+  source: 'feedback' | 'gepa';
+  title: string;
+  description: string;
+  promptPatch: string;
+  compressionLevel?: 'standard' | 'compact' | 'minimal';
+  nerCandidateLimit?: number;
+  questionHash?: string;
+  queryFingerprint?: string;
+  confidence: number;
+  labels: string[];
+  usageCount: number;
+  lastUsedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DBHarnessWorkspaceFreshnessSnapshot {
+  resolvedAt: string;
+  workspaceUpdatedAt?: string;
+  databaseUpdatedAt?: string;
+  semanticModelUpdatedAt?: string;
+  sourceUpdatedAt?: string;
+  cacheBuiltAt?: string;
+  ageMs: number;
+  freshnessScore: number;
+  stale: boolean;
+  notes: string[];
+}
+
+export interface DBHarnessKnowledgeQualitySnapshot {
+  totalEntries: number;
+  positiveEntries: number;
+  correctiveEntries: number;
+  correctionRuleEntries: number;
+  freshEntries: number;
+  lowSignalEntries: number;
+  averageTagCount: number;
+  qualityScore: number;
+  notes: string[];
+}
+
+export interface DBHarnessFeedbackCorrectionMapping {
+  table?: string;
+  column?: string;
+  label?: string;
+}
+
+export interface DBHarnessFeedbackCorrectionRule {
+  wrongMapping: DBHarnessFeedbackCorrectionMapping;
+  correctMapping: DBHarnessFeedbackCorrectionMapping;
+  note?: string;
+  source?: 'inferred' | 'explicit';
 }
 
 export interface DBHarnessFeedbackState {
@@ -315,6 +419,9 @@ export interface DBHarnessWorkspaceContext {
   workspaceId?: string;
   workspaceRules?: string;
   runtimeConfig?: DBHarnessRuntimeConfig;
+  freshness?: DBHarnessWorkspaceFreshnessSnapshot;
+  knowledgeQuality?: DBHarnessKnowledgeQualitySnapshot;
+  promptTemplates?: DBHarnessPromptTemplateRecord[];
   databaseInstance: DatabaseInstance;
   profile: AIModelProfile;
   selectedModel: DBHarnessSelectedModelInput;
@@ -327,12 +434,14 @@ export interface DBHarnessWorkspaceContext {
   catalog: DBHarnessCatalogSnapshot;
   semantic: DBHarnessSemanticSnapshot;
   knowledge: DBHarnessKnowledgeMemoryEntry[];
+  semanticEmbeddingIndex?: DBHarnessSemanticEmbeddingIndex | null;
 }
 
 export interface DBHarnessIntentResult {
   intent: string;
   planningHints: DBHarnessPlanningHints;
   detail: string;
+  telemetry?: DBHarnessAgentTelemetry;
 }
 
 export interface DBHarnessSchemaResult {
@@ -346,6 +455,7 @@ export interface DBHarnessSchemaResult {
   knowledgeEntries: DBHarnessKnowledgeMemoryEntry[];
   detail: string;
   usedFallback: boolean;
+  telemetry?: DBHarnessAgentTelemetry;
 }
 
 export interface DBHarnessQueryResult {
@@ -353,6 +463,7 @@ export interface DBHarnessQueryResult {
   plan: DBHarnessQueryPlan;
   detail: string;
   usedFallback: boolean;
+  telemetry?: DBHarnessAgentTelemetry;
 }
 
 export interface DBHarnessGuardrailResult {
@@ -365,6 +476,69 @@ export interface DBHarnessAnalysisResult {
   summary: string;
   followUps: string[];
   detail: string;
+}
+
+export interface DBHarnessExecutionValidationIssue {
+  code: string;
+  severity: 'info' | 'warning';
+  message: string;
+}
+
+export interface DBHarnessExecutionValidation {
+  status: 'pass' | 'review' | 'fail';
+  score: number;
+  summary: string;
+  issues: DBHarnessExecutionValidationIssue[];
+}
+
+export interface DBHarnessQueryMetricRecord {
+  id: string;
+  turnId: string;
+  workspaceId?: string;
+  databaseId: string;
+  engine: DatabaseInstanceType;
+  question: string;
+  questionHash: string;
+  sql: string;
+  queryFingerprint: string;
+  outcome: DBHarnessTurnResponse['outcome'];
+  confidence: number;
+  fromCache: boolean;
+  rowCount: number;
+  agentTelemetry: Partial<Record<DBMultiAgentRole, DBHarnessAgentTelemetry>>;
+  labels: string[];
+  errorMessage?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DBHarnessSemanticEmbeddingMatch {
+  kind: 'field' | 'knowledge';
+  id: string;
+  label: string;
+  table?: string;
+  column?: string;
+  summary: string;
+  score: number;
+  tags: string[];
+}
+
+export interface DBHarnessSemanticEmbeddingIndex {
+  profile: AIModelProfile;
+  sourceProfileId: string;
+  sourceModelId: string;
+  endpoint: string;
+  builtAt: string;
+  items: Array<{
+    kind: DBHarnessSemanticEmbeddingMatch['kind'];
+    id: string;
+    label: string;
+    table?: string;
+    column?: string;
+    summary: string;
+    tags: string[];
+    embedding: number[];
+  }>;
 }
 
 export interface DBHarnessSessionRecord {
@@ -393,6 +567,7 @@ export interface DBHarnessWorkspaceRecord {
 export interface DBHarnessRuntimeConfig {
   preferredCompressionLevel?: 'standard' | 'compact' | 'minimal';
   nerCandidateLimit?: number;
+  semanticEmbeddingLimit?: number;
   schemaOverviewTables?: number;
   promptStrategy?: string;
   source?: 'manual' | 'gepa';
@@ -410,6 +585,8 @@ export interface DBHarnessKnowledgeFeedbackRequest {
   reply: string;
   feedbackType: 'positive' | 'corrective';
   note?: string;
+  confidence?: number;
+  fromCache?: boolean;
   artifacts?: DBHarnessTurnArtifact;
 }
 
@@ -435,12 +612,14 @@ export interface DBHarnessGepaScoreCard {
 export interface DBHarnessGepaCandidate {
   id: string;
   kind: DBHarnessGepaCandidateKind;
+  source?: 'policy' | 'template' | 'pattern';
   title: string;
   description: string;
   compressionLevel?: 'standard' | 'compact' | 'minimal';
   nerTopK?: number;
   promptPatch?: string;
   policyPatch?: Record<string, unknown>;
+  confidence?: number;
   notes: string[];
 }
 
@@ -499,6 +678,8 @@ export interface DBHarnessGepaCreateRequest {
   sampleLimit?: number;
   promptCandidateCount?: number;
   policyCandidateCount?: number;
+  selectedPromptCandidateIds?: string[];
+  selectedPolicyCandidateIds?: string[];
 }
 
 export interface DBHarnessGepaApplyRequest {

@@ -24,7 +24,7 @@ export async function runIntentAgent(
 
   try {
     const promptContext = buildIntentPromptContext(session, workspace);
-    const { content } = await gateway.runIntentPrompt(promptContext, [{ role: 'user', content: session.latestUserMessage }]);
+    const { content, telemetry } = await gateway.runIntentPrompt(promptContext, [{ role: 'user', content: session.latestUserMessage }]);
     const planningHints = sanitizePlanningHints(parseJsonSafely(extractJsonPayload(content)));
     const detail = buildIntentDetail(planningHints, workspace.databaseInstance.name);
 
@@ -38,6 +38,7 @@ export async function runIntentAgent(
       intent: planningHints.intent,
       planningHints,
       detail,
+      telemetry,
     };
   } catch (error) {
     if (!isLikelyModelUnavailable(error)) {
@@ -58,6 +59,7 @@ export async function runIntentAgent(
       intent: planningHints.intent,
       planningHints,
       detail,
+      telemetry: undefined,
     };
   }
 }

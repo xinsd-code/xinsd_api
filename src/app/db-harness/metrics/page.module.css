@@ -1,0 +1,352 @@
+.page {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 24px;
+  background:
+    radial-gradient(circle at top left, rgba(191, 219, 254, 0.18), transparent 34%),
+    linear-gradient(180deg, rgba(248, 250, 252, 0.98), rgba(241, 245, 249, 0.98));
+}
+
+.hero,
+.filterCard,
+.tableCard,
+.metricCard,
+.agentCard {
+  border-radius: 24px;
+  border: 1px solid rgba(226, 232, 240, 0.92);
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 18px 44px rgba(15, 23, 42, 0.08);
+}
+
+.hero {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 24px 26px;
+}
+
+.eyebrow {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.title {
+  margin: 0;
+  font-size: 34px;
+  line-height: 1;
+  letter-spacing: -0.05em;
+  color: var(--color-text);
+}
+
+.description {
+  margin: 10px 0 0;
+  max-width: 760px;
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+}
+
+.heroActions {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.secondaryLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(203, 213, 225, 0.92);
+  background: rgba(248, 250, 252, 0.92);
+  color: var(--color-text-secondary);
+  text-decoration: none;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.secondaryLink:hover {
+  border-color: rgba(37, 99, 235, 0.24);
+  background: rgba(239, 246, 255, 0.94);
+  color: var(--color-text);
+}
+
+.filterCard {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  padding: 18px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.field label {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.field select {
+  width: 100%;
+  min-height: 42px;
+  padding: 0 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(203, 213, 225, 0.92);
+  background: rgba(255, 255, 255, 0.98);
+  font: inherit;
+  color: var(--color-text);
+}
+
+.contextMeta {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.contextMeta span,
+.tableLabel {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: rgba(248, 250, 252, 0.94);
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+.errorBanner,
+.emptyState {
+  padding: 16px 18px;
+  border-radius: 18px;
+  border: 1px dashed rgba(226, 232, 240, 0.9);
+  background: rgba(255, 255, 255, 0.88);
+  color: var(--color-text-secondary);
+  font-size: 13px;
+}
+
+.errorBanner {
+  border-style: solid;
+  border-color: rgba(248, 113, 113, 0.24);
+  background: rgba(254, 242, 242, 0.96);
+  color: #b91c1c;
+}
+
+.summaryGrid,
+.agentGrid {
+  display: grid;
+  gap: 14px;
+}
+
+.summaryGrid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.agentGrid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.metricCard,
+.agentCard {
+  padding: 18px;
+}
+
+.metricCard strong,
+.agentStats strong {
+  display: block;
+  margin-top: 8px;
+  font-size: 28px;
+  line-height: 1;
+  letter-spacing: -0.04em;
+  color: var(--color-text);
+}
+
+.metricLabel {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.metricCard p,
+.tableHeader p,
+.agentHeader span {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+}
+
+.agentHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.agentHeader strong {
+  font-size: 16px;
+  color: var(--color-text);
+}
+
+.agentStats {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.agentStats span {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-text-muted);
+}
+
+.tableCard {
+  padding: 18px;
+}
+
+.tableHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tableHeader h2 {
+  margin: 0;
+  font-size: 18px;
+  color: var(--color-text);
+}
+
+.tableWrap {
+  margin-top: 14px;
+  overflow-x: auto;
+  border-radius: 18px;
+  border: 1px solid rgba(226, 232, 240, 0.92);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  background: white;
+}
+
+.table th,
+.table td {
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.9);
+  text-align: left;
+  vertical-align: top;
+  font-size: 12px;
+}
+
+.table th {
+  background: rgba(248, 250, 252, 0.96);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.questionCell {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.questionCell strong {
+  color: var(--color-text);
+  line-height: 1.7;
+}
+
+.labelRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.outcomeBadge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(226, 232, 240, 0.92);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.outcomeSuccess {
+  background: rgba(236, 253, 245, 0.94);
+  border-color: rgba(16, 185, 129, 0.22);
+  color: #047857;
+}
+
+.outcomeEmpty {
+  background: rgba(255, 251, 235, 0.96);
+  border-color: rgba(245, 158, 11, 0.2);
+  color: #b45309;
+}
+
+.outcomeError {
+  background: rgba(254, 242, 242, 0.96);
+  border-color: rgba(239, 68, 68, 0.2);
+  color: #b91c1c;
+}
+
+@media (max-width: 1080px) {
+  .summaryGrid,
+  .agentGrid,
+  .filterCard {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .page {
+    padding: 16px;
+  }
+
+  .hero,
+  .filterCard {
+    padding: 16px;
+  }
+
+  .hero,
+  .summaryGrid,
+  .agentGrid,
+  .filterCard {
+    grid-template-columns: 1fr;
+    display: grid;
+  }
+
+  .heroActions {
+    justify-content: flex-start;
+  }
+}

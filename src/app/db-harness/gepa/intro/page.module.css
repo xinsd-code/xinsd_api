@@ -1,0 +1,73 @@
+.page {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+}
+
+.hero {
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 14px;
+  background: #fff;
+  padding: 18px;
+  display: grid;
+  gap: 10px;
+}
+
+.eyebrow {
+  margin: 0;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #64748b;
+  font-weight: 600;
+}
+
+.title {
+  margin: 0;
+  font-size: 28px;
+  line-height: 1.12;
+  color: #0f172a;
+}
+
+.subtitle {
+  margin: 0;
+  color: #334155;
+  line-height: 1.65;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.card {
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 14px;
+  background: #fff;
+  padding: 16px 18px;
+}
+
+.card h2 {
+  margin: 0 0 8px;
+  font-size: 16px;
+  color: #0f172a;
+}
+
+.card ul,
+.card ol {
+  margin: 0;
+  padding-left: 20px;
+  color: #334155;
+  line-height: 1.7;
+}
+
+@media (max-width: 768px) {
+  .page {
+    padding: 14px;
+  }
+
+  .title {
+    font-size: 24px;
+  }
+}

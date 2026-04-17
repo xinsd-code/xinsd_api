@@ -172,7 +172,9 @@
 
 ### GEPA 离线评估
 - 对 DB Harness 的 Prompt / Policy 策略做离线回放评估
+- 当前离线评估支持 MySQL / PostgreSQL / MongoDB 数据源
 - 支持手动创建 run、查看候选对比、人工审核并应用到运行时配置
+- 支持“功能介绍”独立页面，便于业务方和研发统一理解 GEPA 评估流程与指标含义
 - 默认不自动切流，保留回滚与 run history 删除
 
 ---
@@ -251,6 +253,9 @@ curl http://localhost:3000/api/health
 | DB API | `http://localhost:3000/db-api` |
 | NL2DATA | `http://localhost:3000/nl2data` |
 | DB Harness | `http://localhost:3000/db-harness` |
+| GEPA 工作台 | `http://localhost:3000/db-harness/gepa` |
+| GEPA 功能介绍 | `http://localhost:3000/db-harness/gepa/intro` |
+| DB Harness 指标看板 | `http://localhost:3000/db-harness/metrics` |
 | 模型管理 | `http://localhost:3000/model-management` |
 | 数据库实例 | `http://localhost:3000/database-instances` |
 

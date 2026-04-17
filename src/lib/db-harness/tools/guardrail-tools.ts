@@ -1,6 +1,6 @@
 import { executeParameterizedDatabaseQuery } from '@/lib/database-instances-server';
 import { normalizeSqlForExecution } from '@/lib/sql-normalize';
-import { DatabaseSchemaPayload } from '@/lib/types';
+import { DatabaseInstanceType, DatabaseSchemaPayload } from '@/lib/types';
 import { normalizeMongoQueryText } from '@/lib/mongo-query-compat';
 import { DBHarnessExecutionPayload, DBHarnessQueryPlan, DBHarnessWorkspaceContext } from '../core/types';
 
@@ -9,7 +9,21 @@ function isMongoCommandQuery(query: string): boolean {
   if (!trimmed.startsWith('{')) return false;
   try {
     const parsed = JSON.parse(trimmed);
-    return Boolean(parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'collection' in parsed);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return false;
+    }
+    const source = parsed as Record<string, unknown>;
+    return Boolean(
+      'collection' in source
+      || 'find' in source
+      || 'aggregate' in source
+      || 'count' in source
+      || 'distinct' in source
+      || source.operation === 'find'
+      || source.operation === 'aggregate'
+      || source.operation === 'count'
+      || source.operation === 'distinct'
+    );
   } catch {
     return false;
   }
@@ -30,12 +44,32 @@ function assertMongoReadOnlyGuardrails(
   }
 
   const source = parsed as Record<string, unknown>;
-  const operation = typeof source.operation === 'string' ? source.operation : 'find';
+  const operation = typeof source.operation === 'string'
+    ? source.operation
+    : typeof source.find === 'string'
+      ? 'find'
+      : typeof source.aggregate === 'object'
+        ? 'aggregate'
+        : typeof source.count === 'string'
+          ? 'count'
+          : typeof source.distinct === 'string'
+            ? 'distinct'
+            : 'find';
   if (!['find', 'aggregate', 'count', 'distinct'].includes(operation)) {
     throw new Error('当前回合未通过 Guardrail Agent 校验：Mongo 查询只能使用只读操作。');
   }
 
-  const collection = typeof source.collection === 'string' ? source.collection : '';
+  const collection = typeof source.collection === 'string'
+    ? source.collection
+    : typeof source.find === 'string'
+      ? source.find
+      : typeof source.aggregate === 'string'
+        ? source.aggregate
+        : typeof source.count === 'string'
+          ? source.count
+          : typeof source.distinct === 'string'
+            ? source.distinct
+            : '';
   if (!collection) {
     throw new Error('当前回合未通过 Guardrail Agent 校验：Mongo 查询缺少 collection。');
   }
@@ -126,29 +160,41 @@ export async function executeReadOnlyPlan(
   workspace: DBHarnessWorkspaceContext
 ): Promise<DBHarnessExecutionPayload> {
   const previewLimit = Math.min(Math.max(plan.limit || 20, 1), 200);
-  const engine = workspace.databaseInstance.type as 'mysql' | 'pgsql';
-  const normalizedSql = normalizeSqlForExecution(engine, plan.compiled.text);
-  const wrappedSql = `SELECT * FROM (${normalizedSql.replace(/;+\s*$/, '')}) AS __db_harness_preview LIMIT ${previewLimit}`;
+  const engine = workspace.databaseInstance.type as DatabaseInstanceType;
+  const normalizedSql = engine === 'mongo'
+    ? normalizeMongoQueryText(plan.compiled.text)
+    : normalizeSqlForExecution(engine, plan.compiled.text);
   const previewSql = plan.compiled.previewSql || normalizedSql;
   let result;
 
   try {
-    result = await executeParameterizedDatabaseQuery(
-      workspace.databaseInstance,
-      wrappedSql,
-      plan.compiled.values
-    );
+    if (engine === 'mongo') {
+      result = await executeParameterizedDatabaseQuery(
+        workspace.databaseInstance,
+        normalizedSql,
+        plan.compiled.values
+      );
+    } else {
+      const wrappedSql = `SELECT * FROM (${normalizedSql.replace(/;+\s*$/, '')}) AS __db_harness_preview LIMIT ${previewLimit}`;
+      result = await executeParameterizedDatabaseQuery(
+        workspace.databaseInstance,
+        wrappedSql,
+        plan.compiled.values
+      );
+    }
   } catch {
     const rawResult = await executeParameterizedDatabaseQuery(
       workspace.databaseInstance,
       normalizedSql,
       plan.compiled.values
     );
-    result = {
-      ...rawResult,
-      rows: rawResult.rows.slice(0, previewLimit),
-      summary: buildPreviewSummary(rawResult.rows.length, previewLimit),
-    };
+    result = engine === 'mongo'
+      ? rawResult
+      : {
+          ...rawResult,
+          rows: rawResult.rows.slice(0, previewLimit),
+          summary: buildPreviewSummary(rawResult.rows.length, previewLimit),
+        };
   }
 
   return {

@@ -34,18 +34,29 @@ import { nanoid } from 'nanoid';
 import { sanitizeAIModelProfileInput } from './ai-models';
 import { getEffectiveDatabaseMetricMappings, sanitizeDatabaseSemanticModel } from './database-instances';
 import type {
+  DBHarnessAgentTelemetry,
   DBHarnessChatMessage,
   DBHarnessGepaCandidate,
   DBHarnessGepaRun,
   DBHarnessGepaRunStatus,
   DBHarnessGepaSampleResult,
   DBHarnessGepaScoreCard,
+  DBHarnessFeedbackCorrectionRule,
   DBHarnessKnowledgeMemoryEntry,
+  DBHarnessPromptTemplateRecord,
+  DBHarnessQueryMetricRecord,
   DBHarnessRuntimeConfig,
   DBHarnessSelectedModelInput,
   DBHarnessSessionRecord,
   DBHarnessWorkspaceRecord,
+  DBMultiAgentRole,
 } from './db-harness/core/types';
+import {
+  redactSensitiveText,
+  sanitizeKnowledgePayloadForStorage,
+  sanitizeMetricStorageInput,
+  sanitizePromptTemplateInput,
+} from './db-harness/core/redaction';
 import { invalidateWorkspaceContextCache } from './db-harness/workspace/workspace-cache';
 
 const DEFAULT_DATA_DIR = path.join(process.cwd(), 'data');
@@ -279,6 +290,52 @@ function initializeDb(database: Database.Database) {
   `);
 
   database.exec(`
+    CREATE TABLE IF NOT EXISTS db_harness_query_metrics (
+      id TEXT PRIMARY KEY,
+      turn_id TEXT NOT NULL UNIQUE,
+      workspace_id TEXT DEFAULT '',
+      database_id TEXT NOT NULL,
+      engine TEXT NOT NULL,
+      question TEXT NOT NULL,
+      question_hash TEXT NOT NULL,
+      sql TEXT NOT NULL DEFAULT '',
+      query_fingerprint TEXT NOT NULL DEFAULT '',
+      outcome TEXT NOT NULL,
+      confidence REAL NOT NULL DEFAULT 0,
+      from_cache INTEGER NOT NULL DEFAULT 0,
+      row_count INTEGER NOT NULL DEFAULT 0,
+      agent_telemetry_json TEXT DEFAULT '{}',
+      labels_json TEXT DEFAULT '[]',
+      error_message TEXT DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS db_harness_prompt_templates (
+      id TEXT PRIMARY KEY,
+      template_key TEXT NOT NULL UNIQUE,
+      workspace_id TEXT DEFAULT '',
+      database_id TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'feedback',
+      title TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      prompt_patch TEXT NOT NULL DEFAULT '',
+      compression_level TEXT DEFAULT '',
+      ner_candidate_limit INTEGER DEFAULT NULL,
+      question_hash TEXT DEFAULT '',
+      query_fingerprint TEXT DEFAULT '',
+      confidence REAL NOT NULL DEFAULT 0,
+      labels_json TEXT DEFAULT '[]',
+      usage_count INTEGER NOT NULL DEFAULT 0,
+      last_used_at TEXT DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+
+  database.exec(`
     CREATE TABLE IF NOT EXISTS db_harness_gepa_runs (
       id TEXT PRIMARY KEY,
       workspace_id TEXT DEFAULT '',
@@ -331,6 +388,23 @@ function initializeDb(database: Database.Database) {
     }
   }
 
+  // Migration for database_instances owner_id and workspace_id (existing tables)
+  try {
+    database.exec(`ALTER TABLE database_instances ADD COLUMN owner_id TEXT DEFAULT 'default-user';`);
+  } catch (err) {
+    if (err instanceof Error && !err.message.includes('duplicate column name')) {
+      console.error('Migration error database_instances.owner_id:', err);
+    }
+  }
+
+  try {
+    database.exec(`ALTER TABLE database_instances ADD COLUMN workspace_id TEXT DEFAULT 'default-workspace';`);
+  } catch (err) {
+    if (err instanceof Error && !err.message.includes('duplicate column name')) {
+      console.error('Migration error database_instances.workspace_id:', err);
+    }
+  }
+
   try {
     database.exec(`ALTER TABLE db_apis ADD COLUMN redis_config TEXT DEFAULT '{}';`);
   } catch (err) {
@@ -360,6 +434,38 @@ function initializeDb(database: Database.Database) {
   } catch (err) {
     if (err instanceof Error && !err.message.includes('duplicate column name')) {
       console.error('Migration error db_harness_workspaces.runtime_config_json:', err);
+    }
+  }
+
+  try {
+    database.exec(`ALTER TABLE db_harness_query_metrics ADD COLUMN agent_telemetry_json TEXT DEFAULT '{}';`);
+  } catch (err) {
+    if (err instanceof Error && !err.message.includes('duplicate column name')) {
+      console.error('Migration error db_harness_query_metrics.agent_telemetry_json:', err);
+    }
+  }
+
+  try {
+    database.exec(`ALTER TABLE db_harness_query_metrics ADD COLUMN labels_json TEXT DEFAULT '[]';`);
+  } catch (err) {
+    if (err instanceof Error && !err.message.includes('duplicate column name')) {
+      console.error('Migration error db_harness_query_metrics.labels_json:', err);
+    }
+  }
+
+  try {
+    database.exec(`ALTER TABLE db_harness_prompt_templates ADD COLUMN source TEXT NOT NULL DEFAULT 'feedback';`);
+  } catch (err) {
+    if (err instanceof Error && !err.message.includes('duplicate column name')) {
+      console.error('Migration error db_harness_prompt_templates.source:', err);
+    }
+  }
+
+  try {
+    database.exec(`ALTER TABLE db_harness_prompt_templates ADD COLUMN confidence REAL NOT NULL DEFAULT 0;`);
+  } catch (err) {
+    if (err instanceof Error && !err.message.includes('duplicate column name')) {
+      console.error('Migration error db_harness_prompt_templates.confidence:', err);
     }
   }
 }
@@ -1167,6 +1273,8 @@ function rowToDatabaseInstance(row: Record<string, unknown>): DatabaseInstance {
     connectionUri: row.connection_uri as string,
     username: (row.username as string) || '',
     password: (row.password as string) || '',
+    ownerId: (row.owner_id as string) || 'default-user',
+    workspaceId: (row.workspace_id as string) || 'default-workspace',
     metricMappings,
     semanticModel,
     createdAt: row.created_at as string,
@@ -1187,18 +1295,34 @@ export function getAllDatabaseInstances(): DatabaseInstance[] {
 export function getAllDatabaseInstancesSummary(): DatabaseInstanceSummary[] {
   const db = getDb();
   const rows = db.prepare(`
-    SELECT id, name, type, connection_uri, created_at, updated_at
+    SELECT id, name, type, connection_uri, owner_id, workspace_id, metric_mappings, semantic_model, created_at, updated_at
     FROM database_instances
     ORDER BY updated_at DESC, created_at DESC
   `).all();
 
   return rows.map((row) => {
     const record = row as Record<string, unknown>;
+    let metricMappings: DatabaseInstance['metricMappings'];
+    let semanticModel: DatabaseSemanticModel | undefined;
+    try {
+      if (record.metric_mappings) {
+        metricMappings = JSON.parse(record.metric_mappings as string) as DatabaseInstance['metricMappings'];
+      }
+    } catch { /* ignore */ }
+    try {
+      if (record.semantic_model) {
+        semanticModel = JSON.parse(record.semantic_model as string) as DatabaseSemanticModel;
+      }
+    } catch { /* ignore */ }
     return {
       id: record.id as string,
       name: record.name as string,
       type: record.type as DatabaseInstanceSummary['type'],
       connectionUri: record.connection_uri as string,
+      ownerId: (record.owner_id as string) || 'default-user',
+      workspaceId: (record.workspace_id as string) || 'default-workspace',
+      metricMappings,
+      semanticModel,
       createdAt: record.created_at as string,
       updatedAt: record.updated_at as string,
     };
@@ -1535,9 +1659,17 @@ export function updateDBHarnessWorkspace(input: { id: string; name?: string; dat
 
 export function deleteDBHarnessWorkspace(id: string): boolean {
   const db = getDb();
+  const deleteKnowledge = db.prepare('DELETE FROM db_harness_knowledge_memory WHERE workspace_id = ?');
+  const deleteMetrics = db.prepare('DELETE FROM db_harness_query_metrics WHERE workspace_id = ?');
+  const deleteTemplates = db.prepare('DELETE FROM db_harness_prompt_templates WHERE workspace_id = ?');
+  const deleteGepaRuns = db.prepare('DELETE FROM db_harness_gepa_runs WHERE workspace_id = ?');
   const deleteSessions = db.prepare('DELETE FROM db_harness_sessions WHERE workspace_id = ?');
   const deleteWorkspace = db.prepare('DELETE FROM db_harness_workspaces WHERE id = ?');
   const tx = db.transaction((workspaceId: string) => {
+    deleteKnowledge.run(workspaceId);
+    deleteMetrics.run(workspaceId);
+    deleteTemplates.run(workspaceId);
+    deleteGepaRuns.run(workspaceId);
     deleteSessions.run(workspaceId);
     return deleteWorkspace.run(workspaceId);
   });
@@ -1691,6 +1823,10 @@ export function deleteDBHarnessSession(id: string): boolean {
 }
 
 function rowToDBHarnessKnowledgeMemoryEntry(row: Record<string, unknown>): DBHarnessKnowledgeMemoryEntry {
+  const payload = parseJsonObject<Record<string, unknown>>(row.payload_json, {});
+  const correctionRule = payload.correctionRule && typeof payload.correctionRule === 'object' && !Array.isArray(payload.correctionRule)
+    ? (payload.correctionRule as DBHarnessFeedbackCorrectionRule)
+    : undefined;
   return {
     key: (row.memory_key as string) || '',
     summary: (row.summary as string) || '',
@@ -1698,6 +1834,59 @@ function rowToDBHarnessKnowledgeMemoryEntry(row: Record<string, unknown>): DBHar
     source: row.source === 'schema' ? 'schema' : 'feedback',
     feedbackType: row.feedback_type === 'corrective' ? 'corrective' : row.feedback_type === 'positive' ? 'positive' : undefined,
     updatedAt: (row.updated_at as string) || undefined,
+    correctionRule,
+    payload,
+  };
+}
+
+function rowToDBHarnessPromptTemplateRecord(row: Record<string, unknown>): DBHarnessPromptTemplateRecord {
+  return {
+    id: (row.id as string) || '',
+    templateKey: (row.template_key as string) || '',
+    workspaceId: (row.workspace_id as string) || '',
+    databaseId: (row.database_id as string) || '',
+    source: row.source === 'gepa' ? 'gepa' : 'feedback',
+    title: (row.title as string) || '',
+    description: (row.description as string) || '',
+    promptPatch: (row.prompt_patch as string) || '',
+    compressionLevel: row.compression_level === 'standard' || row.compression_level === 'compact' || row.compression_level === 'minimal'
+      ? row.compression_level
+      : undefined,
+    nerCandidateLimit: row.ner_candidate_limit === null || row.ner_candidate_limit === undefined
+      ? undefined
+      : Number(row.ner_candidate_limit),
+    questionHash: (row.question_hash as string) || undefined,
+    queryFingerprint: (row.query_fingerprint as string) || undefined,
+    confidence: Number(row.confidence || 0),
+    labels: parseJsonArray<string>(row.labels_json).slice(0, 24),
+    usageCount: Number(row.usage_count || 0),
+    lastUsedAt: (row.last_used_at as string) || undefined,
+    createdAt: (row.created_at as string) || '',
+    updatedAt: (row.updated_at as string) || '',
+  };
+}
+
+function rowToDBHarnessQueryMetricRecord(row: Record<string, unknown>): DBHarnessQueryMetricRecord {
+  const agentTelemetry = parseJsonObject<Partial<Record<DBMultiAgentRole, DBHarnessAgentTelemetry>>>(row.agent_telemetry_json, {});
+  return {
+    id: row.id as string,
+    turnId: row.turn_id as string,
+    workspaceId: (row.workspace_id as string) || '',
+    databaseId: (row.database_id as string) || '',
+    engine: (row.engine as DBHarnessQueryMetricRecord['engine']) || 'mysql',
+    question: (row.question as string) || '',
+    questionHash: (row.question_hash as string) || '',
+    sql: (row.sql as string) || '',
+    queryFingerprint: (row.query_fingerprint as string) || '',
+    outcome: (row.outcome as DBHarnessQueryMetricRecord['outcome']) || 'error',
+    confidence: Number(row.confidence || 0),
+    fromCache: Number(row.from_cache || 0) > 0,
+    rowCount: Number(row.row_count || 0),
+    agentTelemetry,
+    labels: parseJsonArray<string>(row.labels_json).slice(0, 24),
+    errorMessage: (row.error_message as string) || undefined,
+    createdAt: (row.created_at as string) || '',
+    updatedAt: (row.updated_at as string) || '',
   };
 }
 
@@ -1737,10 +1926,13 @@ export function upsertDBHarnessKnowledgeMemory(input: {
 }): DBHarnessKnowledgeMemoryEntry {
   const db = getDb();
   const now = new Date().toISOString();
-  const key = input.key.trim();
-  const summary = input.summary.trim();
-  const tags = input.tags.filter((item, index, array) => item.trim() && array.indexOf(item) === index).slice(0, 24);
-  const payload = input.payload || {};
+  const key = redactSensitiveText(input.key.trim());
+  const summary = redactSensitiveText(input.summary.trim());
+  const tags = input.tags
+    .map((item) => redactSensitiveText(item))
+    .filter((item, index, array) => item.trim() && array.indexOf(item) === index)
+    .slice(0, 24);
+  const payload = sanitizeKnowledgePayloadForStorage(input.payload || {});
 
   if (!key || !summary || !input.databaseId.trim()) {
     throw new Error('知识记忆缺少必要字段。');
@@ -1800,6 +1992,203 @@ export function upsertDBHarnessKnowledgeMemory(input: {
   `).get(id);
 
   return rowToDBHarnessKnowledgeMemoryEntry(row as Record<string, unknown>);
+}
+
+export function listDBHarnessQueryMetrics(input: {
+  workspaceId?: string;
+  databaseId?: string;
+  limit?: number;
+}): DBHarnessQueryMetricRecord[] {
+  const db = getDb();
+  const limit = Math.max(1, Math.min(input.limit ?? 24, 120));
+  const databaseId = input.databaseId?.trim() || '';
+  const workspaceId = input.workspaceId?.trim() || '';
+  const rows = db.prepare(`
+    SELECT *
+    FROM db_harness_query_metrics
+    WHERE (? = '' OR database_id = ?)
+      AND (? = '' OR workspace_id = ? OR workspace_id = '')
+    ORDER BY updated_at DESC, created_at DESC
+    LIMIT ?
+  `).all(databaseId, databaseId, workspaceId, workspaceId, limit);
+
+  return rows.map((row) => rowToDBHarnessQueryMetricRecord(row as Record<string, unknown>));
+}
+
+export function listDBHarnessPromptTemplates(input: {
+  workspaceId?: string;
+  databaseId?: string;
+  limit?: number;
+}): DBHarnessPromptTemplateRecord[] {
+  const db = getDb();
+  const limit = Math.max(1, Math.min(input.limit ?? 24, 120));
+  const databaseId = input.databaseId?.trim() || '';
+  const workspaceId = input.workspaceId?.trim() || '';
+  const rows = db.prepare(`
+    SELECT *
+    FROM db_harness_prompt_templates
+    WHERE (? = '' OR database_id = ?)
+      AND (? = '' OR workspace_id = ? OR workspace_id = '')
+    ORDER BY confidence DESC, usage_count DESC, updated_at DESC, created_at DESC
+    LIMIT ?
+  `).all(databaseId, databaseId, workspaceId, workspaceId, limit);
+
+  return rows.map((row) => rowToDBHarnessPromptTemplateRecord(row as Record<string, unknown>));
+}
+
+export function upsertDBHarnessPromptTemplate(input: {
+  id?: string;
+  templateKey: string;
+  workspaceId?: string;
+  databaseId: string;
+  source?: 'feedback' | 'gepa';
+  title: string;
+  description: string;
+  promptPatch: string;
+  compressionLevel?: 'standard' | 'compact' | 'minimal';
+  nerCandidateLimit?: number;
+  questionHash?: string;
+  queryFingerprint?: string;
+  confidence?: number;
+  labels?: string[];
+  usageCount?: number;
+  lastUsedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}): DBHarnessPromptTemplateRecord {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const current = db.prepare(`
+    SELECT *
+    FROM db_harness_prompt_templates
+    WHERE template_key = ?
+    LIMIT 1
+  `).get(input.templateKey) as Record<string, unknown> | undefined;
+
+  const id = input.id || ((current?.id as string) || nanoid());
+  const createdAt = input.createdAt || ((current?.created_at as string) || now);
+  const sanitizedTemplate = sanitizePromptTemplateInput({
+    title: input.title,
+    description: input.description,
+    promptPatch: input.promptPatch,
+    labels: input.labels,
+  });
+  const labels = sanitizedTemplate.labels
+    .filter((item, index, array) => item.trim() && array.findIndex((value) => value === item) === index)
+    .slice(0, 24);
+
+  db.prepare(`
+    INSERT OR REPLACE INTO db_harness_prompt_templates (
+      id,
+      template_key,
+      workspace_id,
+      database_id,
+      source,
+      title,
+      description,
+      prompt_patch,
+      compression_level,
+      ner_candidate_limit,
+      question_hash,
+      query_fingerprint,
+      confidence,
+      labels_json,
+      usage_count,
+      last_used_at,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    redactSensitiveText(input.templateKey),
+    input.workspaceId?.trim() || '',
+    input.databaseId.trim(),
+    input.source || 'feedback',
+    sanitizedTemplate.title.trim() || 'DB Harness 模板',
+    sanitizedTemplate.description.trim() || '',
+    sanitizedTemplate.promptPatch.trim() || '',
+    input.compressionLevel || '',
+    Number.isFinite(input.nerCandidateLimit) ? Math.max(8, Math.min(Math.trunc(input.nerCandidateLimit || 0), 32)) : null,
+    input.questionHash?.trim() || '',
+    input.queryFingerprint?.trim() || '',
+    Number.isFinite(input.confidence) ? Number(input.confidence) : 0,
+    JSON.stringify(labels),
+    Math.max(0, Math.trunc(input.usageCount || 0)),
+    input.lastUsedAt || (current?.last_used_at as string) || '',
+    createdAt,
+    input.updatedAt || now
+  );
+
+  const row = db.prepare(`
+    SELECT *
+    FROM db_harness_prompt_templates
+    WHERE id = ?
+  `).get(id);
+
+  return rowToDBHarnessPromptTemplateRecord(row as Record<string, unknown>);
+}
+
+export function upsertDBHarnessQueryMetric(input: Omit<DBHarnessQueryMetricRecord, 'id' | 'createdAt' | 'updatedAt'> & Partial<Pick<DBHarnessQueryMetricRecord, 'id' | 'createdAt' | 'updatedAt'>>): DBHarnessQueryMetricRecord {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const id = input.id || nanoid();
+  const createdAt = input.createdAt || now;
+  const sanitizedMetric = sanitizeMetricStorageInput({
+    question: input.question,
+    sql: input.sql,
+    errorMessage: input.errorMessage,
+    labels: input.labels,
+  });
+
+  db.prepare(`
+    INSERT OR REPLACE INTO db_harness_query_metrics (
+      id,
+      turn_id,
+      workspace_id,
+      database_id,
+      engine,
+      question,
+      question_hash,
+      sql,
+      query_fingerprint,
+      outcome,
+      confidence,
+      from_cache,
+      row_count,
+      agent_telemetry_json,
+      labels_json,
+      error_message,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    input.turnId,
+    input.workspaceId?.trim() || '',
+    input.databaseId.trim(),
+    input.engine,
+    sanitizedMetric.question,
+    input.questionHash,
+    sanitizedMetric.sql,
+    input.queryFingerprint,
+    input.outcome,
+    Number.isFinite(input.confidence) ? input.confidence : 0,
+    input.fromCache ? 1 : 0,
+    Math.max(0, Math.trunc(input.rowCount || 0)),
+    JSON.stringify(input.agentTelemetry || {}),
+    JSON.stringify(sanitizedMetric.labels),
+    sanitizedMetric.errorMessage || '',
+    createdAt,
+    now
+  );
+
+  const row = db.prepare(`
+    SELECT *
+    FROM db_harness_query_metrics
+    WHERE turn_id = ?
+  `).get(input.turnId);
+
+  return rowToDBHarnessQueryMetricRecord(row as Record<string, unknown>);
 }
 
 function rowToDBHarnessGepaRun(row: Record<string, unknown>): DBHarnessGepaRun {

@@ -29,17 +29,34 @@ export function updateTrace(
 ) {
   const target = trace.find((step) => step.role === role);
   if (!target) return;
+  const now = new Date().toISOString();
   target.status = status;
   target.detail = detail;
   target.handoff = handoff;
+  if (!target.startedAt) {
+    target.startedAt = now;
+  }
+  if (status === 'running') {
+    target.completedAt = undefined;
+    target.durationMs = undefined;
+    return;
+  }
+  target.completedAt = now;
+  const startedAt = Date.parse(target.startedAt);
+  target.durationMs = Number.isFinite(startedAt) ? Math.max(0, Date.parse(now) - startedAt) : undefined;
 }
 
 function failTraceFrom(trace: DBMultiAgentTraceStep[], role: DBMultiAgentRole, detail: string) {
+  const now = new Date().toISOString();
   let afterFailure = false;
   trace.forEach((step) => {
     if (step.role === role) {
       step.status = 'failed';
       step.detail = detail;
+      step.startedAt = step.startedAt || now;
+      step.completedAt = now;
+      const startedAt = Date.parse(step.startedAt);
+      step.durationMs = Number.isFinite(startedAt) ? Math.max(0, Date.parse(now) - startedAt) : undefined;
       afterFailure = true;
       return;
     }
@@ -60,6 +77,8 @@ export function buildFailureResponse(
     outcome: 'error',
     reply: detail,
     trace: cloneTrace(trace),
+    confidence: 0,
+    progress: [],
     artifacts: sql
       ? {
           sql,

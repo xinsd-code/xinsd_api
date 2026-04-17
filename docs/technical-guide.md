@@ -573,7 +573,7 @@ interface HarnessTraceStep {
 | 结果解读 | 无（仅返回 SQL + 数据） | 有（Analysis Agent 生成自然语言回复）|
 | 追问建议 | 基础 | 智能（基于结果数据动态生成）|
 | 会话管理 | 历史持久化到 SQLite | 完整 Session 对象 |
-| 数据源支持 | MySQL / PostgreSQL / MongoDB | MySQL / PostgreSQL |
+| 数据源支持 | MySQL / PostgreSQL / MongoDB | MySQL / PostgreSQL / MongoDB |
 | Fallback | 有（规则引擎降级） | 有（三级 Fallback：Intent / NER / SQL） |
 | 离线评估 | 无 | 有（GEPA 系统） |
 

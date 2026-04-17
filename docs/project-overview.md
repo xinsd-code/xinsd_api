@@ -292,7 +292,7 @@ DB Harness 还内置了 **GEPA（Generative Evaluation and Policy Adaptation）*
 | 结果解读 | 无（仅返回 SQL + 数据） | 有（自然语言回复 + 追问建议） |
 | 空结果处理 | 基础提示 | 自动重试 + 智能提示 |
 | 安全校验 | 基础只读检查 | 三重校验 + Schema 合法性 + 敏感字段检测 |
-| 数据源支持 | MySQL / PostgreSQL / MongoDB | MySQL / PostgreSQL |
+| 数据源支持 | MySQL / PostgreSQL / MongoDB | MySQL / PostgreSQL / MongoDB |
 | Fallback 机制 | 有（规则引擎降级） | 有（三级 Fallback：Intent / NER / SQL） |
 | 离线评估 | 无 | 有（GEPA 系统） |
 
