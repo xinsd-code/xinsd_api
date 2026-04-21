@@ -8,6 +8,11 @@ import { getAIModelSelectionKey } from '@/lib/ai-models';
 import { getEffectiveDatabaseMetricMappings, sanitizeDatabaseSemanticModel } from '@/lib/database-instances';
 import { useUnsavedChangesGuard } from '@/hooks/use-unsaved-changes-guard';
 import { isDateLikeType, isNumericType, isTextLikeType } from '@/lib/db-harness/core/utils';
+import type {
+  DBHarnessSemanticUpgradeCandidate,
+  DBHarnessSemanticUpgradeGovernance,
+  DBHarnessWorkspaceRecord,
+} from '@/lib/db-harness/core/types';
 import {
   AIModelProfileSummary,
   DatabaseCollectionInfo,
@@ -21,6 +26,13 @@ import {
 } from '@/lib/types';
 import { Icons } from '@/components/Icons';
 import styles from './page.module.css';
+
+type SemanticUpgradeResponse =
+  | {
+    upgrades: DBHarnessSemanticUpgradeCandidate[];
+    governance?: DBHarnessSemanticUpgradeGovernance[];
+  }
+  | { error?: string };
 
 const SEMANTIC_ROLE_OPTIONS: Array<{ value: DatabaseSemanticRole; label: string }> = [
   { value: 'metric', label: '度量 / Metric' },
@@ -142,6 +154,44 @@ function rebuildSemanticModel(model: DatabaseSemanticModel): DatabaseSemanticMod
   };
 }
 
+function deriveSemanticRolloutSize(
+  upgrade: DBHarnessSemanticUpgradeCandidate,
+  workspacePoolSize: number
+): number {
+  const evidenceWorkspaceCount = Math.max(
+    1,
+    ...(upgrade.evidence || []).map((item) => Number(item.workspaceCount || 0))
+  );
+  return Math.min(Math.max(1, evidenceWorkspaceCount), Math.max(1, Math.min(3, workspacePoolSize)));
+}
+
+function formatSemanticEvidenceLabel(upgrade: DBHarnessSemanticUpgradeCandidate): string {
+  const evidence = upgrade.evidence || [];
+  if (evidence.length === 0) return '暂无结构化证据';
+  const workspaceCount = Math.max(1, ...evidence.map((item) => Number(item.workspaceCount || 0)));
+  const hitCount = evidence.reduce((sum, item) => sum + Number(item.hitCount || 0), 0);
+  const hasCrossWorkspace = evidence.some((item) => item.kind === 'cross_workspace_synonym');
+  return `${hasCrossWorkspace ? '跨 workspace 同义词' : '纠错反馈'} · workspace ${workspaceCount} · 命中 ${hitCount}`;
+}
+
+function formatTimelineTime(value: string | undefined): string {
+  if (!value) return '—';
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return value.slice(0, 16);
+  const date = new Date(parsed);
+  const month = `${date.getMonth() + 1}`.padStart(2, '0');
+  const day = `${date.getDate()}`.padStart(2, '0');
+  const hour = `${date.getHours()}`.padStart(2, '0');
+  const minute = `${date.getMinutes()}`.padStart(2, '0');
+  return `${month}-${day} ${hour}:${minute}`;
+}
+
+function formatWorkspaceLabels(workspaceIds: string[], workspaceNameById: Map<string, string>): string {
+  if (workspaceIds.length === 0) return '—';
+  const labels = workspaceIds.map((id) => workspaceNameById.get(id) || id);
+  return labels.join('、');
+}
+
 interface SemanticGenerationModelSelection {
   profileId: string;
   profileName: string;
@@ -178,6 +228,15 @@ function DatabaseSemanticConfigPageContent() {
   const [modelProfilesLoading, setModelProfilesLoading] = useState(true);
   const [selectedGenerationModelKey, setSelectedGenerationModelKey] = useState('');
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const [workspaceOptions, setWorkspaceOptions] = useState<DBHarnessWorkspaceRecord[]>([]);
+  const [semanticUpgrades, setSemanticUpgrades] = useState<DBHarnessSemanticUpgradeCandidate[]>([]);
+  const [semanticUpgradeGovernanceById, setSemanticUpgradeGovernanceById] = useState<Record<string, DBHarnessSemanticUpgradeGovernance>>({});
+  const [semanticUpgradesLoading, setSemanticUpgradesLoading] = useState(false);
+  const [semanticUpgradeActionLoading, setSemanticUpgradeActionLoading] = useState('');
+  const [semanticUpgradeError, setSemanticUpgradeError] = useState('');
+  const [expandedSemanticGovernanceId, setExpandedSemanticGovernanceId] = useState('');
+  const [semanticUpgradeStatusFilter, setSemanticUpgradeStatusFilter] = useState<'all' | DBHarnessSemanticUpgradeCandidate['status']>('all');
+  const [semanticUpgradeChangeFilter, setSemanticUpgradeChangeFilter] = useState<'all' | 'alias' | 'description' | 'ner_flag'>('all');
 
   const tableCollections = useMemo(
     () => (schema?.collections || []).filter((item) => item.category === 'table'),
@@ -470,6 +529,184 @@ function DatabaseSemanticConfigPageContent() {
     };
   }, [initialCollection, instanceId, showToast]);
 
+  const activeDatabaseWorkspaces = useMemo(
+    () => workspaceOptions.filter((workspace) => (workspace.databaseId || '') === (instanceId || '')),
+    [workspaceOptions, instanceId]
+  );
+  const workspaceNameById = useMemo(
+    () => new Map(workspaceOptions.map((item) => [item.id, item.name || item.id])),
+    [workspaceOptions]
+  );
+  const filteredSemanticUpgrades = useMemo(() => {
+    return semanticUpgrades.filter((upgrade) => {
+      const hitStatus = semanticUpgradeStatusFilter === 'all' || upgrade.status === semanticUpgradeStatusFilter;
+      const hitChangeType = semanticUpgradeChangeFilter === 'all'
+        || upgrade.diffs.some((diff) => diff.changeType === semanticUpgradeChangeFilter);
+      return hitStatus && hitChangeType;
+    });
+  }, [semanticUpgrades, semanticUpgradeStatusFilter, semanticUpgradeChangeFilter]);
+
+  const loadSemanticUpgrades = useCallback(async (databaseId: string) => {
+    setSemanticUpgradesLoading(true);
+    try {
+      const response = await fetch(`/api/database-instances/${encodeURIComponent(databaseId)}/semantic-upgrades`, { cache: 'no-store' });
+      const payload = await readApiJson<SemanticUpgradeResponse>(response, '读取语义升级候选失败');
+      if (!response.ok || !('upgrades' in payload)) {
+        throw new Error(getApiErrorMessage(payload, '读取语义升级候选失败'));
+      }
+      setSemanticUpgrades(payload.upgrades || []);
+      const governance = Array.isArray(payload.governance) ? payload.governance : [];
+      setSemanticUpgradeGovernanceById(Object.fromEntries(governance.map((item) => [item.upgradeId, item])));
+      setSemanticUpgradeError('');
+    } catch (error) {
+      setSemanticUpgradeError(error instanceof Error ? error.message : '读取语义升级候选失败');
+    } finally {
+      setSemanticUpgradesLoading(false);
+    }
+  }, []);
+
+  const triggerSemanticUpgradeAction = useCallback(async (
+    action: 'extract' | 'evaluate' | 'start-rollout' | 'finalize' | 'reject',
+    input?: { upgradeId?: string; sourceWorkspaceId?: string; rolloutLimit?: number }
+  ) => {
+    if (!instanceId) return;
+    const loadingKey = `${action}:${input?.upgradeId || input?.sourceWorkspaceId || 'instance'}`;
+    if (action === 'start-rollout') {
+      const rolloutLimit = Math.max(1, Math.min(input?.rolloutLimit || 3, 3));
+      const rolloutWorkspaceIds = activeDatabaseWorkspaces.slice(0, rolloutLimit).map((item) => item.id);
+      const confirmed = window.confirm(`确认启动语义灰度？\n\n将影响 ${rolloutWorkspaceIds.length} 个 workspace。`);
+      if (!confirmed) return;
+    }
+    if (action === 'finalize') {
+      const confirmed = window.confirm('确认完成语义升级并写入数据源正式语义配置？该变更将影响同数据源 workspace。');
+      if (!confirmed) return;
+    }
+    if (action === 'reject') {
+      const confirmed = window.confirm('确认拒绝该语义升级候选？');
+      if (!confirmed) return;
+    }
+    setSemanticUpgradeActionLoading(loadingKey);
+    try {
+      if (action === 'extract') {
+        const response = await fetch(`/api/database-instances/${encodeURIComponent(instanceId)}/semantic-upgrades/extract`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sourceWorkspaceId: input?.sourceWorkspaceId }),
+        });
+        if (!response.ok) throw new Error('抽取语义升级候选失败');
+      } else if (action === 'evaluate') {
+        const response = await fetch(`/api/database-instances/${encodeURIComponent(instanceId)}/semantic-upgrades/evaluate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ upgradeId: input?.upgradeId }),
+        });
+        if (!response.ok) throw new Error('评估语义升级候选失败');
+      } else if (action === 'start-rollout') {
+        const rolloutLimit = Math.max(1, Math.min(input?.rolloutLimit || 3, 3));
+        const rolloutWorkspaceIds = activeDatabaseWorkspaces.slice(0, rolloutLimit).map((item) => item.id);
+        const response = await fetch(`/api/database-instances/${encodeURIComponent(instanceId)}/semantic-upgrades/${encodeURIComponent(input?.upgradeId || '')}/start-rollout`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspaceIds: rolloutWorkspaceIds }),
+        });
+        if (!response.ok) throw new Error('启动语义灰度失败');
+      } else if (action === 'finalize') {
+        const response = await fetch(`/api/database-instances/${encodeURIComponent(instanceId)}/semantic-upgrades/${encodeURIComponent(input?.upgradeId || '')}/finalize`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        if (!response.ok) throw new Error('完成语义升级失败');
+      } else if (action === 'reject') {
+        const response = await fetch(`/api/database-instances/${encodeURIComponent(instanceId)}/semantic-upgrades/${encodeURIComponent(input?.upgradeId || '')}/reject`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason: 'manual-reject' }),
+        });
+        if (!response.ok) throw new Error('拒绝语义升级失败');
+      }
+      await loadSemanticUpgrades(instanceId);
+      setSemanticUpgradeError('');
+    } catch (error) {
+      setSemanticUpgradeError(error instanceof Error ? error.message : '语义升级操作失败');
+    } finally {
+      setSemanticUpgradeActionLoading('');
+    }
+  }, [activeDatabaseWorkspaces, instanceId, loadSemanticUpgrades]);
+
+  const runSemanticUpgradeBatch = useCallback(async (action: 'evaluate' | 'reject') => {
+    if (!instanceId) return;
+    const targets = filteredSemanticUpgrades.filter((upgrade) => (
+      action === 'evaluate'
+        ? upgrade.status === 'pending_review' || upgrade.status === 'draft'
+        : upgrade.status !== 'finalized' && upgrade.status !== 'rejected'
+    ));
+    if (targets.length === 0) {
+      showToast(action === 'evaluate' ? '当前筛选下没有可批量评估的候选。' : '当前筛选下没有可批量拒绝的候选。', 'error');
+      return;
+    }
+    const confirmed = window.confirm(
+      action === 'evaluate'
+        ? `确认批量评估 ${targets.length} 条候选？`
+        : `确认批量拒绝 ${targets.length} 条候选？`
+    );
+    if (!confirmed) return;
+    setSemanticUpgradeActionLoading(`batch-${action}`);
+    try {
+      for (const upgrade of targets) {
+        if (action === 'evaluate') {
+          const response = await fetch(`/api/database-instances/${encodeURIComponent(instanceId)}/semantic-upgrades/evaluate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ upgradeId: upgrade.id }),
+          });
+          if (!response.ok) throw new Error(`批量评估失败: ${upgrade.title}`);
+        } else {
+          const response = await fetch(`/api/database-instances/${encodeURIComponent(instanceId)}/semantic-upgrades/${encodeURIComponent(upgrade.id)}/reject`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reason: 'batch-reject' }),
+          });
+          if (!response.ok) throw new Error(`批量拒绝失败: ${upgrade.title}`);
+        }
+      }
+      await loadSemanticUpgrades(instanceId);
+      setSemanticUpgradeError('');
+      showToast(action === 'evaluate' ? `已批量评估 ${targets.length} 条候选。` : `已批量拒绝 ${targets.length} 条候选。`);
+    } catch (error) {
+      setSemanticUpgradeError(error instanceof Error ? error.message : '批量操作失败');
+      showToast(error instanceof Error ? error.message : '批量操作失败', 'error');
+    } finally {
+      setSemanticUpgradeActionLoading('');
+    }
+  }, [filteredSemanticUpgrades, instanceId, loadSemanticUpgrades, showToast]);
+
+  useEffect(() => {
+    if (!instanceId) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const workspaceResponse = await fetch('/api/db-harness/workspaces', { cache: 'no-store' });
+        const workspacePayload = await readApiJson<DBHarnessWorkspaceRecord[]>(workspaceResponse, '读取 workspace 列表失败');
+        if (!cancelled && workspaceResponse.ok) {
+          setWorkspaceOptions(Array.isArray(workspacePayload) ? workspacePayload : []);
+        }
+      } catch {
+        if (!cancelled) {
+          setWorkspaceOptions([]);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [instanceId]);
+
+  useEffect(() => {
+    if (!instanceId) return;
+    void loadSemanticUpgrades(instanceId);
+  }, [instanceId, loadSemanticUpgrades]);
+
   const updateRouteParams = useCallback((collection: string | null) => {
     const nextParams = new URLSearchParams(searchParams.toString());
     if (collection === null) {
@@ -612,6 +849,214 @@ function DatabaseSemanticConfigPageContent() {
               <Icons.Check size={16} /> {saving ? '保存中...' : '保存语义配置'}
             </button>
           </div>
+        </div>
+      </section>
+
+      <section className={styles.panel}>
+        <div className={styles.panelHeader}>
+          <div className={styles.panelTitle}>
+            <strong>Datasource 语义升级治理</strong>
+            <span>候选从同数据源反馈抽取；支持评估、灰度 rollout、finalize 写回语义配置。</span>
+          </div>
+          <div className={styles.panelHeaderMeta}>
+            <div className={styles.badgeRow}>
+              <span className={styles.metricBadge}>候选数：{filteredSemanticUpgrades.length}/{semanticUpgrades.length}</span>
+              <span className={styles.metricBadge}>关联 workspace：{activeDatabaseWorkspaces.length}</span>
+              <span className={styles.metricBadge}>灰度预估影响：{Math.min(3, activeDatabaseWorkspaces.length)} 个 workspace</span>
+            </div>
+            <div className={styles.panelActionRow}>
+              <select
+                className={`form-select ${styles.upgradeFilterSelect}`}
+                value={semanticUpgradeStatusFilter}
+                onChange={(event) => setSemanticUpgradeStatusFilter(event.target.value as typeof semanticUpgradeStatusFilter)}
+              >
+                <option value="all">全部状态</option>
+                <option value="draft">draft</option>
+                <option value="pending_review">pending_review</option>
+                <option value="rollout">rollout</option>
+                <option value="finalized">finalized</option>
+                <option value="rejected">rejected</option>
+              </select>
+              <select
+                className={`form-select ${styles.upgradeFilterSelect}`}
+                value={semanticUpgradeChangeFilter}
+                onChange={(event) => setSemanticUpgradeChangeFilter(event.target.value as typeof semanticUpgradeChangeFilter)}
+              >
+                <option value="all">全部变更</option>
+                <option value="alias">alias</option>
+                <option value="description">description</option>
+                <option value="ner_flag">ner_flag</option>
+              </select>
+              <button
+                className="btn btn-secondary btn-sm"
+                type="button"
+                disabled={activeDatabaseWorkspaces.length === 0 || semanticUpgradeActionLoading.startsWith('extract:')}
+                onClick={() => void triggerSemanticUpgradeAction('extract', { sourceWorkspaceId: activeDatabaseWorkspaces[0]?.id })}
+              >
+                <Icons.Sparkles size={14} /> {semanticUpgradeActionLoading.startsWith('extract:') ? '抽取中...' : '抽取候选'}
+              </button>
+              <button
+                className="btn btn-secondary btn-sm"
+                type="button"
+                disabled={semanticUpgradeActionLoading === 'batch-evaluate'}
+                onClick={() => void runSemanticUpgradeBatch('evaluate')}
+              >
+                <Icons.Activity size={14} /> {semanticUpgradeActionLoading === 'batch-evaluate' ? '批量评估中...' : '批量评估'}
+              </button>
+              <button
+                className="btn btn-danger btn-sm"
+                type="button"
+                disabled={semanticUpgradeActionLoading === 'batch-reject'}
+                onClick={() => void runSemanticUpgradeBatch('reject')}
+              >
+                <Icons.Trash size={14} /> {semanticUpgradeActionLoading === 'batch-reject' ? '批量处理中...' : '批量拒绝'}
+              </button>
+            </div>
+          </div>
+        </div>
+        <div className={styles.panelBody}>
+          {semanticUpgradeError ? <div className={styles.emptyPage}>{semanticUpgradeError}</div> : null}
+          {semanticUpgradesLoading ? (
+            <div className={styles.emptyPage}>正在加载语义升级候选...</div>
+          ) : filteredSemanticUpgrades.length === 0 ? (
+            <div className={styles.emptyPage}>当前数据源还没有语义升级候选。</div>
+          ) : (
+            <div className={styles.metricTableWrap}>
+              <table className={styles.metricTable}>
+                <thead>
+                  <tr>
+                    <th>标题</th>
+                    <th>状态</th>
+                    <th>置信度</th>
+                    <th>评估分</th>
+                    <th>变更数</th>
+                    <th>证据</th>
+                    <th>灰度建议</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredSemanticUpgrades.map((upgrade) => {
+                    const evalKey = `evaluate:${upgrade.id}`;
+                    const rolloutKey = `start-rollout:${upgrade.id}`;
+                    const finalizeKey = `finalize:${upgrade.id}`;
+                    const rejectKey = `reject:${upgrade.id}`;
+                    const rolloutSize = deriveSemanticRolloutSize(upgrade, activeDatabaseWorkspaces.length);
+                    const governance = semanticUpgradeGovernanceById[upgrade.id];
+                    const impact = governance?.impact;
+                    return (
+                      <tr key={upgrade.id}>
+                        <td>
+                          <div className={styles.metricFieldTitle}>
+                            <div className={styles.metricFieldNameRow}>
+                              <strong>{upgrade.title}</strong>
+                            </div>
+                            <div className={styles.metricFieldMeta}>
+                              <span>{upgrade.description || '—'}</span>
+                              {upgrade.diffs.slice(0, 3).map((diff, index) => (
+                                <span key={`${upgrade.id}-diff-${diff.fieldRef.table}-${diff.fieldRef.column}-${index}`}>
+                                  {diff.changeType}: {diff.fieldRef.table}.{diff.fieldRef.column} ({String(diff.before)} {'->'} {String(diff.after)})
+                                </span>
+                              ))}
+                              {upgrade.diffs.length > 3 ? <span>... 其余 {upgrade.diffs.length - 3} 条变更</span> : null}
+                            </div>
+                          </div>
+                        </td>
+                        <td>{upgrade.status}</td>
+                        <td>{upgrade.confidence.toFixed(3)}</td>
+                        <td>{upgrade.evaluation?.score?.toFixed(3) || '—'}</td>
+                        <td>{upgrade.diffs.length}</td>
+                        <td>
+                          <div className={styles.metricFieldMeta}>
+                            <span>{formatSemanticEvidenceLabel(upgrade)}</span>
+                            {(upgrade.evidence || []).flatMap((item) => item.sampleNotes || []).slice(0, 1).map((note, index) => (
+                              <span key={`${upgrade.id}-evidence-note-${index}`}>样例: {note}</span>
+                            ))}
+                            {impact ? (
+                              <span>
+                                影响范围: {impact.impactedEntities.length} 实体 / {impact.impactedFieldRefs.length} 字段
+                                {' · '}同数据源 workspace: {impact.databaseWorkspaceCount}
+                              </span>
+                            ) : null}
+                            {impact ? (
+                              <span>
+                                rollout: active {impact.activeRolloutWorkspaceCount}
+                                {' · '}completed {impact.completedRolloutWorkspaceCount}
+                                {' · '}stopped {impact.stoppedRolloutWorkspaceCount}
+                              </span>
+                            ) : null}
+                            {(governance?.rolloutTimeline || []).slice(0, 2).map((item, index) => (
+                              <span key={`${upgrade.id}-timeline-${item.workspaceId}-${index}`}>
+                                时间线: {item.workspaceId} · {item.status} · {formatTimelineTime(item.startedAt)}
+                              </span>
+                            ))}
+                            {impact ? (
+                              <button
+                                type="button"
+                                className={`btn btn-secondary btn-sm ${styles.semanticGovernanceToggle}`}
+                                onClick={() => setExpandedSemanticGovernanceId((current) => (current === upgrade.id ? '' : upgrade.id))}
+                              >
+                                {expandedSemanticGovernanceId === upgrade.id ? '收起影响详情' : '展开影响详情'}
+                              </button>
+                            ) : null}
+                            {impact && expandedSemanticGovernanceId === upgrade.id ? (
+                              <div className={styles.semanticGovernanceDetail}>
+                                {impact.impactedFieldRefs.map((fieldRef) => (
+                                  <div key={`${upgrade.id}-impact-${fieldRef}`} className={styles.semanticGovernanceItem}>
+                                    <strong>{fieldRef}</strong>
+                                    <span>
+                                      受影响 workspace: {formatWorkspaceLabels(impact.impactedWorkspaceIds, workspaceNameById)}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : null}
+                          </div>
+                        </td>
+                        <td>{rolloutSize} 个 workspace</td>
+                        <td>
+                          <div className={styles.panelActionRow}>
+                            <button
+                              className="btn btn-secondary btn-sm"
+                              type="button"
+                              disabled={semanticUpgradeActionLoading === evalKey || upgrade.status === 'finalized' || upgrade.status === 'rejected'}
+                              onClick={() => void triggerSemanticUpgradeAction('evaluate', { upgradeId: upgrade.id })}
+                            >
+                              {semanticUpgradeActionLoading === evalKey ? '评估中...' : '评估'}
+                            </button>
+                            <button
+                              className="btn btn-primary btn-sm"
+                              type="button"
+                              disabled={semanticUpgradeActionLoading === rolloutKey || upgrade.status !== 'pending_review'}
+                              onClick={() => void triggerSemanticUpgradeAction('start-rollout', { upgradeId: upgrade.id, rolloutLimit: rolloutSize })}
+                            >
+                              {semanticUpgradeActionLoading === rolloutKey ? '灰度中...' : '灰度'}
+                            </button>
+                            <button
+                              className="btn btn-primary btn-sm"
+                              type="button"
+                              disabled={semanticUpgradeActionLoading === finalizeKey || upgrade.status !== 'rollout'}
+                              onClick={() => void triggerSemanticUpgradeAction('finalize', { upgradeId: upgrade.id })}
+                            >
+                              {semanticUpgradeActionLoading === finalizeKey ? '完成中...' : '完成'}
+                            </button>
+                            <button
+                              className="btn btn-danger btn-sm"
+                              type="button"
+                              disabled={semanticUpgradeActionLoading === rejectKey || upgrade.status === 'finalized' || upgrade.status === 'rejected'}
+                              onClick={() => void triggerSemanticUpgradeAction('reject', { upgradeId: upgrade.id })}
+                            >
+                              {semanticUpgradeActionLoading === rejectKey ? '处理中...' : '拒绝'}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       </section>
 

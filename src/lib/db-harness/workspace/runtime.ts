@@ -3,10 +3,12 @@ import {
   getAIModelProfileById,
   getDatabaseInstanceById,
   getDBHarnessWorkspaceById,
+  listDBHarnessAppliedUpgradeSnapshots,
   listDBHarnessKnowledgeMemory,
+  listDBHarnessSemanticOverlays,
   listDBHarnessPromptTemplates,
 } from '@/lib/db';
-import { getEffectiveDatabaseMetricMappings, sanitizeDatabaseSemanticModel } from '@/lib/database-instances';
+import { getEffectiveDatabaseMetricMappings } from '@/lib/database-instances';
 import { getDatabaseSchema } from '@/lib/database-instances-server';
 import { DBHarnessChatTurnRequest, DBHarnessWorkspaceContext, DatabaseMetricViewMap } from '../core/types';
 import { buildSemanticEmbeddingIndex } from '../memory/embedding-index';
@@ -17,6 +19,32 @@ import {
   getCachedWorkspaceContext,
   setCachedWorkspaceContext,
 } from './workspace-cache';
+
+function applySemanticOverlaysToMetricMappings(
+  metricMappings: DatabaseMetricViewMap,
+  overlays: NonNullable<DBHarnessWorkspaceContext['semanticOverlays']>
+): DatabaseMetricViewMap {
+  if (!overlays.length) return metricMappings;
+  const next: DatabaseMetricViewMap = JSON.parse(JSON.stringify(metricMappings || {}));
+  overlays.forEach((overlay) => {
+    const tableView = next[overlay.table];
+    if (!tableView || !tableView.fields) return;
+    const fieldView = tableView.fields[overlay.column];
+    if (!fieldView) return;
+    if (overlay.changeType === 'alias' && typeof overlay.after === 'string' && overlay.after.trim()) {
+      const aliases = new Set((fieldView.aliases || []).map((item) => item.trim()).filter(Boolean));
+      aliases.add(overlay.after.trim());
+      fieldView.aliases = Array.from(aliases).slice(0, 16);
+    }
+    if (overlay.changeType === 'description' && typeof overlay.after === 'string') {
+      fieldView.description = overlay.after.trim();
+    }
+    if (overlay.changeType === 'ner_flag' && typeof overlay.after === 'boolean') {
+      fieldView.enableForNer = overlay.after;
+    }
+  });
+  return next;
+}
 
 export async function resolveDBHarnessWorkspace(input: DBHarnessChatTurnRequest): Promise<DBHarnessWorkspaceContext> {
   const selectedModel = input.selectedModel;
@@ -54,6 +82,15 @@ export async function resolveDBHarnessWorkspace(input: DBHarnessChatTurnRequest)
   const workspaceRecord = input.workspaceId
     ? getDBHarnessWorkspaceById(input.workspaceId)
     : null;
+  const activeUpgrades = workspaceRecord?.id
+    ? listDBHarnessAppliedUpgradeSnapshots({ workspaceId: workspaceRecord.id, limit: 24 })
+    : [];
+  const semanticOverlays = workspaceRecord?.id
+    ? listDBHarnessSemanticOverlays({
+      databaseId: databaseInstance.id,
+      workspaceId: workspaceRecord.id,
+    })
+    : [];
   const promptTemplates = listDBHarnessPromptTemplates({
     workspaceId: workspaceRecord?.id || input.workspaceId,
     databaseId: databaseInstance.id,
@@ -103,6 +140,8 @@ export async function resolveDBHarnessWorkspace(input: DBHarnessChatTurnRequest)
       runtimeConfig: workspaceRecord?.runtimeConfig || {},
       freshness,
       knowledgeQuality,
+      activeUpgrades,
+      semanticOverlays,
       databaseInstance: cached.databaseInstance,
       profile,
       selectedModel,
@@ -121,12 +160,13 @@ export async function resolveDBHarnessWorkspace(input: DBHarnessChatTurnRequest)
   }
 
   const schema = await getDatabaseSchema(databaseInstance);
-  const metricMappings = getEffectiveDatabaseMetricMappings({
+  const baseMetricMappings = getEffectiveDatabaseMetricMappings({
     metricMappings: databaseInstance.metricMappings,
     semanticModel: databaseInstance.semanticModel,
   }) as DatabaseMetricViewMap;
-  const catalog = deriveCatalogSnapshot(schema, metricMappings);
-  const semantic = sanitizeDatabaseSemanticModel(databaseInstance.semanticModel) || deriveSemanticSnapshot(schema, metricMappings);
+  const metricMappings = applySemanticOverlaysToMetricMappings(baseMetricMappings, semanticOverlays);
+  const catalog = deriveCatalogSnapshot(schema, metricMappings, databaseInstance.semanticModel);
+  const semantic = deriveSemanticSnapshot(schema, metricMappings, databaseInstance.semanticModel);
   const knowledge = listDBHarnessKnowledgeMemory({
     workspaceId: workspaceRecord?.id || input.workspaceId,
     databaseId: databaseInstance.id,
@@ -191,6 +231,8 @@ export async function resolveDBHarnessWorkspace(input: DBHarnessChatTurnRequest)
     semantic,
     knowledge,
     promptTemplates,
+    activeUpgrades,
+    semanticOverlays,
     freshness,
     knowledgeQuality,
     semanticEmbeddingIndex,

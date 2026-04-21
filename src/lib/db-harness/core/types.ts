@@ -60,6 +60,8 @@ export interface DBHarnessTurnArtifact {
   catalogOverview?: DBHarnessCatalogOverview;
   semanticOverview?: DBHarnessSemanticOverview;
   validation?: DBHarnessExecutionValidation;
+  appliedUpgrades?: DBHarnessAppliedUpgradeSnapshot[];
+  semanticOverlays?: DBHarnessSemanticOverlay[];
 }
 
 export interface DBHarnessTurnResponse {
@@ -172,6 +174,10 @@ export interface DBHarnessNerPayload {
 
 export interface DBHarnessKnowledgeMemoryEntry {
   key: string;
+  workspaceId?: string;
+  databaseId?: string;
+  sessionId?: string;
+  messageId?: string;
   summary: string;
   tags: string[];
   source?: 'schema' | 'feedback';
@@ -422,6 +428,8 @@ export interface DBHarnessWorkspaceContext {
   freshness?: DBHarnessWorkspaceFreshnessSnapshot;
   knowledgeQuality?: DBHarnessKnowledgeQualitySnapshot;
   promptTemplates?: DBHarnessPromptTemplateRecord[];
+  activeUpgrades?: DBHarnessAppliedUpgradeSnapshot[];
+  semanticOverlays?: DBHarnessSemanticOverlay[];
   databaseInstance: DatabaseInstance;
   profile: AIModelProfile;
   selectedModel: DBHarnessSelectedModelInput;
@@ -506,6 +514,11 @@ export interface DBHarnessQueryMetricRecord {
   fromCache: boolean;
   rowCount: number;
   agentTelemetry: Partial<Record<DBMultiAgentRole, DBHarnessAgentTelemetry>>;
+  appliedUpgradeIds?: string[];
+  semanticOverlayIds?: string[];
+  validationScore?: number;
+  feedbackLabel?: 'positive' | 'corrective' | 'none';
+  retryUsed?: boolean;
   labels: string[];
   errorMessage?: string;
   createdAt: string;
@@ -574,6 +587,162 @@ export interface DBHarnessRuntimeConfig {
   appliedRunId?: string;
   appliedCandidateIds?: string[];
   updatedAt?: string;
+}
+
+export type DBHarnessUpgradeTarget = DBMultiAgentRole | 'orchestrator';
+export type DBHarnessUpgradeArtifactType =
+  | 'prompt_patch'
+  | 'query_template'
+  | 'retrieval_rule'
+  | 'correction_rule'
+  | 'policy_patch'
+  | 'analysis_template';
+export type DBHarnessUpgradeStatus = 'draft' | 'pending_review' | 'approved' | 'applied' | 'rejected';
+
+export interface DBHarnessUpgradeArtifact {
+  type: DBHarnessUpgradeArtifactType;
+  summary: string;
+  promptPatch?: string;
+  templateKey?: string;
+  payload?: Record<string, unknown>;
+}
+
+export interface DBHarnessUpgradeEvaluation {
+  score: number;
+  baselineScore: number;
+  sqlSuccessRate: number;
+  emptyRate: number;
+  correctiveRate: number;
+  avgLatencyMs: number;
+  avgValidationScore: number;
+  notes: string[];
+}
+
+export interface DBHarnessUpgradeCandidate {
+  id: string;
+  workspaceId: string;
+  target: DBHarnessUpgradeTarget;
+  sourceTurnId: string;
+  artifactType: DBHarnessUpgradeArtifactType;
+  status: DBHarnessUpgradeStatus;
+  confidence: number;
+  title: string;
+  description: string;
+  artifact: DBHarnessUpgradeArtifact;
+  evaluation?: DBHarnessUpgradeEvaluation;
+  rejectedReason?: string;
+  appliedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DBHarnessAppliedUpgradeSnapshot {
+  upgradeId: string;
+  workspaceId: string;
+  target: DBHarnessUpgradeTarget;
+  artifactType: DBHarnessUpgradeArtifactType;
+  title: string;
+  confidence: number;
+  appliedAt: string;
+}
+
+export type DBHarnessSemanticUpgradeChangeType = 'alias' | 'description' | 'ner_flag';
+export type DBHarnessSemanticUpgradeStatus = 'draft' | 'pending_review' | 'rollout' | 'finalized' | 'rejected';
+
+export interface DBHarnessSemanticFieldRef {
+  table: string;
+  column: string;
+}
+
+export interface DBHarnessSemanticUpgradeDiff {
+  changeType: DBHarnessSemanticUpgradeChangeType;
+  fieldRef: DBHarnessSemanticFieldRef;
+  before: string | boolean;
+  after: string | boolean;
+}
+
+export interface DBHarnessSemanticUpgradeEvaluation {
+  score: number;
+  baselineScore: number;
+  schemaHitRate: number;
+  sqlSuccessRate: number;
+  emptyRate: number;
+  correctiveRate: number;
+  errorMappingRate: number;
+  avgLatencyMs: number;
+  avgValidationScore: number;
+  notes: string[];
+}
+
+export interface DBHarnessSemanticUpgradeEvidence {
+  kind: 'corrective_feedback' | 'cross_workspace_synonym';
+  workspaceCount: number;
+  hitCount: number;
+  sampleNotes: string[];
+}
+
+export interface DBHarnessSemanticUpgradeCandidate {
+  id: string;
+  databaseId: string;
+  sourceWorkspaceId: string;
+  status: DBHarnessSemanticUpgradeStatus;
+  confidence: number;
+  title: string;
+  description: string;
+  diffs: DBHarnessSemanticUpgradeDiff[];
+  evidence?: DBHarnessSemanticUpgradeEvidence[];
+  evaluation?: DBHarnessSemanticUpgradeEvaluation;
+  rejectedReason?: string;
+  finalizedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DBHarnessSemanticUpgradeRollout {
+  id: string;
+  upgradeId: string;
+  databaseId: string;
+  workspaceId: string;
+  status: 'active' | 'stopped' | 'completed';
+  startedAt: string;
+  endedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DBHarnessSemanticUpgradeImpactSummary {
+  databaseWorkspaceCount: number;
+  impactedWorkspaceIds: string[];
+  rolloutWorkspaceIds: string[];
+  impactedEntities: string[];
+  impactedFieldRefs: string[];
+  activeRolloutWorkspaceCount: number;
+  completedRolloutWorkspaceCount: number;
+  stoppedRolloutWorkspaceCount: number;
+}
+
+export interface DBHarnessSemanticUpgradeGovernance {
+  upgradeId: string;
+  impact: DBHarnessSemanticUpgradeImpactSummary;
+  rolloutTimeline: Array<{
+    workspaceId: string;
+    status: DBHarnessSemanticUpgradeRollout['status'];
+    startedAt: string;
+    endedAt?: string;
+  }>;
+}
+
+export interface DBHarnessSemanticOverlay {
+  upgradeId: string;
+  databaseId: string;
+  workspaceId: string;
+  changeType: DBHarnessSemanticUpgradeChangeType;
+  table: string;
+  column: string;
+  before: string | boolean;
+  after: string | boolean;
+  status: 'active' | 'stopped' | 'completed';
+  startedAt: string;
 }
 
 export interface DBHarnessKnowledgeFeedbackRequest {

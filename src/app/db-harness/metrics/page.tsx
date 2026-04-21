@@ -3,11 +3,20 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Icons } from '@/components/Icons';
-import type { DBHarnessQueryMetricRecord, DBHarnessWorkspaceRecord } from '@/lib/db-harness/core/types';
+import type {
+  DBHarnessQueryMetricRecord,
+  DBHarnessUpgradeCandidate,
+  DBHarnessWorkspaceRecord,
+} from '@/lib/db-harness/core/types';
 import type { DatabaseInstanceSummary } from '@/lib/types';
 import styles from './page.module.css';
 
 type MetricsResponse = { metrics: DBHarnessQueryMetricRecord[] } | { error?: string };
+type WorkspaceUpgradeResponse = { upgrades: DBHarnessUpgradeCandidate[] } | { error?: string };
+type UpgradeDialogState = {
+  mode: 'apply' | 'reject';
+  upgrade: DBHarnessUpgradeCandidate;
+};
 
 function formatPercent(value: number) {
   return `${(value * 100).toFixed(1)}%`;
@@ -37,6 +46,72 @@ function getOutcomeClass(outcome: DBHarnessQueryMetricRecord['outcome']) {
   if (outcome === 'success') return styles.outcomeSuccess;
   if (outcome === 'empty') return styles.outcomeEmpty;
   return styles.outcomeError;
+}
+
+function getUpgradeRecommendation(evaluation: DBHarnessUpgradeCandidate['evaluation']) {
+  if (!evaluation) {
+    return {
+      label: '待评估',
+      detail: '请先点击“评估”获取建议结果。',
+      recommended: false,
+      pending: true,
+    };
+  }
+  const score = Number.isFinite(evaluation.score) ? evaluation.score : NaN;
+  const baseline = Number.isFinite(evaluation.baselineScore) ? evaluation.baselineScore : NaN;
+  if (!Number.isFinite(score) || !Number.isFinite(baseline)) {
+    return {
+      label: '待评估',
+      detail: '评估结果数据不完整，请重新点击“评估”。',
+      recommended: false,
+      pending: true,
+    };
+  }
+  const positiveDelta = score - baseline;
+  const shouldUpgrade = score >= 0.7 && positiveDelta >= -0.01 && evaluation.emptyRate <= 0.4;
+  return {
+    label: shouldUpgrade ? '建议升级' : '不建议升级',
+    detail: `score ${score.toFixed(3)} · baseline ${baseline.toFixed(3)} · Δ${positiveDelta >= 0 ? '+' : ''}${positiveDelta.toFixed(3)}`,
+    recommended: shouldUpgrade,
+    pending: false,
+  };
+}
+
+function buildPromptStrategyAfter(before: string, patch: string): string {
+  const safePatch = patch.trim();
+  if (!safePatch) return before;
+  const safeBefore = before.trim();
+  if (!safeBefore) return safePatch;
+  if (safeBefore.includes(safePatch)) return safeBefore;
+  return `${safeBefore}\n\n${safePatch}`;
+}
+
+function buildUpgradeChangePreview(upgrade: DBHarnessUpgradeCandidate, currentPromptStrategy: string) {
+  const promptPatch = (upgrade.artifact.promptPatch || '').trim();
+  const beforePrompt = currentPromptStrategy.trim() || '（空）';
+  const afterPrompt = buildPromptStrategyAfter(currentPromptStrategy, promptPatch).trim() || '（空）';
+  const previewRows = [
+    {
+      label: 'Prompt Strategy',
+      before: beforePrompt,
+      after: afterPrompt,
+    },
+  ];
+  if (upgrade.artifactType === 'query_template' || upgrade.artifactType === 'analysis_template') {
+    previewRows.push({
+      label: '模板资产',
+      before: '未新增当前升级模板',
+      after: `新增模板：${upgrade.title}`,
+    });
+  }
+  if (upgrade.artifactType === 'correction_rule') {
+    previewRows.push({
+      label: '纠正规则',
+      before: '当前 workspace 未注入该纠正规则',
+      after: '将写入该升级对应的 correction rule 记忆项',
+    });
+  }
+  return previewRows;
 }
 
 function summarizeMetrics(metrics: DBHarnessQueryMetricRecord[]) {
@@ -100,6 +175,11 @@ export default function DBHarnessMetricsPage() {
   const [workspaceId, setWorkspaceId] = useState('');
   const [databaseId, setDatabaseId] = useState('');
   const [limit, setLimit] = useState('60');
+  const [workspaceUpgrades, setWorkspaceUpgrades] = useState<DBHarnessUpgradeCandidate[]>([]);
+  const [upgradesLoading, setUpgradesLoading] = useState(false);
+  const [upgradeActionLoading, setUpgradeActionLoading] = useState('');
+  const [upgradeError, setUpgradeError] = useState('');
+  const [upgradeDialog, setUpgradeDialog] = useState<UpgradeDialogState | null>(null);
 
   async function loadDependencies() {
     const [workspaceRes, databaseRes] = await Promise.all([
@@ -129,6 +209,76 @@ export default function DBHarnessMetricsPage() {
     }
     setMetrics(payload.metrics || []);
   }, [workspaceId, databaseId, limit]);
+
+  const loadWorkspaceUpgrades = useCallback(async (nextWorkspaceId = workspaceId) => {
+    if (!nextWorkspaceId) {
+      setWorkspaceUpgrades([]);
+      return;
+    }
+    setUpgradesLoading(true);
+    try {
+      const response = await fetch(`/api/db-harness/workspaces/${encodeURIComponent(nextWorkspaceId)}/upgrades`, { cache: 'no-store' });
+      const payload = await response.json() as WorkspaceUpgradeResponse;
+      if (!response.ok || !('upgrades' in payload)) {
+        throw new Error('读取 workspace 升级列表失败');
+      }
+      const visibleUpgrades = (payload.upgrades || []).filter((item) => item.status !== 'rejected');
+      setWorkspaceUpgrades(visibleUpgrades);
+      setUpgradeError('');
+    } catch (error) {
+      setUpgradeError(error instanceof Error ? error.message : '读取 workspace 升级列表失败');
+    } finally {
+      setUpgradesLoading(false);
+    }
+  }, [workspaceId]);
+
+  const triggerWorkspaceUpgradeAction = useCallback(async (
+    action: 'extract' | 'evaluate' | 'apply' | 'reject',
+    options?: { upgradeId?: string; reason?: string }
+  ) => {
+    if (!workspaceId) return false;
+    const loadingKey = `${action}:${options?.upgradeId || 'workspace'}`;
+    setUpgradeActionLoading(loadingKey);
+    try {
+      if (action === 'extract') {
+        const response = await fetch(`/api/db-harness/workspaces/${encodeURIComponent(workspaceId)}/upgrades/extract`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        if (!response.ok) throw new Error('抽取升级候选失败');
+      } else if (action === 'evaluate') {
+        const response = await fetch(`/api/db-harness/workspaces/${encodeURIComponent(workspaceId)}/upgrades/evaluate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ upgradeId: options?.upgradeId }),
+        });
+        if (!response.ok) throw new Error('评估升级候选失败');
+      } else if (action === 'apply') {
+        const response = await fetch(`/api/db-harness/workspaces/${encodeURIComponent(workspaceId)}/upgrades/${encodeURIComponent(options?.upgradeId || '')}/apply`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        if (!response.ok) throw new Error('应用升级候选失败');
+      } else {
+        const response = await fetch(`/api/db-harness/workspaces/${encodeURIComponent(workspaceId)}/upgrades/${encodeURIComponent(options?.upgradeId || '')}/reject`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason: options?.reason || 'manual-reject' }),
+        });
+        if (!response.ok) throw new Error('拒绝升级候选失败');
+      }
+      await loadWorkspaceUpgrades(workspaceId);
+      setUpgradeError('');
+      return true;
+    } catch (error) {
+      setUpgradeError(error instanceof Error ? error.message : '升级操作失败');
+      return false;
+    } finally {
+      setUpgradeActionLoading('');
+    }
+  }, [workspaceId, loadWorkspaceUpgrades]);
 
   useEffect(() => {
     let active = true;
@@ -167,8 +317,11 @@ export default function DBHarnessMetricsPage() {
       }).finally(() => {
         setRefreshing(false);
       });
+      void loadWorkspaceUpgrades().catch((error) => {
+        setUpgradeError(error instanceof Error ? error.message : '读取 workspace 升级失败');
+      });
     }
-  }, [workspaceId, databaseId, limit, loading, loadMetrics]);
+  }, [workspaceId, databaseId, limit, loading, loadMetrics, loadWorkspaceUpgrades]);
 
   const summary = useMemo(() => summarizeMetrics(metrics), [metrics]);
   const activeWorkspace = useMemo(
@@ -179,6 +332,25 @@ export default function DBHarnessMetricsPage() {
     () => databases.find((item) => item.id === databaseId) || null,
     [databases, databaseId]
   );
+  const upgradeDialogLoadingKey = useMemo(() => {
+    if (!upgradeDialog) return '';
+    return `${upgradeDialog.mode}:${upgradeDialog.upgrade.id}`;
+  }, [upgradeDialog]);
+  const upgradePreviewRows = useMemo(() => {
+    if (!upgradeDialog || upgradeDialog.mode !== 'apply') return [];
+    const currentPromptStrategy = activeWorkspace?.runtimeConfig?.promptStrategy || '';
+    return buildUpgradeChangePreview(upgradeDialog.upgrade, currentPromptStrategy);
+  }, [upgradeDialog, activeWorkspace]);
+
+  const handleConfirmUpgradeDialog = useCallback(async () => {
+    if (!upgradeDialog) return;
+    const success = await triggerWorkspaceUpgradeAction(upgradeDialog.mode, {
+      upgradeId: upgradeDialog.upgrade.id,
+    });
+    if (success) {
+      setUpgradeDialog(null);
+    }
+  }, [upgradeDialog, triggerWorkspaceUpgradeAction]);
 
   return (
     <div className={styles.page}>
@@ -306,6 +478,118 @@ export default function DBHarnessMetricsPage() {
           <section className={styles.tableCard}>
             <div className={styles.tableHeader}>
               <div>
+                <h2>Workspace 升级治理</h2>
+                <p>候选只来自当前 workspace；评估后可应用到当前 workspace 或拒绝。</p>
+              </div>
+              <div className={styles.upgradeActions}>
+                <button
+                  className="btn btn-secondary btn-sm"
+                  type="button"
+                  disabled={!workspaceId || upgradeActionLoading === 'extract:workspace'}
+                  onClick={() => void triggerWorkspaceUpgradeAction('extract')}
+                >
+                  <Icons.Sparkles size={14} />
+                  {upgradeActionLoading === 'extract:workspace' ? '抽取中...' : '抽取候选'}
+                </button>
+              </div>
+            </div>
+            {upgradeError ? <div className={styles.errorBanner}>{upgradeError}</div> : null}
+            {upgradesLoading ? (
+              <div className={styles.emptyState}>正在加载升级候选…</div>
+            ) : workspaceUpgrades.length === 0 ? (
+              <div className={styles.emptyState}>当前 workspace 还没有升级候选。</div>
+            ) : (
+              <div className={styles.tableWrap}>
+                <table className={styles.table}>
+                  <thead>
+                    <tr>
+                      <th>标题</th>
+                      <th>目标</th>
+                      <th>类型</th>
+                      <th>状态</th>
+                      <th>置信度</th>
+                      <th>评估分</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {workspaceUpgrades.map((upgrade) => {
+                      const evaluateKey = `evaluate:${upgrade.id}`;
+                      const applyKey = `apply:${upgrade.id}`;
+                      const rejectKey = `reject:${upgrade.id}`;
+                      return (
+                        <tr key={upgrade.id}>
+                          <td>
+                            <div className={styles.questionCell}>
+                              <strong>{upgrade.title}</strong>
+                              <span>{upgrade.description || '—'}</span>
+                            </div>
+                          </td>
+                          <td>{upgrade.target}</td>
+                          <td>{upgrade.artifactType}</td>
+                          <td>{upgrade.status}</td>
+                          <td>{upgrade.confidence.toFixed(3)}</td>
+                          <td>
+                            <div className={styles.questionCell}>
+                              <strong>{upgrade.evaluation?.score?.toFixed(3) || '—'}</strong>
+                              {(() => {
+                                const recommendation = getUpgradeRecommendation(upgrade.evaluation);
+                                return (
+                                  <span
+                                    className={
+                                      recommendation.pending
+                                        ? styles.upgradeRecommendationPending
+                                        : recommendation.recommended
+                                          ? styles.upgradeRecommendationYes
+                                          : styles.upgradeRecommendationNo
+                                    }
+                                  >
+                                    {recommendation.label} · {recommendation.detail}
+                                  </span>
+                                );
+                              })()}
+                            </div>
+                          </td>
+                          <td>
+                            <div className={styles.upgradeRowActions}>
+                              <button
+                                className="btn btn-secondary btn-sm"
+                                type="button"
+                                disabled={upgradeActionLoading === evaluateKey || upgrade.status === 'applied' || upgrade.status === 'rejected'}
+                                onClick={() => void triggerWorkspaceUpgradeAction('evaluate', { upgradeId: upgrade.id })}
+                              >
+                                {upgradeActionLoading === evaluateKey ? '评估中...' : '评估'}
+                              </button>
+                              <button
+                                className="btn btn-primary btn-sm"
+                                type="button"
+                                disabled={upgradeActionLoading === applyKey || upgrade.status === 'applied' || upgrade.status === 'rejected'}
+                                onClick={() => setUpgradeDialog({ mode: 'apply', upgrade })}
+                              >
+                                {upgradeActionLoading === applyKey ? '应用中...' : '应用'}
+                              </button>
+                              <button
+                                className="btn btn-danger btn-sm"
+                                type="button"
+                                disabled={upgradeActionLoading === rejectKey || upgrade.status === 'applied' || upgrade.status === 'rejected'}
+                                onClick={() => setUpgradeDialog({ mode: 'reject', upgrade })}
+                              >
+                                {upgradeActionLoading === rejectKey ? '处理中...' : '拒绝'}
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+
+          <section className={styles.tableCard}>
+            <div className={styles.tableHeader}>
+              <div>
                 <h2>最近回合明细</h2>
                 <p>优先查看 error / empty / 低置信度 / 需复核结果，快速定位需要继续优化的问句。</p>
               </div>
@@ -358,6 +642,70 @@ export default function DBHarnessMetricsPage() {
               </div>
             )}
           </section>
+
+          {upgradeDialog ? (
+            <div className={styles.dialogMask}>
+              <div className={styles.dialogCard}>
+                <div className={styles.dialogHeader}>
+                  <strong>{upgradeDialog.mode === 'apply' ? '确认应用升级' : '确认拒绝升级'}</strong>
+                  <button
+                    className={styles.dialogClose}
+                    type="button"
+                    onClick={() => setUpgradeDialog(null)}
+                    disabled={upgradeActionLoading === upgradeDialogLoadingKey}
+                    aria-label="关闭弹窗"
+                  >
+                    ×
+                  </button>
+                </div>
+                <div className={styles.dialogBody}>
+                  <p className={styles.dialogTitle}>{upgradeDialog.upgrade.title}</p>
+                  <p className={styles.dialogDesc}>{upgradeDialog.upgrade.description || '—'}</p>
+                  {upgradeDialog.mode === 'apply' ? (
+                    <div className={styles.changePreview}>
+                      {upgradePreviewRows.map((row) => (
+                        <div key={`${upgradeDialog.upgrade.id}-${row.label}`} className={styles.changeRow}>
+                          <span className={styles.changeLabel}>{row.label}</span>
+                          <div className={styles.changeColumns}>
+                            <div>
+                              <span className={styles.changeTag}>修改前</span>
+                              <pre>{row.before}</pre>
+                            </div>
+                            <div>
+                              <span className={styles.changeTag}>修改后</span>
+                              <pre>{row.after}</pre>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className={styles.dialogDesc}>拒绝后该候选将标记为 `rejected`，不会应用到当前 workspace。</p>
+                  )}
+                </div>
+                <div className={styles.dialogActions}>
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    type="button"
+                    onClick={() => setUpgradeDialog(null)}
+                    disabled={upgradeActionLoading === upgradeDialogLoadingKey}
+                  >
+                    取消
+                  </button>
+                  <button
+                    className={upgradeDialog.mode === 'apply' ? 'btn btn-primary btn-sm' : 'btn btn-danger btn-sm'}
+                    type="button"
+                    onClick={() => void handleConfirmUpgradeDialog()}
+                    disabled={upgradeActionLoading === upgradeDialogLoadingKey}
+                  >
+                    {upgradeActionLoading === upgradeDialogLoadingKey
+                      ? (upgradeDialog.mode === 'apply' ? '应用中...' : '处理中...')
+                      : (upgradeDialog.mode === 'apply' ? '确认应用' : '确认拒绝')}
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : null}
         </>
       )}
     </div>

@@ -232,6 +232,174 @@
   gap: 12px;
 }
 
+.upgradeActions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.upgradeRowActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.upgradeRecommendationYes,
+.upgradeRecommendationNo,
+.upgradeRecommendationPending {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.upgradeRecommendationYes {
+  background: rgba(236, 253, 245, 0.95);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+  color: #047857;
+}
+
+.upgradeRecommendationNo {
+  background: rgba(254, 242, 242, 0.96);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  color: #b91c1c;
+}
+
+.upgradeRecommendationPending {
+  background: rgba(248, 250, 252, 0.96);
+  border: 1px solid rgba(203, 213, 225, 0.9);
+  color: var(--color-text-muted);
+}
+
+.dialogMask {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, 0.45);
+  backdrop-filter: blur(2px);
+}
+
+.dialogCard {
+  width: min(900px, 100%);
+  max-height: min(86vh, 860px);
+  overflow: auto;
+  border-radius: 20px;
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.22);
+}
+
+.dialogHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 16px 18px;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.9);
+}
+
+.dialogHeader strong {
+  font-size: 16px;
+  color: var(--color-text);
+}
+
+.dialogClose {
+  width: 30px;
+  height: 30px;
+  border: 1px solid rgba(203, 213, 225, 0.9);
+  border-radius: 8px;
+  background: white;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.dialogBody {
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dialogTitle {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.dialogDesc {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+}
+
+.changePreview {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.changeRow {
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  border-radius: 12px;
+  background: rgba(248, 250, 252, 0.9);
+  padding: 10px;
+}
+
+.changeLabel {
+  display: inline-flex;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.changeColumns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.changeTag {
+  display: inline-flex;
+  margin-bottom: 6px;
+  padding: 0 8px;
+  min-height: 22px;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid rgba(203, 213, 225, 0.9);
+  background: white;
+  font-size: 10px;
+  color: var(--color-text-secondary);
+}
+
+.changeColumns pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--color-text);
+}
+
+.dialogActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px 16px;
+  border-top: 1px solid rgba(226, 232, 240, 0.9);
+}
+
 .tableHeader h2 {
   margin: 0;
   font-size: 18px;
@@ -325,6 +493,10 @@
   .agentGrid,
   .filterCard {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .changeColumns {
+    grid-template-columns: 1fr;
   }
 }
 

@@ -577,8 +577,8 @@ export async function runGepaCreate(input: DBHarnessGepaCreateRequest): Promise<
     metricMappings: databaseInstance.metricMappings,
     semanticModel: databaseInstance.semanticModel,
   });
-  const catalog = deriveCatalogSnapshot(schema, metricMappings);
-  const semantic = sanitizeDatabaseSemanticModel(databaseInstance.semanticModel) || deriveSemanticSnapshot(schema, metricMappings);
+  const catalog = deriveCatalogSnapshot(schema, metricMappings, databaseInstance.semanticModel);
+  const semantic = deriveSemanticSnapshot(schema, metricMappings, databaseInstance.semanticModel);
   if (databaseInstance.type !== 'mysql' && databaseInstance.type !== 'pgsql' && databaseInstance.type !== 'mongo') {
     throw new Error('GEPA 离线评估暂时仅支持 MySQL、PostgreSQL 和 MongoDB 数据源。');
   }

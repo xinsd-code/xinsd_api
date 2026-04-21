@@ -34,6 +34,12 @@ interface TraceDisplayItem {
   coreFlow?: ReactNode;
 }
 
+interface ArtifactInsightSelection {
+  messageId: string;
+  kind: 'upgrade' | 'overlay';
+  key: string;
+}
+
 function createId() {
   return Math.random().toString(36).slice(2, 10);
 }
@@ -466,6 +472,7 @@ export default function DbHarnessPage() {
   const [activeTraceMessageId, setActiveTraceMessageId] = useState<string | null>(null);
   const [copiedArtifactId, setCopiedArtifactId] = useState<string | null>(null);
   const [feedbackComposerId, setFeedbackComposerId] = useState<string | null>(null);
+  const [selectedArtifactInsight, setSelectedArtifactInsight] = useState<ArtifactInsightSelection | null>(null);
   const [feedbackDrafts, setFeedbackDrafts] = useState<Record<string, string>>({});
   const [feedbackSubmittingId, setFeedbackSubmittingId] = useState<string | null>(null);
   const [createWorkspaceDialog, setCreateWorkspaceDialog] = useState<boolean>(false);
@@ -579,6 +586,48 @@ export default function DbHarnessPage() {
   const hasDatasource = sqlDatabaseInstances.length > 0;
   const hasModel = modelSelections.length > 0;
   const canAttemptSend = !!composer.trim() && !sending;
+
+  function toggleArtifactInsight(messageId: string, kind: ArtifactInsightSelection['kind'], key: string) {
+    setSelectedArtifactInsight((current) => {
+      if (!current) return { messageId, kind, key };
+      if (current.messageId === messageId && current.kind === kind && current.key === key) {
+        return null;
+      }
+      return { messageId, kind, key };
+    });
+  }
+
+  function renderArtifactInsightDetail(message: DBHarnessChatMessage) {
+    const artifacts = message.artifacts;
+    if (!artifacts || !selectedArtifactInsight || selectedArtifactInsight.messageId !== message.id) return null;
+    if (selectedArtifactInsight.kind === 'upgrade') {
+      const matched = (artifacts.appliedUpgrades || []).find((item) => item.upgradeId === selectedArtifactInsight.key);
+      if (!matched) return null;
+      return (
+        <div className={styles.artifactInsightCard}>
+          <div className={styles.artifactLabel}>命中升级详情</div>
+          <p className={styles.resultSummary}>目标：{matched.target} / 类型：{matched.artifactType}</p>
+          <p className={styles.resultSummary}>标题：{matched.title}</p>
+          <p className={styles.resultSummary}>置信度：{matched.confidence.toFixed(3)}</p>
+          <p className={styles.resultSummary}>应用时间：{matched.appliedAt || '—'}</p>
+        </div>
+      );
+    }
+
+    const matchedOverlay = (artifacts.semanticOverlays || []).find((item, index) => (
+      `${item.upgradeId}:${item.table}:${item.column}:${index}` === selectedArtifactInsight.key
+    ));
+    if (!matchedOverlay) return null;
+    return (
+      <div className={styles.artifactInsightCard}>
+        <div className={styles.artifactLabel}>命中语义灰度详情</div>
+        <p className={styles.resultSummary}>类型：{matchedOverlay.changeType}</p>
+        <p className={styles.resultSummary}>字段：{matchedOverlay.table}.{matchedOverlay.column}</p>
+        <p className={styles.resultSummary}>状态：{matchedOverlay.status}</p>
+        <p className={styles.resultSummary}>生效时间：{matchedOverlay.startedAt || '—'}</p>
+      </div>
+    );
+  }
 
   async function createSessionForWorkspace(workspaceId: string) {
     const transient = createTransientSession(workspaceId);
@@ -1730,6 +1779,35 @@ export default function DbHarnessPage() {
                                     <div className={styles.artifactLabel}>返回数据</div>
                                     {message.artifacts.summary ? <p className={styles.resultSummary}>{message.artifacts.summary}</p> : null}
                                     {message.artifacts.planSummary ? <p className={styles.resultSummary}>{message.artifacts.planSummary}</p> : null}
+                                    {((message.artifacts.appliedUpgrades && message.artifacts.appliedUpgrades.length > 0)
+                                      || (message.artifacts.semanticOverlays && message.artifacts.semanticOverlays.length > 0)) ? (
+                                      <div className={styles.traceCoreChips}>
+                                        {(message.artifacts.appliedUpgrades || []).slice(0, 4).map((item) => (
+                                          <button
+                                            key={`${message.id}-upgrade-${item.upgradeId}`}
+                                            type="button"
+                                            className={`${styles.traceCoreChip} ${styles.traceCoreChipButton}`}
+                                            onClick={() => toggleArtifactInsight(message.id, 'upgrade', item.upgradeId)}
+                                          >
+                                            升级: {item.target}/{item.artifactType}
+                                          </button>
+                                        ))}
+                                        {(message.artifacts.semanticOverlays || []).slice(0, 4).map((item, index) => {
+                                          const overlayKey = `${item.upgradeId}:${item.table}:${item.column}:${index}`;
+                                          return (
+                                            <button
+                                              key={`${message.id}-overlay-${overlayKey}`}
+                                              type="button"
+                                              className={`${styles.traceCoreChip} ${styles.traceCoreChipButton}`}
+                                              onClick={() => toggleArtifactInsight(message.id, 'overlay', overlayKey)}
+                                            >
+                                              语义灰度: {item.changeType} {item.table}.{item.column}
+                                            </button>
+                                          );
+                                        })}
+                                      </div>
+                                    ) : null}
+                                    {renderArtifactInsightDetail(message)}
                                   </div>
                                   {message.artifacts.columns && message.artifacts.previewRows ? (
                                     <button

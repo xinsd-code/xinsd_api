@@ -278,6 +278,14 @@
   width: 100%;
 }
 
+.upgradeFilterSelect {
+  min-width: 140px;
+  height: 34px;
+  padding-top: 0;
+  padding-bottom: 0;
+  line-height: 1;
+}
+
 .generationPicker {
   display: flex;
   align-items: center;
@@ -320,6 +328,41 @@
   display: flex;
   flex-direction: column;
   gap: 18px;
+}
+
+.metricTableWrap {
+  width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+}
+
+.metricTable {
+  width: 100%;
+  border-collapse: collapse;
+  background: white;
+}
+
+.metricTable th,
+.metricTable td {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--color-border);
+  text-align: left;
+  vertical-align: top;
+  font-size: 12px;
+}
+
+.metricTable th {
+  background: rgba(248, 250, 252, 0.92);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.metricTable tbody tr:last-child td {
+  border-bottom: none;
 }
 
 .badgeRow {
@@ -485,6 +528,37 @@
   background: rgba(248,250,252,0.88);
   font-size: 11px;
   color: var(--color-text-muted);
+}
+
+.semanticGovernanceToggle {
+  margin-top: 2px;
+}
+
+.semanticGovernanceDetail {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.semanticGovernanceItem {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border-radius: var(--radius-md);
+  border: 1px dashed var(--color-border);
+  background: rgba(248,250,252,0.95);
+}
+
+.semanticGovernanceItem strong {
+  font-size: 11px;
+  color: var(--color-text);
+}
+
+.semanticGovernanceItem span {
+  font-size: 11px;
+  color: var(--color-text-secondary);
 }
 
 .metricRowFields {

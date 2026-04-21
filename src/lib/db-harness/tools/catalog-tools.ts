@@ -100,11 +100,43 @@ function buildCatalogEntity(
 
 export function deriveCatalogSnapshot(
   schema: DatabaseSchemaPayload,
-  metricMappings: DatabaseMetricViewMap
+  metricMappings: DatabaseMetricViewMap,
+  semanticModel?: { entities?: Array<{ table: string; fields?: Array<{ column: string; metricName?: string; description?: string; aliases?: string[] }> }> }
 ): DBHarnessCatalogSnapshot {
+  const semanticModelMap = new Map<string, Map<string, { metricName?: string; description?: string; aliases?: string[] }>>();
+  if (semanticModel?.entities) {
+    semanticModel.entities.forEach((entity) => {
+      const fieldMap = new Map<string, { metricName?: string; description?: string; aliases?: string[] }>();
+      entity.fields?.forEach((field) => {
+        fieldMap.set(field.column, {
+          metricName: field.metricName,
+          description: field.description,
+          aliases: field.aliases,
+        });
+      });
+      semanticModelMap.set(entity.table, fieldMap);
+    });
+  }
+
   const entities = schema.collections
     .filter((collection) => collection.category === 'table')
-    .map((collection) => buildCatalogEntity(collection, metricMappings));
+    .map((collection) => {
+      const baseEntity = buildCatalogEntity(collection, metricMappings);
+      const semanticFields = semanticModelMap.get(collection.name);
+      if (!semanticFields) return baseEntity;
+
+      return {
+        ...baseEntity,
+        fields: baseEntity.fields.map((field) => {
+          const semanticField = semanticFields.get(field.column);
+          if (!semanticField) return field;
+          return {
+            ...field,
+            aliases: semanticField.aliases && semanticField.aliases.length > 0 ? semanticField.aliases : field.aliases,
+          };
+        }),
+      };
+    });
 
   return {
     engine: schema.engine,
@@ -155,11 +187,46 @@ function buildSemanticEntity(
 
 export function deriveSemanticSnapshot(
   schema: DatabaseSchemaPayload,
-  metricMappings: DatabaseMetricViewMap
+  metricMappings: DatabaseMetricViewMap,
+  semanticModel?: { entities?: Array<{ table: string; fields?: Array<{ column: string; metricName?: string; description?: string; aliases?: string[] }> }> }
 ): DBHarnessSemanticSnapshot {
+  const semanticModelMap = new Map<string, Map<string, { metricName?: string; description?: string; aliases?: string[] }>>();
+  if (semanticModel?.entities) {
+    semanticModel.entities.forEach((entity) => {
+      const fieldMap = new Map<string, { metricName?: string; description?: string; aliases?: string[] }>();
+      entity.fields?.forEach((field) => {
+        fieldMap.set(field.column, {
+          metricName: field.metricName,
+          description: field.description,
+          aliases: field.aliases,
+        });
+      });
+      semanticModelMap.set(entity.table, fieldMap);
+    });
+  }
+
   const entities = schema.collections
     .filter((collection) => collection.category === 'table')
-    .map((collection) => buildSemanticEntity(collection, metricMappings));
+    .map((collection) => {
+      const baseEntity = buildSemanticEntity(collection, metricMappings);
+      const semanticFields = semanticModelMap.get(collection.name);
+      if (!semanticFields) return baseEntity;
+
+      return {
+        ...baseEntity,
+        fields: baseEntity.fields.map((field) => {
+          const semanticField = semanticFields.get(field.column);
+          if (!semanticField) return field;
+          return {
+            ...field,
+            metricName: semanticField.metricName || field.metricName,
+            description: semanticField.description || field.description,
+            aliases: semanticField.aliases && semanticField.aliases.length > 0 ? semanticField.aliases : field.aliases,
+            derivedFrom: 'mapping' as const,
+          };
+        }),
+      };
+    });
 
   const fields = entities.flatMap((entity) => entity.fields);
   return {
