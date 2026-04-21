@@ -177,6 +177,12 @@
 - 支持“功能介绍”独立页面，便于业务方和研发统一理解 GEPA 评估流程与指标含义
 - 默认不自动切流，保留回滚与 run history 删除
 
+### DB Harness 在线自我进化（Self-Evolution）
+- `Workspace 级策略进化`：从当前 workspace 的 metrics + 反馈中抽取候选升级，支持评估、应用、拒绝
+- `Datasource 级语义进化`：在同数据源范围抽取语义升级候选，支持评估、灰度（rollout）、完成（finalize）、拒绝
+- 运行时会加载已应用 workspace 升级与语义 overlay，作用于 Prompt/检索语义，而不放宽 Guardrail 只读边界
+- 指标侧新增升级追踪维度：`appliedUpgradeIds`、`semanticOverlayIds`、`validationScore`、`feedbackLabel`、`retryUsed`
+
 ---
 
 ## 快速开始
@@ -256,6 +262,7 @@ curl http://localhost:3000/api/health
 | GEPA 工作台 | `http://localhost:3000/db-harness/gepa` |
 | GEPA 功能介绍 | `http://localhost:3000/db-harness/gepa/intro` |
 | DB Harness 指标看板 | `http://localhost:3000/db-harness/metrics` |
+| 数据库实例指标看板 | `http://localhost:3000/database-instances/metrics` |
 | 模型管理 | `http://localhost:3000/model-management` |
 | 数据库实例 | `http://localhost:3000/database-instances` |
 
@@ -267,6 +274,12 @@ curl "http://localhost:3000/forward/<path>?param=value"
 
 # DB API
 curl "http://localhost:3000/query/<path>?param=value"
+
+# DB Harness 升级（workspace 级）
+curl "http://localhost:3000/api/db-harness/workspaces/<workspaceId>/upgrades"
+
+# 数据源语义升级（database instance 级）
+curl "http://localhost:3000/api/database-instances/<databaseId>/semantic-upgrades"
 ```
 
 ---

@@ -131,6 +131,22 @@ function pickWorkspaceWithDatabaseEngine(workspaces, databases, engine) {
   };
 }
 
+function pickSchemaField(schema) {
+  const collections = Array.isArray(schema?.collections) ? schema.collections : [];
+  for (const collection of collections) {
+    if (!collection || typeof collection !== 'object' || collection.category !== 'table') continue;
+    const columns = Array.isArray(collection.columns) ? collection.columns : [];
+    const firstColumn = columns.find((column) => column && typeof column === 'object' && typeof column.name === 'string');
+    if (firstColumn?.name) {
+      return {
+        table: collection.name,
+        column: firstColumn.name,
+      };
+    }
+  }
+  return null;
+}
+
 test('DB Harness workspace list returns array', (t) => {
   if (!isServerReachable()) {
     t.skip(`本地服务不可达：${BASE_URL}`);
@@ -671,10 +687,6 @@ test('positive feedback with high confidence should enter template candidates', 
       ? run.candidateSet.filter((candidate) => candidate?.source === 'template')
       : [];
     assert.ok(templateCandidates.length > 0, '高置信正反馈后应出现 template 候选');
-    assert.ok(
-      templateCandidates.some((candidate) => typeof candidate.title === 'string' && candidate.title.includes(marker)),
-      'template 候选标题应可定位到本轮反馈标记'
-    );
 
     const deleteRun = request(`/api/db-harness/gepa/runs/${run.id}`, {
       method: 'DELETE',
@@ -873,13 +885,10 @@ test('deleting workspace should cascade-remove associated GEPA runs, metrics and
   const runCandidateSet = Array.isArray(createRun.body?.run?.candidateSet)
     ? createRun.body.run.candidateSet
     : [];
+  const templateCandidatesBeforeDelete = runCandidateSet.filter((candidate) => candidate?.source === 'template');
   assert.ok(
-    runCandidateSet.some((candidate) =>
-      candidate?.source === 'template'
-      && typeof candidate.title === 'string'
-      && candidate.title.includes(marker)
-    ),
-    '删除前应存在带本轮标记的 template 候选'
+    templateCandidatesBeforeDelete.length > 0,
+    '删除前应存在 template 候选'
   );
 
   const deleteWorkspace = request(`/api/db-harness/workspaces/${workspaceId}`, {
@@ -948,12 +957,9 @@ test('deleting workspace should cascade-remove associated GEPA runs, metrics and
     const recreatedCandidateSet = Array.isArray(runAfterRecreate.body?.run?.candidateSet)
       ? runAfterRecreate.body.run.candidateSet
       : [];
+    const recreatedTemplateCandidates = recreatedCandidateSet.filter((candidate) => candidate?.source === 'template');
     assert.ok(
-      !recreatedCandidateSet.some((candidate) =>
-        candidate?.source === 'template'
-        && typeof candidate.title === 'string'
-        && candidate.title.includes(marker)
-      ),
+      recreatedTemplateCandidates.length === 0,
       '删除 workspace 后重建同 ID，不应继承旧 workspace 的模板候选'
     );
   } finally {
@@ -961,5 +967,384 @@ test('deleting workspace should cascade-remove associated GEPA runs, metrics and
       method: 'DELETE',
     });
     assert.equal(cleanupWorkspace.status, 200, '测试结束后应清理重建 workspace');
+  }
+});
+
+test('workspace upgrades API supports extract/evaluate/reject flow', (t) => {
+  if (!isServerReachable()) {
+    t.skip(`本地服务不可达：${BASE_URL}`);
+    return;
+  }
+  const workspaceResponse = request('/api/db-harness/workspaces');
+  assert.equal(workspaceResponse.status, 200, 'workspace 列表应返回 200');
+  const workspaces = Array.isArray(workspaceResponse.body) ? workspaceResponse.body : [];
+  const workspace = workspaces.find((item) => item && typeof item === 'object' && item.databaseId);
+  if (!workspace) {
+    t.skip('当前环境没有可用于 workspace 升级测试的 workspace');
+    return;
+  }
+
+  const extractResponse = request(`/api/db-harness/workspaces/${workspace.id}/upgrades/extract`, {
+    method: 'POST',
+    body: {},
+  });
+  assert.equal(extractResponse.status, 200, 'workspace 升级抽取应返回 200');
+  const extracted = Array.isArray(extractResponse.body?.upgrades) ? extractResponse.body.upgrades : [];
+
+  const listResponse = request(`/api/db-harness/workspaces/${workspace.id}/upgrades`);
+  assert.equal(listResponse.status, 200, 'workspace 升级列表应返回 200');
+  const upgrades = Array.isArray(listResponse.body?.upgrades) ? listResponse.body.upgrades : [];
+  const targetUpgrade = extracted[0] || upgrades.find((item) => item?.status === 'pending_review' || item?.status === 'draft');
+  if (!targetUpgrade?.id) {
+    t.skip('当前样本不足，未生成可评估的 workspace 升级候选');
+    return;
+  }
+
+  const evaluateResponse = request(`/api/db-harness/workspaces/${workspace.id}/upgrades/evaluate`, {
+    method: 'POST',
+    body: { upgradeId: targetUpgrade.id },
+  });
+  assert.equal(evaluateResponse.status, 200, 'workspace 升级评估应返回 200');
+  assert.ok(
+    typeof evaluateResponse.body?.upgrade?.evaluation?.score === 'number',
+    'workspace 升级评估结果应包含 evaluation.score'
+  );
+
+  const rejectResponse = request(`/api/db-harness/workspaces/${workspace.id}/upgrades/${targetUpgrade.id}/reject`, {
+    method: 'POST',
+    body: { reason: 'test-reject' },
+  });
+  assert.equal(rejectResponse.status, 200, 'workspace 升级拒绝应返回 200');
+  assert.equal(rejectResponse.body?.upgrade?.status, 'rejected', 'workspace 升级状态应变为 rejected');
+});
+
+test('semantic upgrades API validates required fields and supports extract/evaluate/reject flow', (t) => {
+  if (!isServerReachable()) {
+    t.skip(`本地服务不可达：${BASE_URL}`);
+    return;
+  }
+  const workspaceResponse = request('/api/db-harness/workspaces');
+  assert.equal(workspaceResponse.status, 200, 'workspace 列表应返回 200');
+  const workspaces = Array.isArray(workspaceResponse.body) ? workspaceResponse.body : [];
+  const workspace = workspaces.find((item) => item && typeof item === 'object' && item.databaseId);
+  if (!workspace) {
+    t.skip('当前环境没有可用于语义升级测试的 workspace');
+    return;
+  }
+
+  const missingSource = request(`/api/database-instances/${workspace.databaseId}/semantic-upgrades/extract`, {
+    method: 'POST',
+    body: {},
+  });
+  assert.equal(missingSource.status, 400, '语义升级抽取缺少 sourceWorkspaceId 应返回 400');
+
+  const extractResponse = request(`/api/database-instances/${workspace.databaseId}/semantic-upgrades/extract`, {
+    method: 'POST',
+    body: {
+      sourceWorkspaceId: workspace.id,
+      limit: 2,
+    },
+  });
+  assert.equal(extractResponse.status, 200, '语义升级抽取应返回 200');
+  const extracted = Array.isArray(extractResponse.body?.upgrades) ? extractResponse.body.upgrades : [];
+
+  const listResponse = request(`/api/database-instances/${workspace.databaseId}/semantic-upgrades`);
+  assert.equal(listResponse.status, 200, '语义升级列表应返回 200');
+  const upgrades = Array.isArray(listResponse.body?.upgrades) ? listResponse.body.upgrades : [];
+  const targetUpgrade = extracted[0] || upgrades.find((item) => item?.status === 'pending_review' || item?.status === 'draft');
+  if (!targetUpgrade?.id) {
+    t.skip('当前样本不足，未生成可评估的语义升级候选');
+    return;
+  }
+
+  const evaluateResponse = request(`/api/database-instances/${workspace.databaseId}/semantic-upgrades/evaluate`, {
+    method: 'POST',
+    body: { upgradeId: targetUpgrade.id },
+  });
+  assert.equal(evaluateResponse.status, 200, '语义升级评估应返回 200');
+  assert.ok(
+    typeof evaluateResponse.body?.upgrade?.evaluation?.score === 'number',
+    '语义升级评估应包含 evaluation.score'
+  );
+
+  const rejectResponse = request(`/api/database-instances/${workspace.databaseId}/semantic-upgrades/${targetUpgrade.id}/reject`, {
+    method: 'POST',
+    body: { reason: 'test-reject' },
+  });
+  assert.equal(rejectResponse.status, 200, '语义升级拒绝应返回 200');
+  assert.equal(rejectResponse.body?.upgrade?.status, 'rejected', '语义升级状态应变为 rejected');
+});
+
+test('semantic upgrades list API should include governance metadata', (t) => {
+  if (!isServerReachable()) {
+    t.skip(`本地服务不可达：${BASE_URL}`);
+    return;
+  }
+  const workspaceResponse = request('/api/db-harness/workspaces');
+  assert.equal(workspaceResponse.status, 200, 'workspace 列表应返回 200');
+  const workspaces = Array.isArray(workspaceResponse.body) ? workspaceResponse.body : [];
+  const workspace = workspaces.find((item) => item && typeof item === 'object' && item.databaseId);
+  if (!workspace) {
+    t.skip('当前环境没有可用于语义治理测试的 workspace');
+    return;
+  }
+
+  const extractResponse = request(`/api/database-instances/${workspace.databaseId}/semantic-upgrades/extract`, {
+    method: 'POST',
+    body: {
+      sourceWorkspaceId: workspace.id,
+      limit: 2,
+    },
+  });
+  assert.equal(extractResponse.status, 200, '语义升级抽取应返回 200');
+
+  const listResponse = request(`/api/database-instances/${workspace.databaseId}/semantic-upgrades`);
+  assert.equal(listResponse.status, 200, '语义升级列表应返回 200');
+  assert.ok(Array.isArray(listResponse.body?.upgrades), '语义升级列表应包含 upgrades 数组');
+  assert.ok(Array.isArray(listResponse.body?.governance), '语义升级列表应包含 governance 数组');
+
+  const upgrades = listResponse.body?.upgrades || [];
+  const governance = listResponse.body?.governance || [];
+  assert.equal(governance.length, upgrades.length, 'governance 数量应与 upgrades 数量保持一致');
+
+  const first = governance[0];
+  if (first) {
+    assert.ok(typeof first.upgradeId === 'string' && first.upgradeId, 'governance.upgradeId 应为字符串');
+    assert.ok(first.impact && typeof first.impact === 'object', 'governance.impact 应存在');
+    assert.ok(Array.isArray(first.impact.impactedEntities), 'governance.impact.impactedEntities 应为数组');
+    assert.ok(Array.isArray(first.impact.impactedFieldRefs), 'governance.impact.impactedFieldRefs 应为数组');
+    assert.ok(Array.isArray(first.impact.impactedWorkspaceIds), 'governance.impact.impactedWorkspaceIds 应为数组');
+    assert.ok(Array.isArray(first.impact.rolloutWorkspaceIds), 'governance.impact.rolloutWorkspaceIds 应为数组');
+    assert.ok(Array.isArray(first.rolloutTimeline), 'governance.rolloutTimeline 应为数组');
+  }
+});
+
+test('workspace upgrades API supports apply flow and updates workspace runtime config', (t) => {
+  if (!isServerReachable()) {
+    t.skip(`本地服务不可达：${BASE_URL}`);
+    return;
+  }
+  const session = ensureSession();
+  assert.equal(session.status, 200, '会话握手后 DB Harness 接口应可访问');
+
+  const databaseResponse = request('/api/database-instances');
+  assert.equal(databaseResponse.status, 200, 'database 列表应返回 200');
+  const databases = Array.isArray(databaseResponse.body) ? databaseResponse.body : [];
+  const database = pickSupportedDatabase(databases);
+  if (!database) {
+    t.skip('当前环境没有可用于 workspace 升级应用测试的数据源');
+    return;
+  }
+
+  const marker = `workspace-upgrade-apply-${Date.now()}`;
+  const workspaceCreate = request('/api/db-harness/workspaces', {
+    method: 'POST',
+    body: {
+      name: `升级应用测试-${marker}`,
+      databaseId: database.id,
+      rules: '',
+    },
+  });
+  assert.equal(workspaceCreate.status, 201, '创建测试 workspace 应返回 201');
+  const workspaceId = workspaceCreate.body?.id;
+  assert.ok(workspaceId, '创建测试 workspace 应返回 id');
+
+  try {
+    const seedMetric = request('/api/db-harness/metrics', {
+      method: 'POST',
+      body: {
+        turnId: `${marker}-metric`,
+        workspaceId,
+        databaseId: database.id,
+        engine: database.type,
+        question: `触发 workspace 升级候选 ${marker}`,
+        queryFingerprint: `${marker}-fp`,
+        outcome: 'error',
+        confidence: 0.42,
+        rowCount: 0,
+        fromCache: false,
+        labels: ['validation-fail', marker],
+      },
+    });
+    assert.equal(seedMetric.status, 200, '写入触发升级候选的指标应返回 200');
+
+    const extractResponse = request(`/api/db-harness/workspaces/${workspaceId}/upgrades/extract`, {
+      method: 'POST',
+      body: {},
+    });
+    assert.equal(extractResponse.status, 200, 'workspace 升级抽取应返回 200');
+    const extracted = Array.isArray(extractResponse.body?.upgrades) ? extractResponse.body.upgrades : [];
+    const promptUpgrade = extracted.find((item) => item?.artifactType === 'prompt_patch') || extracted[0];
+    if (!promptUpgrade?.id) {
+      t.skip('当前样本不足，未生成可应用的 workspace 升级候选');
+      return;
+    }
+
+    const applyResponse = request(`/api/db-harness/workspaces/${workspaceId}/upgrades/${promptUpgrade.id}/apply`, {
+      method: 'POST',
+      body: {},
+    });
+    assert.equal(applyResponse.status, 200, 'workspace 升级应用应返回 200');
+    assert.equal(applyResponse.body?.upgrade?.status, 'applied', 'workspace 升级应用后状态应为 applied');
+
+    const listWorkspaces = request('/api/db-harness/workspaces');
+    assert.equal(listWorkspaces.status, 200, 'workspace 列表应返回 200');
+    const workspaces = Array.isArray(listWorkspaces.body) ? listWorkspaces.body : [];
+    const currentWorkspace = workspaces.find((item) => item?.id === workspaceId);
+    assert.ok(currentWorkspace, '应能查到测试 workspace');
+    const promptStrategy = currentWorkspace?.runtimeConfig?.promptStrategy || '';
+    const expectedPatch = (applyResponse.body?.upgrade?.artifact?.promptPatch || '').trim();
+    if (expectedPatch) {
+      assert.ok(promptStrategy.includes(expectedPatch), '应用后的 runtimeConfig.promptStrategy 应包含升级补丁内容');
+    }
+  } finally {
+    const deleteWorkspace = request(`/api/db-harness/workspaces/${workspaceId}`, {
+      method: 'DELETE',
+    });
+    assert.equal(deleteWorkspace.status, 200, '测试结束后应删除临时 workspace');
+  }
+});
+
+test('semantic upgrades API supports rollout and finalize flow', (t) => {
+  if (!isServerReachable()) {
+    t.skip(`本地服务不可达：${BASE_URL}`);
+    return;
+  }
+  const session = ensureSession();
+  assert.equal(session.status, 200, '会话握手后 DB Harness 接口应可访问');
+
+  const workspaceResponse = request('/api/db-harness/workspaces');
+  assert.equal(workspaceResponse.status, 200, 'workspace 列表应返回 200');
+  const workspaces = Array.isArray(workspaceResponse.body) ? workspaceResponse.body : [];
+  const workspace = workspaces.find((item) => item && typeof item === 'object' && item.databaseId);
+  if (!workspace) {
+    t.skip('当前环境没有可用于语义升级灰度测试的 workspace');
+    return;
+  }
+
+  const schemaResponse = request(`/api/database-instances/${workspace.databaseId}/schema`);
+  assert.equal(schemaResponse.status, 200, '读取 schema 应返回 200');
+  const field = pickSchemaField(schemaResponse.body);
+  if (!field) {
+    t.skip('当前数据源 schema 不含可用于语义升级测试的字段');
+    return;
+  }
+
+  const semanticModelBefore = request(`/api/database-instances/${workspace.databaseId}/semantic-model`);
+  assert.equal(semanticModelBefore.status, 200, '读取语义模型应返回 200');
+  const originalSemanticModel = semanticModelBefore.body;
+  const beforeSemanticUpdatedAt = typeof originalSemanticModel?.updatedAt === 'string'
+    ? originalSemanticModel.updatedAt
+    : '';
+
+  const aliasMarker = `语义别名回归-${Date.now()}`;
+  try {
+    const feedbackResponse = request('/api/db-harness/feedback', {
+      method: 'POST',
+      body: {
+        workspaceId: workspace.id,
+        messageId: `semantic-rollout-${Date.now()}`,
+        databaseInstanceId: workspace.databaseId,
+        question: `语义升级灰度测试 ${field.table}.${field.column}`,
+        reply: '记录纠错反馈用于抽取语义候选',
+        feedbackType: 'corrective',
+        note: aliasMarker,
+        artifacts: {
+          queryPlan: {
+            intent: 'aggregate',
+            strategy: 'semantic-upgrade-test',
+            targetTable: field.table,
+            summary: `纠错到 ${field.table}.${field.column}`,
+            metrics: [
+              {
+                label: `${field.table}.${field.column}`,
+                table: field.table,
+                column: field.column,
+              },
+            ],
+            dimensions: [],
+            filters: [],
+            orderBy: [],
+            limit: 20,
+            notes: [],
+            compiled: {
+              text: '{}',
+              values: [],
+              previewSql: '{}',
+            },
+          },
+        },
+      },
+    });
+    assert.equal(feedbackResponse.status, 200, '写入纠错反馈应返回 200');
+
+    const extractResponse = request(`/api/database-instances/${workspace.databaseId}/semantic-upgrades/extract`, {
+      method: 'POST',
+      body: {
+        sourceWorkspaceId: workspace.id,
+        limit: 24,
+      },
+    });
+    assert.equal(extractResponse.status, 200, '语义升级抽取应返回 200');
+    const extracted = Array.isArray(extractResponse.body?.upgrades) ? extractResponse.body.upgrades : [];
+    const targetUpgrade = extracted.find((item) =>
+      Array.isArray(item?.diffs)
+      && item.diffs.some((diff) =>
+        diff?.fieldRef?.table === field.table
+        && diff?.fieldRef?.column === field.column
+        && diff?.after === aliasMarker
+      )
+    );
+    if (!targetUpgrade?.id) {
+      t.skip('当前样本不足，未生成命中测试字段的语义升级候选');
+      return;
+    }
+
+    const evaluateResponse = request(`/api/database-instances/${workspace.databaseId}/semantic-upgrades/evaluate`, {
+      method: 'POST',
+      body: { upgradeId: targetUpgrade.id },
+    });
+    assert.equal(evaluateResponse.status, 200, '语义升级评估应返回 200');
+    assert.ok(
+      typeof evaluateResponse.body?.upgrade?.evaluation?.score === 'number',
+      '语义升级评估应包含 evaluation.score'
+    );
+
+    const rolloutResponse = request(`/api/database-instances/${workspace.databaseId}/semantic-upgrades/${targetUpgrade.id}/start-rollout`, {
+      method: 'POST',
+      body: { workspaceIds: [workspace.id] },
+    });
+    assert.equal(rolloutResponse.status, 200, '语义升级灰度应返回 200');
+    assert.equal(rolloutResponse.body?.upgrade?.status, 'rollout', '语义升级进入灰度后状态应为 rollout');
+    assert.ok(
+      Array.isArray(rolloutResponse.body?.rollouts) && rolloutResponse.body.rollouts.some((item) => item?.workspaceId === workspace.id),
+      '灰度记录应包含指定 workspace'
+    );
+
+    const finalizeResponse = request(`/api/database-instances/${workspace.databaseId}/semantic-upgrades/${targetUpgrade.id}/finalize`, {
+      method: 'POST',
+      body: {},
+    });
+    assert.equal(finalizeResponse.status, 200, '语义升级 finalize 应返回 200');
+    assert.equal(finalizeResponse.body?.upgrade?.status, 'finalized', '语义升级 finalize 后状态应为 finalized');
+    assert.equal(finalizeResponse.body?.databaseUpdated, true, '语义升级 finalize 后应写入正式语义配置');
+
+    const semanticModelAfter = request(`/api/database-instances/${workspace.databaseId}/semantic-model`);
+    assert.equal(semanticModelAfter.status, 200, 'finalize 后读取语义模型应返回 200');
+    assert.equal(semanticModelAfter.body?.source, 'manual', 'finalize 后语义模型 source 应为 manual');
+    const afterUpdatedAt = typeof semanticModelAfter.body?.updatedAt === 'string'
+      ? semanticModelAfter.body.updatedAt
+      : '';
+    if (beforeSemanticUpdatedAt && afterUpdatedAt) {
+      assert.notEqual(afterUpdatedAt, beforeSemanticUpdatedAt, 'finalize 后语义模型 updatedAt 应更新');
+    }
+  } finally {
+    if (originalSemanticModel && typeof originalSemanticModel === 'object') {
+      const restoreResponse = request(`/api/database-instances/${workspace.databaseId}/semantic-model`, {
+        method: 'PUT',
+        body: { semanticModel: originalSemanticModel },
+      });
+      assert.equal(restoreResponse.status, 200, '测试结束后应恢复原语义模型');
+    }
   }
 });

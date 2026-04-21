@@ -34,6 +34,7 @@ import { nanoid } from 'nanoid';
 import { sanitizeAIModelProfileInput } from './ai-models';
 import { getEffectiveDatabaseMetricMappings, sanitizeDatabaseSemanticModel } from './database-instances';
 import type {
+  DBHarnessAppliedUpgradeSnapshot,
   DBHarnessAgentTelemetry,
   DBHarnessChatMessage,
   DBHarnessGepaCandidate,
@@ -46,8 +47,12 @@ import type {
   DBHarnessPromptTemplateRecord,
   DBHarnessQueryMetricRecord,
   DBHarnessRuntimeConfig,
+  DBHarnessSemanticOverlay,
+  DBHarnessSemanticUpgradeCandidate,
+  DBHarnessSemanticUpgradeRollout,
   DBHarnessSelectedModelInput,
   DBHarnessSessionRecord,
+  DBHarnessUpgradeCandidate,
   DBHarnessWorkspaceRecord,
   DBMultiAgentRole,
 } from './db-harness/core/types';
@@ -305,6 +310,11 @@ function initializeDb(database: Database.Database) {
       from_cache INTEGER NOT NULL DEFAULT 0,
       row_count INTEGER NOT NULL DEFAULT 0,
       agent_telemetry_json TEXT DEFAULT '{}',
+      applied_upgrade_ids_json TEXT DEFAULT '[]',
+      semantic_overlay_ids_json TEXT DEFAULT '[]',
+      validation_score REAL DEFAULT NULL,
+      feedback_label TEXT DEFAULT '',
+      retry_used INTEGER NOT NULL DEFAULT 0,
       labels_json TEXT DEFAULT '[]',
       error_message TEXT DEFAULT '',
       created_at TEXT NOT NULL,
@@ -350,6 +360,59 @@ function initializeDb(database: Database.Database) {
       approved_at TEXT DEFAULT '',
       approved_by TEXT DEFAULT '',
       applied_at TEXT DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS db_harness_workspace_upgrades (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      target TEXT NOT NULL,
+      source_turn_id TEXT NOT NULL,
+      artifact_type TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'draft',
+      confidence REAL NOT NULL DEFAULT 0,
+      title TEXT NOT NULL,
+      description TEXT DEFAULT '',
+      artifact_json TEXT DEFAULT '{}',
+      evaluation_json TEXT DEFAULT '{}',
+      rejected_reason TEXT DEFAULT '',
+      applied_at TEXT DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS db_harness_semantic_upgrades (
+      id TEXT PRIMARY KEY,
+      database_id TEXT NOT NULL,
+      source_workspace_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'draft',
+      confidence REAL NOT NULL DEFAULT 0,
+      title TEXT NOT NULL,
+      description TEXT DEFAULT '',
+      diffs_json TEXT DEFAULT '[]',
+      evidence_json TEXT DEFAULT '[]',
+      evaluation_json TEXT DEFAULT '{}',
+      rejected_reason TEXT DEFAULT '',
+      finalized_at TEXT DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS db_harness_semantic_upgrade_rollouts (
+      id TEXT PRIMARY KEY,
+      upgrade_id TEXT NOT NULL,
+      database_id TEXT NOT NULL,
+      workspace_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      started_at TEXT NOT NULL,
+      ended_at TEXT DEFAULT '',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -450,6 +513,54 @@ function initializeDb(database: Database.Database) {
   } catch (err) {
     if (err instanceof Error && !err.message.includes('duplicate column name')) {
       console.error('Migration error db_harness_query_metrics.labels_json:', err);
+    }
+  }
+
+  try {
+    database.exec(`ALTER TABLE db_harness_query_metrics ADD COLUMN applied_upgrade_ids_json TEXT DEFAULT '[]';`);
+  } catch (err) {
+    if (err instanceof Error && !err.message.includes('duplicate column name')) {
+      console.error('Migration error db_harness_query_metrics.applied_upgrade_ids_json:', err);
+    }
+  }
+
+  try {
+    database.exec(`ALTER TABLE db_harness_query_metrics ADD COLUMN semantic_overlay_ids_json TEXT DEFAULT '[]';`);
+  } catch (err) {
+    if (err instanceof Error && !err.message.includes('duplicate column name')) {
+      console.error('Migration error db_harness_query_metrics.semantic_overlay_ids_json:', err);
+    }
+  }
+
+  try {
+    database.exec(`ALTER TABLE db_harness_semantic_upgrades ADD COLUMN evidence_json TEXT DEFAULT '[]';`);
+  } catch (err) {
+    if (err instanceof Error && !err.message.includes('duplicate column name')) {
+      console.error('Migration error db_harness_semantic_upgrades.evidence_json:', err);
+    }
+  }
+
+  try {
+    database.exec(`ALTER TABLE db_harness_query_metrics ADD COLUMN validation_score REAL DEFAULT NULL;`);
+  } catch (err) {
+    if (err instanceof Error && !err.message.includes('duplicate column name')) {
+      console.error('Migration error db_harness_query_metrics.validation_score:', err);
+    }
+  }
+
+  try {
+    database.exec(`ALTER TABLE db_harness_query_metrics ADD COLUMN feedback_label TEXT DEFAULT '';`);
+  } catch (err) {
+    if (err instanceof Error && !err.message.includes('duplicate column name')) {
+      console.error('Migration error db_harness_query_metrics.feedback_label:', err);
+    }
+  }
+
+  try {
+    database.exec(`ALTER TABLE db_harness_query_metrics ADD COLUMN retry_used INTEGER NOT NULL DEFAULT 0;`);
+  } catch (err) {
+    if (err instanceof Error && !err.message.includes('duplicate column name')) {
+      console.error('Migration error db_harness_query_metrics.retry_used:', err);
     }
   }
 
@@ -1466,7 +1577,15 @@ export function updateDatabaseInstanceSemanticModel(id: string, semanticModel: D
 
 export function deleteDatabaseInstance(id: string): boolean {
   const db = getDb();
-  const result = db.prepare('DELETE FROM database_instances WHERE id = ?').run(id);
+  const deleteInstance = db.prepare('DELETE FROM database_instances WHERE id = ?');
+  const deleteSemanticUpgrades = db.prepare('DELETE FROM db_harness_semantic_upgrades WHERE database_id = ?');
+  const deleteSemanticRollouts = db.prepare('DELETE FROM db_harness_semantic_upgrade_rollouts WHERE database_id = ?');
+  const tx = db.transaction((databaseId: string) => {
+    deleteSemanticRollouts.run(databaseId);
+    deleteSemanticUpgrades.run(databaseId);
+    return deleteInstance.run(databaseId);
+  });
+  const result = tx(id);
   if (result.changes > 0) {
     invalidateWorkspaceContextCache({ databaseId: id });
   }
@@ -1581,6 +1700,12 @@ export function getDBHarnessWorkspaceById(id: string): DBHarnessWorkspaceRecord 
   return rowToDBHarnessWorkspace(workspaceRow, sessions);
 }
 
+export function listDBHarnessWorkspacesByDatabaseId(databaseId: string): DBHarnessWorkspaceRecord[] {
+  const normalized = databaseId.trim();
+  if (!normalized) return [];
+  return getDBHarnessWorkspaces().filter((workspace) => (workspace.databaseId || '') === normalized);
+}
+
 export function createDBHarnessWorkspace(input: { id?: string; name: string; databaseId?: string; rules?: string; runtimeConfig?: DBHarnessRuntimeConfig }): DBHarnessWorkspaceRecord {
   const db = getDb();
   const now = new Date().toISOString();
@@ -1663,6 +1788,8 @@ export function deleteDBHarnessWorkspace(id: string): boolean {
   const deleteMetrics = db.prepare('DELETE FROM db_harness_query_metrics WHERE workspace_id = ?');
   const deleteTemplates = db.prepare('DELETE FROM db_harness_prompt_templates WHERE workspace_id = ?');
   const deleteGepaRuns = db.prepare('DELETE FROM db_harness_gepa_runs WHERE workspace_id = ?');
+  const deleteWorkspaceUpgrades = db.prepare('DELETE FROM db_harness_workspace_upgrades WHERE workspace_id = ?');
+  const deleteSemanticRollouts = db.prepare('DELETE FROM db_harness_semantic_upgrade_rollouts WHERE workspace_id = ?');
   const deleteSessions = db.prepare('DELETE FROM db_harness_sessions WHERE workspace_id = ?');
   const deleteWorkspace = db.prepare('DELETE FROM db_harness_workspaces WHERE id = ?');
   const tx = db.transaction((workspaceId: string) => {
@@ -1670,6 +1797,8 @@ export function deleteDBHarnessWorkspace(id: string): boolean {
     deleteMetrics.run(workspaceId);
     deleteTemplates.run(workspaceId);
     deleteGepaRuns.run(workspaceId);
+    deleteWorkspaceUpgrades.run(workspaceId);
+    deleteSemanticRollouts.run(workspaceId);
     deleteSessions.run(workspaceId);
     return deleteWorkspace.run(workspaceId);
   });
@@ -1829,6 +1958,10 @@ function rowToDBHarnessKnowledgeMemoryEntry(row: Record<string, unknown>): DBHar
     : undefined;
   return {
     key: (row.memory_key as string) || '',
+    workspaceId: (row.workspace_id as string) || '',
+    databaseId: (row.database_id as string) || '',
+    sessionId: (row.session_id as string) || '',
+    messageId: (row.message_id as string) || '',
     summary: (row.summary as string) || '',
     tags: parseJsonArray<string>(row.tags_json).slice(0, 24),
     source: row.source === 'schema' ? 'schema' : 'feedback',
@@ -1883,8 +2016,75 @@ function rowToDBHarnessQueryMetricRecord(row: Record<string, unknown>): DBHarnes
     fromCache: Number(row.from_cache || 0) > 0,
     rowCount: Number(row.row_count || 0),
     agentTelemetry,
+    appliedUpgradeIds: parseJsonArray<string>(row.applied_upgrade_ids_json).slice(0, 48),
+    semanticOverlayIds: parseJsonArray<string>(row.semantic_overlay_ids_json).slice(0, 48),
+    validationScore: row.validation_score === null || row.validation_score === undefined
+      ? undefined
+      : Number(row.validation_score),
+    feedbackLabel: row.feedback_label === 'positive'
+      ? 'positive'
+      : row.feedback_label === 'corrective'
+        ? 'corrective'
+        : 'none',
+    retryUsed: Number(row.retry_used || 0) > 0,
     labels: parseJsonArray<string>(row.labels_json).slice(0, 24),
     errorMessage: (row.error_message as string) || undefined,
+    createdAt: (row.created_at as string) || '',
+    updatedAt: (row.updated_at as string) || '',
+  };
+}
+
+function rowToDBHarnessWorkspaceUpgrade(row: Record<string, unknown>): DBHarnessUpgradeCandidate {
+  return {
+    id: (row.id as string) || '',
+    workspaceId: (row.workspace_id as string) || '',
+    target: ((row.target as string) || 'orchestrator') as DBHarnessUpgradeCandidate['target'],
+    sourceTurnId: (row.source_turn_id as string) || '',
+    artifactType: ((row.artifact_type as string) || 'policy_patch') as DBHarnessUpgradeCandidate['artifactType'],
+    status: ((row.status as string) || 'draft') as DBHarnessUpgradeCandidate['status'],
+    confidence: Number(row.confidence || 0),
+    title: (row.title as string) || '',
+    description: (row.description as string) || '',
+    artifact: parseJsonObject<DBHarnessUpgradeCandidate['artifact']>(row.artifact_json, {
+      type: 'policy_patch',
+      summary: '',
+    }),
+    evaluation: parseJsonObject<DBHarnessUpgradeCandidate['evaluation'] | undefined>(row.evaluation_json, undefined),
+    rejectedReason: (row.rejected_reason as string) || undefined,
+    appliedAt: (row.applied_at as string) || undefined,
+    createdAt: (row.created_at as string) || '',
+    updatedAt: (row.updated_at as string) || '',
+  };
+}
+
+function rowToDBHarnessSemanticUpgrade(row: Record<string, unknown>): DBHarnessSemanticUpgradeCandidate {
+  return {
+    id: (row.id as string) || '',
+    databaseId: (row.database_id as string) || '',
+    sourceWorkspaceId: (row.source_workspace_id as string) || '',
+    status: ((row.status as string) || 'draft') as DBHarnessSemanticUpgradeCandidate['status'],
+    confidence: Number(row.confidence || 0),
+    title: (row.title as string) || '',
+    description: (row.description as string) || '',
+    diffs: parseJsonArray<DBHarnessSemanticUpgradeCandidate['diffs'][number]>(row.diffs_json),
+    evidence: parseJsonArray<NonNullable<DBHarnessSemanticUpgradeCandidate['evidence']>[number]>(row.evidence_json),
+    evaluation: parseJsonObject<DBHarnessSemanticUpgradeCandidate['evaluation'] | undefined>(row.evaluation_json, undefined),
+    rejectedReason: (row.rejected_reason as string) || undefined,
+    finalizedAt: (row.finalized_at as string) || undefined,
+    createdAt: (row.created_at as string) || '',
+    updatedAt: (row.updated_at as string) || '',
+  };
+}
+
+function rowToDBHarnessSemanticUpgradeRollout(row: Record<string, unknown>): DBHarnessSemanticUpgradeRollout {
+  return {
+    id: (row.id as string) || '',
+    upgradeId: (row.upgrade_id as string) || '',
+    databaseId: (row.database_id as string) || '',
+    workspaceId: (row.workspace_id as string) || '',
+    status: ((row.status as string) || 'active') as DBHarnessSemanticUpgradeRollout['status'],
+    startedAt: (row.started_at as string) || '',
+    endedAt: (row.ended_at as string) || undefined,
     createdAt: (row.created_at as string) || '',
     updatedAt: (row.updated_at as string) || '',
   };
@@ -2156,11 +2356,16 @@ export function upsertDBHarnessQueryMetric(input: Omit<DBHarnessQueryMetricRecor
       from_cache,
       row_count,
       agent_telemetry_json,
+      applied_upgrade_ids_json,
+      semantic_overlay_ids_json,
+      validation_score,
+      feedback_label,
+      retry_used,
       labels_json,
       error_message,
       created_at,
       updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     input.turnId,
@@ -2176,6 +2381,11 @@ export function upsertDBHarnessQueryMetric(input: Omit<DBHarnessQueryMetricRecor
     input.fromCache ? 1 : 0,
     Math.max(0, Math.trunc(input.rowCount || 0)),
     JSON.stringify(input.agentTelemetry || {}),
+    JSON.stringify(input.appliedUpgradeIds || []),
+    JSON.stringify(input.semanticOverlayIds || []),
+    Number.isFinite(input.validationScore) ? input.validationScore : null,
+    input.feedbackLabel && input.feedbackLabel !== 'none' ? input.feedbackLabel : '',
+    input.retryUsed ? 1 : 0,
     JSON.stringify(sanitizedMetric.labels),
     sanitizedMetric.errorMessage || '',
     createdAt,
@@ -2189,6 +2399,283 @@ export function upsertDBHarnessQueryMetric(input: Omit<DBHarnessQueryMetricRecor
   `).get(input.turnId);
 
   return rowToDBHarnessQueryMetricRecord(row as Record<string, unknown>);
+}
+
+export function listDBHarnessWorkspaceUpgrades(input: {
+  workspaceId: string;
+  status?: DBHarnessUpgradeCandidate['status'];
+  limit?: number;
+}): DBHarnessUpgradeCandidate[] {
+  const db = getDb();
+  const limit = Math.max(1, Math.min(input.limit ?? 120, 240));
+  const status = input.status?.trim() || '';
+  const rows = db.prepare(`
+    SELECT *
+    FROM db_harness_workspace_upgrades
+    WHERE workspace_id = ?
+      AND (? = '' OR status = ?)
+    ORDER BY updated_at DESC, created_at DESC
+    LIMIT ?
+  `).all(input.workspaceId.trim(), status, status, limit);
+  return rows.map((row) => rowToDBHarnessWorkspaceUpgrade(row as Record<string, unknown>));
+}
+
+export function getDBHarnessWorkspaceUpgradeById(id: string): DBHarnessUpgradeCandidate | null {
+  const db = getDb();
+  const row = db.prepare(`
+    SELECT *
+    FROM db_harness_workspace_upgrades
+    WHERE id = ?
+    LIMIT 1
+  `).get(id) as Record<string, unknown> | undefined;
+  return row ? rowToDBHarnessWorkspaceUpgrade(row) : null;
+}
+
+export function upsertDBHarnessWorkspaceUpgrade(input: Omit<DBHarnessUpgradeCandidate, 'createdAt' | 'updatedAt'> & Partial<Pick<DBHarnessUpgradeCandidate, 'createdAt' | 'updatedAt'>>): DBHarnessUpgradeCandidate {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const current = getDBHarnessWorkspaceUpgradeById(input.id);
+  db.prepare(`
+    INSERT OR REPLACE INTO db_harness_workspace_upgrades (
+      id,
+      workspace_id,
+      target,
+      source_turn_id,
+      artifact_type,
+      status,
+      confidence,
+      title,
+      description,
+      artifact_json,
+      evaluation_json,
+      rejected_reason,
+      applied_at,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    input.id,
+    input.workspaceId.trim(),
+    input.target,
+    input.sourceTurnId.trim(),
+    input.artifactType,
+    input.status,
+    Number.isFinite(input.confidence) ? input.confidence : 0,
+    redactSensitiveText(input.title || ''),
+    redactSensitiveText(input.description || ''),
+    JSON.stringify(input.artifact || {}),
+    JSON.stringify(input.evaluation || {}),
+    redactSensitiveText(input.rejectedReason || ''),
+    input.appliedAt || '',
+    input.createdAt || current?.createdAt || now,
+    input.updatedAt || now
+  );
+  invalidateWorkspaceContextCache({ workspaceId: input.workspaceId });
+  return getDBHarnessWorkspaceUpgradeById(input.id)!;
+}
+
+export function listDBHarnessAppliedUpgradeSnapshots(input: {
+  workspaceId: string;
+  limit?: number;
+}): DBHarnessAppliedUpgradeSnapshot[] {
+  return listDBHarnessWorkspaceUpgrades({
+    workspaceId: input.workspaceId,
+    status: 'applied',
+    limit: input.limit || 24,
+  }).map((item) => ({
+    upgradeId: item.id,
+    workspaceId: item.workspaceId,
+    target: item.target,
+    artifactType: item.artifactType,
+    title: item.title,
+    confidence: item.confidence,
+    appliedAt: item.appliedAt || item.updatedAt,
+  }));
+}
+
+export function listDBHarnessSemanticUpgrades(input: {
+  databaseId: string;
+  status?: DBHarnessSemanticUpgradeCandidate['status'];
+  limit?: number;
+}): DBHarnessSemanticUpgradeCandidate[] {
+  const db = getDb();
+  const limit = Math.max(1, Math.min(input.limit ?? 120, 240));
+  const status = input.status?.trim() || '';
+  const rows = db.prepare(`
+    SELECT *
+    FROM db_harness_semantic_upgrades
+    WHERE database_id = ?
+      AND (? = '' OR status = ?)
+    ORDER BY updated_at DESC, created_at DESC
+    LIMIT ?
+  `).all(input.databaseId.trim(), status, status, limit);
+  return rows.map((row) => rowToDBHarnessSemanticUpgrade(row as Record<string, unknown>));
+}
+
+export function getDBHarnessSemanticUpgradeById(id: string): DBHarnessSemanticUpgradeCandidate | null {
+  const db = getDb();
+  const row = db.prepare(`
+    SELECT *
+    FROM db_harness_semantic_upgrades
+    WHERE id = ?
+    LIMIT 1
+  `).get(id) as Record<string, unknown> | undefined;
+  return row ? rowToDBHarnessSemanticUpgrade(row) : null;
+}
+
+export function upsertDBHarnessSemanticUpgrade(input: Omit<DBHarnessSemanticUpgradeCandidate, 'createdAt' | 'updatedAt'> & Partial<Pick<DBHarnessSemanticUpgradeCandidate, 'createdAt' | 'updatedAt'>>): DBHarnessSemanticUpgradeCandidate {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const current = getDBHarnessSemanticUpgradeById(input.id);
+  db.prepare(`
+    INSERT OR REPLACE INTO db_harness_semantic_upgrades (
+      id,
+      database_id,
+      source_workspace_id,
+      status,
+      confidence,
+      title,
+      description,
+      diffs_json,
+      evidence_json,
+      evaluation_json,
+      rejected_reason,
+      finalized_at,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    input.id,
+    input.databaseId.trim(),
+    input.sourceWorkspaceId.trim(),
+    input.status,
+    Number.isFinite(input.confidence) ? input.confidence : 0,
+    redactSensitiveText(input.title || ''),
+    redactSensitiveText(input.description || ''),
+    JSON.stringify(input.diffs || []),
+    JSON.stringify(input.evidence || []),
+    JSON.stringify(input.evaluation || {}),
+    redactSensitiveText(input.rejectedReason || ''),
+    input.finalizedAt || '',
+    input.createdAt || current?.createdAt || now,
+    input.updatedAt || now
+  );
+  invalidateWorkspaceContextCache({ databaseId: input.databaseId });
+  return getDBHarnessSemanticUpgradeById(input.id)!;
+}
+
+export function listDBHarnessSemanticUpgradeRollouts(input: {
+  databaseId?: string;
+  workspaceId?: string;
+  upgradeId?: string;
+  status?: DBHarnessSemanticUpgradeRollout['status'];
+  limit?: number;
+}): DBHarnessSemanticUpgradeRollout[] {
+  const db = getDb();
+  const limit = Math.max(1, Math.min(input.limit ?? 240, 400));
+  const rows = db.prepare(`
+    SELECT *
+    FROM db_harness_semantic_upgrade_rollouts
+    WHERE (? = '' OR database_id = ?)
+      AND (? = '' OR workspace_id = ?)
+      AND (? = '' OR upgrade_id = ?)
+      AND (? = '' OR status = ?)
+    ORDER BY updated_at DESC, created_at DESC
+    LIMIT ?
+  `).all(
+    input.databaseId?.trim() || '',
+    input.databaseId?.trim() || '',
+    input.workspaceId?.trim() || '',
+    input.workspaceId?.trim() || '',
+    input.upgradeId?.trim() || '',
+    input.upgradeId?.trim() || '',
+    input.status?.trim() || '',
+    input.status?.trim() || '',
+    limit
+  );
+  return rows.map((row) => rowToDBHarnessSemanticUpgradeRollout(row as Record<string, unknown>));
+}
+
+export function upsertDBHarnessSemanticUpgradeRollout(input: Omit<DBHarnessSemanticUpgradeRollout, 'createdAt' | 'updatedAt'> & Partial<Pick<DBHarnessSemanticUpgradeRollout, 'createdAt' | 'updatedAt'>>): DBHarnessSemanticUpgradeRollout {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const current = db.prepare(`
+    SELECT *
+    FROM db_harness_semantic_upgrade_rollouts
+    WHERE id = ?
+    LIMIT 1
+  `).get(input.id) as Record<string, unknown> | undefined;
+  db.prepare(`
+    INSERT OR REPLACE INTO db_harness_semantic_upgrade_rollouts (
+      id,
+      upgrade_id,
+      database_id,
+      workspace_id,
+      status,
+      started_at,
+      ended_at,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    input.id,
+    input.upgradeId.trim(),
+    input.databaseId.trim(),
+    input.workspaceId.trim(),
+    input.status,
+    input.startedAt,
+    input.endedAt || '',
+    input.createdAt || (current?.created_at as string) || now,
+    input.updatedAt || now
+  );
+  invalidateWorkspaceContextCache({ workspaceId: input.workspaceId, databaseId: input.databaseId });
+  const row = db.prepare(`
+    SELECT *
+    FROM db_harness_semantic_upgrade_rollouts
+    WHERE id = ?
+    LIMIT 1
+  `).get(input.id) as Record<string, unknown>;
+  return rowToDBHarnessSemanticUpgradeRollout(row);
+}
+
+export function listDBHarnessSemanticOverlays(input: {
+  databaseId: string;
+  workspaceId: string;
+}): DBHarnessSemanticOverlay[] {
+  const rollouts = listDBHarnessSemanticUpgradeRollouts({
+    databaseId: input.databaseId,
+    workspaceId: input.workspaceId,
+    status: 'active',
+    limit: 200,
+  });
+  if (rollouts.length === 0) return [];
+  const upgradesById = new Map<string, DBHarnessSemanticUpgradeCandidate>();
+  rollouts.forEach((rollout) => {
+    const upgrade = getDBHarnessSemanticUpgradeById(rollout.upgradeId);
+    if (upgrade && upgrade.status === 'rollout') {
+      upgradesById.set(upgrade.id, upgrade);
+    }
+  });
+  const overlays: DBHarnessSemanticOverlay[] = [];
+  rollouts.forEach((rollout) => {
+    const upgrade = upgradesById.get(rollout.upgradeId);
+    if (!upgrade) return;
+    upgrade.diffs.forEach((diff) => {
+      overlays.push({
+        upgradeId: upgrade.id,
+        databaseId: input.databaseId,
+        workspaceId: input.workspaceId,
+        changeType: diff.changeType,
+        table: diff.fieldRef.table,
+        column: diff.fieldRef.column,
+        before: diff.before,
+        after: diff.after,
+        status: rollout.status,
+        startedAt: rollout.startedAt,
+      });
+    });
+  });
+  return overlays;
 }
 
 function rowToDBHarnessGepaRun(row: Record<string, unknown>): DBHarnessGepaRun {

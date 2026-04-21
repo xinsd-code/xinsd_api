@@ -56,6 +56,11 @@ export function buildDBHarnessQueryMetricRecord(input: CollectDBHarnessQueryMetr
     fromCache: input.response.fromCache === true,
     rowCount,
     agentTelemetry: input.agentTelemetry,
+    appliedUpgradeIds: (input.workspace.activeUpgrades || []).map((item) => item.upgradeId).slice(0, 24),
+    semanticOverlayIds: (input.workspace.semanticOverlays || []).map((item) => item.upgradeId).slice(0, 24),
+    validationScore: input.response.artifacts?.validation?.score,
+    feedbackLabel: 'none',
+    retryUsed: input.trace.some((step) => step.detail.includes('空结果重试') || step.detail.includes('retry')),
     labels: [
       input.response.outcome,
       input.response.fromCache ? 'from-cache' : 'live',

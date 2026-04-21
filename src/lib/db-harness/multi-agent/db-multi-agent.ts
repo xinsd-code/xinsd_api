@@ -509,6 +509,8 @@ export class DBMultiAgent {
           catalogOverview,
           semanticOverview,
           validation,
+          appliedUpgrades: workspace.activeUpgrades || [],
+          semanticOverlays: workspace.semanticOverlays || [],
         },
         followUps: analysisResult.followUps,
       };
